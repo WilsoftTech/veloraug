@@ -36,6 +36,8 @@ export interface TitleSummary {
   releaseYear: number | null;
   /** TMDB average on a 0–10 scale, or null when unrated. */
   rating: number | null;
+  /** The TMDB title this was matched to, if any. Links legacy TMDB-id saves to it. */
+  tmdbId: number | null;
   vjs: VjSummary[];
 }
 

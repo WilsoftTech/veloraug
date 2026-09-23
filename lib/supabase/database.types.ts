@@ -31,17 +31,26 @@ export type Database = {
         Relationships: [];
       };
       watchlist_items: {
+        // watchlist_items_identity_check (20260922080911): a row is either a
+        // catalogue save (movie_id or series_id) or a legacy TMDB save
+        // (tmdb_id with media_type movie/tv). A legacy insert that maps to the
+        // catalogue is normalized by the insert trigger and keeps its tmdb_id.
         Row: {
           id: string;
           user_id: string;
-          tmdb_id: number;
-          media_type: "movie" | "tv";
+          movie_id: number | null;
+          series_id: number | null;
+          tmdb_id: number | null;
+          media_type: "movie" | "tv" | "series";
           created_at: string;
         };
         // user_id defaults to the caller in the database, so it is never sent.
+        // Which id goes with which media_type is enforced by the identity check.
         Insert: {
-          tmdb_id: number;
-          media_type: "movie" | "tv";
+          movie_id?: number;
+          series_id?: number;
+          tmdb_id?: number;
+          media_type: "movie" | "tv" | "series";
         };
         Update: never;
         Relationships: [];

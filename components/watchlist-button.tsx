@@ -2,8 +2,8 @@
 
 import { Check, Plus } from "lucide-react";
 import { buttonClass, type ButtonVariant } from "@/components/button";
-import { useWatchlist, watchlistKey, type MutationError } from "@/lib/watchlist";
-import type { MediaSummary } from "@/types/media";
+import { sameTitle, useWatchlist, type MutationError } from "@/lib/watchlist";
+import type { WatchlistItem } from "@/types/watchlist";
 
 /** What a person sees when a change to My List had to be undone. */
 export const MUTATION_MESSAGES: Record<MutationError, string> = {
@@ -15,7 +15,7 @@ export const MUTATION_MESSAGES: Record<MutationError, string> = {
 };
 
 interface WatchlistButtonProps {
-  item: MediaSummary;
+  item: WatchlistItem;
   variant?: ButtonVariant;
   className?: string;
 }
@@ -24,7 +24,7 @@ export function WatchlistButton({ item, variant = "secondary", className }: Watc
   const { has, toggle, mutationError } = useWatchlist();
   const saved = has(item);
   const Icon = saved ? Check : Plus;
-  const failure = mutationError?.key === watchlistKey(item) ? mutationError.error : null;
+  const failure = mutationError && sameTitle(mutationError.item, item) ? mutationError.error : null;
 
   return (
     <>

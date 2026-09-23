@@ -26,12 +26,15 @@ export const signUpSchema = z.object({
 /** Per-user cap on saved titles. Enforced by a database trigger; this mirrors it for the import payload. */
 export const MAX_WATCHLIST_ITEMS = 500;
 
-export const mediaRefSchema = z.object({
-  id: z.number().int().positive().max(2_147_483_647),
-  mediaType: z.enum(["movie", "tv"]),
-});
+const id = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 
-export const mediaRefListSchema = z.array(mediaRefSchema).max(MAX_WATCHLIST_ITEMS);
+/** A saved title's identity (types/watchlist.ts): an internal catalogue id, or a legacy TMDB id. */
+export const watchlistRefSchema = z.discriminatedUnion("source", [
+  z.strictObject({ source: z.literal("catalogue"), kind: z.enum(["movie", "series"]), id }),
+  z.strictObject({ source: z.literal("tmdb"), mediaType: z.enum(["movie", "tv"]), id: id.max(2_147_483_647) }),
+]);
+
+export const watchlistRefListSchema = z.array(watchlistRefSchema).max(MAX_WATCHLIST_ITEMS);
 
 /**
  * A search as the browser reports it. Deliberately shape-only: the database

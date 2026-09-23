@@ -289,3 +289,95 @@ identical to what that run tested.
 | `anon`/`authenticated_security_definer_function_executable`: `record_search`, `trending_searches` | WARN | Existing, accepted in Phase 3. The `catalogue_access` functions raise nothing (schema not exposed) |
 | `unindexed_foreign_keys` ×2: `movie_versions_telegram_media_fkey`, `episode_versions_telegram_media_fkey` | INFO | Accepted. The unique `telegram_media_id` index serves the FK check (at most one row), and a second two-column index would be redundant. Revisit only if `telegram_media` deletes show up in slow queries |
 | `unused_index` ×15 | INFO | Expected: all tables empty |
+
+## B-3 result: watchlist identity
+
+Status: **implemented and validated locally.** App-only. No migration: the identity
+columns, checks and the normalizing insert trigger came with `20260922080911`.
+
+### Behaviour
+
+- **Identity type.** `types/watchlist.ts` adds `WatchlistRef`, which is either
+  `{ source: "catalogue", kind, id }` (canonical) or `{ source: "tmdb", mediaType, id }`
+  (legacy). Movie, series and TMDB ids are separate spaces, so the whole ref is the
+  identity. `TitleSummary` gains `tmdbId`, so a catalogue title and a legacy save of
+  the same TMDB title are recognised as one.
+- **Saves** (`lib/watchlist-actions.ts`):
+  - Every ref is resolved through the published catalogue (`findTitles`, which runs
+    under the anon policies).
+  - A published title is stored as `movie_id` or `series_id` only.
+  - An unmapped TMDB title is still stored as a legacy `tmdb_id` row, so the TMDB pages
+    keep working.
+  - A catalogue id that is not published is refused (`invalid`).
+  - Duplicates in either form are skipped by the trigger. A concurrent save's `23505`
+    counts as success.
+- **Removals** match every row that stores the title: `{kind}_id = id`, or the TMDB id
+  with a matching `media_type` (`tv` and `series` for series). That covers legacy rows
+  and rows the trigger normalized.
+- **Reads** resolve each row in this order:
+  1. its published catalogue title, including legacy rows whose TMDB id is now
+     published;
+  2. otherwise TMDB, when the row has a TMDB id;
+  3. otherwise an "Unavailable title" row with no link, which can still be removed.
+
+  Previously, titles TMDB no longer had were dropped from the list but still counted
+  towards the 500 cap.
+- **Guests.** localStorage keeps its key. Pre-catalogue entries (TMDB `MediaSummary`)
+  are upgraded on read. Every entry is rebuilt from known fields, and links must be
+  same-site paths. On import, a catalogue ref that is no longer published has nothing
+  to save and is dropped. A TMDB ref resolves as it does for a save.
+- **UI.**
+  - `WatchlistButton` and `useWatchlist` take a `WatchlistItem`. Built by
+    `mediaWatchlistItem` (TMDB pages) or `titleWatchlistItem` (catalogue).
+  - Matching (`sameTitle`) accepts either id.
+  - `MovieListItem` takes an explicit `href` (null renders plain text) and `typeLabel`.
+  - The My List tabs keep the Movies / TV Shows split; a catalogue series is labelled
+    "Series".
+
+### Validation (clean local chain, migrations 1–7, real server actions)
+
+`lib/watchlist-actions.ts` ran unmodified against a local Supabase stack. Only
+`lib/auth` was stubbed (the session); `server-only` was stubbed and TMDB served the
+built-in sample data. The fixtures were published mapped and unmapped movies, a draft
+mapped movie, and a published series.
+
+| Area | Result |
+| --- | --- |
+| Saves (8) | PASS: TMDB ref of a published movie → `movie_id` only; catalogue re-save no-op; unmapped TMDB → legacy row; draft catalogue id refused; TMDB ref of a draft-mapped movie → legacy insert normalized by the trigger; TMDB tv → `series_id`; catalogue title without TMDB id; old-client direct legacy insert still accepted |
+| Validation (2) | PASS: invalid id and extra fields rejected (strict schema) |
+| Reads (6) | PASS: newest first; catalogue movie/series with href and TMDB alias; draft-mapped and unmapped rows described by TMDB; unknown TMDB id listed as unavailable with no link |
+| Late catalogue match (4) | PASS: a legacy row whose title is published later reads as the catalogue title, a catalogue save of it is a no-op, and removal by catalogue ref deletes the legacy row |
+| Removals (5) | PASS: by TMDB ref (internal row), draft-mapped row, series by catalogue ref, unavailable row; unrelated rows untouched |
+| Guest import (3) | PASS: mixed forms merge to one row per title; draft catalogue ref dropped; unmapped TMDB kept legacy; re-import no-op |
+| Isolation (3) | PASS: another user sees and removes nothing of the first user's; signed out refused |
+| Client store (11) | PASS: pre-catalogue guest entries upgraded; malformed dropped; extra fields stripped; off-site/script links rejected; alias matching across id spaces (movie vs series, catalogue vs TMDB numbers) |
+| `npm run lint` / `typecheck` / `build` | PASS / PASS / PASS |
+
+### Unresolved-row report
+
+Run read-only on hosted:
+
+```sql
+select count(*) as total_rows,
+       count(*) filter (where movie_id is not null or series_id is not null) as catalogue_rows,
+       count(*) filter (where movie_id is null and series_id is null) as legacy_rows,
+       count(*) filter (where movie_id is null and series_id is null and (
+         (media_type = 'movie' and exists (select 1 from public.movies m where m.tmdb_id = w.tmdb_id))
+         or (media_type = 'tv' and exists (select 1 from public.series s where s.tmdb_id = w.tmdb_id)))) as legacy_mappable_now,
+       count(distinct user_id) as users
+from public.watchlist_items w;
+```
+
+2026-09-23: all zero. There are no hosted watchlist rows yet.
+
+### Follow-ups
+
+- Catalogue links go to `/movies/{slug}` and `/series/{slug}` (`titleHref`). Those
+  routes arrive with the catalogue UI work; until then no catalogue title can be
+  saved, because hosted has none.
+- The database accepts any existing `movie_id`/`series_id` from an authenticated
+  client that bypasses the app: an FK check, with no publication check. The app
+  saves only published titles. A crafted request could only learn whether an
+  internal id exists, and could store a reference that reads back as unavailable.
+  Consider a trigger guard (published titles only for new internal saves) in a later
+  migration.

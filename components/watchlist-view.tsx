@@ -7,13 +7,26 @@ import { EmptyState } from "@/components/empty-state";
 import { MovieList, MovieListItem } from "@/components/movie-list-item";
 import { ListSkeleton } from "@/components/skeletons";
 import { MUTATION_MESSAGES } from "@/components/watchlist-button";
+import { mediaTypeLabel, watchlistRefKey } from "@/lib/utils";
 import { useWatchlist } from "@/lib/watchlist";
 import type { MediaType } from "@/types/media";
+import type { WatchlistItem } from "@/types/watchlist";
 
 const COPY: Record<MediaType, { empty: string; explore: string; href: string }> = {
   movie: { empty: "No movies saved yet", explore: "Explore Movies", href: "/movies" },
   tv: { empty: "No shows saved yet", explore: "Explore TV Shows", href: "/tv" },
 };
+
+/** The tabs still follow the TMDB split: a catalogue series belongs under TV Shows. */
+function tabOf({ ref }: WatchlistItem): MediaType {
+  if (ref.source === "tmdb") return ref.mediaType;
+  return ref.kind === "movie" ? "movie" : "tv";
+}
+
+function typeLabel({ ref }: WatchlistItem) {
+  if (ref.source === "tmdb") return mediaTypeLabel(ref.mediaType);
+  return ref.kind === "movie" ? "Movie" : "Series";
+}
 
 export function WatchlistView({ mediaType }: { mediaType: MediaType }) {
   const { items, status, importFailed, loadError, mutationError, remove, retry } = useWatchlist();
@@ -42,7 +55,7 @@ export function WatchlistView({ mediaType }: { mediaType: MediaType }) {
   // Storage and the session are only readable in the browser; avoid flashing a false empty state.
   if (items === null) return <ListSkeleton />;
 
-  const visible = items.filter((item) => item.mediaType === mediaType);
+  const visible = items.filter((item) => tabOf(item) === mediaType);
   const copy = COPY[mediaType];
 
   const notices = (
@@ -86,8 +99,10 @@ export function WatchlistView({ mediaType }: { mediaType: MediaType }) {
       <MovieList>
         {visible.map((item) => (
           <MovieListItem
-            key={`${item.mediaType}-${item.id}`}
+            key={watchlistRefKey(item.ref)}
             item={item}
+            href={item.href}
+            typeLabel={typeLabel(item)}
             action={
               <button
                 type="button"

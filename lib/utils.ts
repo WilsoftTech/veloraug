@@ -1,4 +1,6 @@
+import type { CatalogueKind, TitleSummary } from "@/types/catalogue";
 import type { BrowseList, MediaSummary, MediaType, SearchScope } from "@/types/media";
+import type { WatchlistItem, WatchlistRef } from "@/types/watchlist";
 
 export function cn(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
@@ -13,8 +15,28 @@ export function mediaHref({ mediaType, id }: Pick<MediaSummary, "mediaType" | "i
   return `/${mediaType}/${id}`;
 }
 
+/** Detail page of a published catalogue title. */
+export function titleHref(kind: CatalogueKind, slug: string) {
+  return `/${kind === "movie" ? "movies" : "series"}/${slug}`;
+}
+
 export function mediaTypeLabel(mediaType: MediaType) {
   return mediaType === "movie" ? "Movie" : "TV Show";
+}
+
+/** Stable string identity of a saved title; the id alone is ambiguous across id spaces. */
+export function watchlistRefKey(ref: WatchlistRef) {
+  return ref.source === "catalogue" ? `catalogue:${ref.kind}:${ref.id}` : `tmdb:${ref.mediaType}:${ref.id}`;
+}
+
+/** My List entry for a TMDB title (a legacy save until the title is in the catalogue). */
+export function mediaWatchlistItem({ id, mediaType, title, posterPath, releaseYear, rating }: MediaSummary): WatchlistItem {
+  return { ref: { source: "tmdb", mediaType, id }, tmdbId: null, title, posterPath, releaseYear, rating, href: mediaHref({ mediaType, id }) };
+}
+
+/** My List entry for a published catalogue title. */
+export function titleWatchlistItem({ kind, id, slug, tmdbId, title, posterPath, releaseYear, rating }: TitleSummary): WatchlistItem {
+  return { ref: { source: "catalogue", kind, id }, tmdbId, title, posterPath, releaseYear, rating, href: titleHref(kind, slug) };
 }
 
 /** Meta-description length: trimmed at a word boundary, undefined when empty. */

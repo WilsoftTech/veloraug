@@ -12,7 +12,7 @@ import { ListSkeleton } from "@/components/skeletons";
 import { TabLinks } from "@/components/tab-links";
 import { discoverHref } from "@/lib/discover";
 import { getTrending, searchMedia } from "@/lib/tmdb/media";
-import { SEARCH_SCOPE_LABELS, firstParam, normalizeSearchQuery, parseSearchScope, searchHref } from "@/lib/utils";
+import { SEARCH_SCOPE_LABELS, firstParam, mediaHref, mediaTypeLabel, normalizeSearchQuery, parseSearchScope, searchHref } from "@/lib/utils";
 import type { SearchScope } from "@/types/media";
 
 export const metadata: Metadata = { title: "Search" };
@@ -61,7 +61,7 @@ async function SearchResults({ query, scope }: { query: string; scope: SearchSco
       {recorder}
       <MovieList>
         {items.map((item) => (
-          <MovieListItem key={`${item.mediaType}-${item.id}`} item={item} />
+          <MovieListItem key={`${item.mediaType}-${item.id}`} item={item} href={mediaHref(item)} typeLabel={mediaTypeLabel(item.mediaType)} />
         ))}
       </MovieList>
     </>

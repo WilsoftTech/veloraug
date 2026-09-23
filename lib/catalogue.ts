@@ -4,6 +4,7 @@ import { z } from "zod";
 import { requireSupabaseConfig } from "@/lib/supabase/config";
 import type { Database } from "@/lib/supabase/database.types";
 import type {
+  CatalogueKind,
   CataloguePage,
   Genre,
   MovieDetail,
@@ -104,6 +105,63 @@ function toGenres(rows: { genres: Genre }[]): Genre[] {
 const VJ = "id, slug, name, badge_variant";
 
 // ---------------------------------------------------------------------------
+// Title summaries (cards, rows, My List)
+// ---------------------------------------------------------------------------
+interface SummaryRow {
+  id: number;
+  slug: string;
+  title: string;
+  poster_path: string | null;
+  tmdb_id: number | null;
+  tmdb_vote_average: number | null;
+  tmdb_vote_count: number | null;
+  published_at: string;
+}
+
+const MOVIE_SUMMARY = `id, slug, title, poster_path, release_date, tmdb_id, tmdb_vote_average, tmdb_vote_count, published_at,
+  movie_versions(id, title_override, vjs(${VJ}))`;
+type MovieSummaryRow = SummaryRow & { release_date: string | null; movie_versions: VersionRow[] };
+
+function toMovieSummary(row: MovieSummaryRow): TitleSummary {
+  return {
+    kind: "movie",
+    id: row.id,
+    slug: row.slug,
+    title: row.title,
+    posterPath: row.poster_path,
+    releaseYear: toYear(row.release_date),
+    rating: toRating(row.tmdb_vote_average, row.tmdb_vote_count),
+    tmdbId: row.tmdb_id,
+    vjs: distinctVjs(row.movie_versions),
+  };
+}
+
+type SeriesVersionTree = { seasons: { episodes: { episode_versions: VersionRow[] }[] }[] };
+
+function seriesVersions(row: SeriesVersionTree): VersionRow[] {
+  return row.seasons.flatMap((season) => season.episodes.flatMap((episode) => episode.episode_versions));
+}
+
+const SERIES_SUMMARY = `id, slug, title, poster_path, first_air_date, tmdb_id, tmdb_vote_average, tmdb_vote_count, published_at,
+  seasons(episodes(episode_versions(id, title_override, vjs(${VJ}))))`;
+type SeriesSummaryRow = SummaryRow & { first_air_date: string | null } & SeriesVersionTree;
+
+/** A series is available from every VJ of any of its episodes. */
+function toSeriesSummary(row: SeriesSummaryRow): TitleSummary {
+  return {
+    kind: "series",
+    id: row.id,
+    slug: row.slug,
+    title: row.title,
+    posterPath: row.poster_path,
+    releaseYear: toYear(row.first_air_date),
+    rating: toRating(row.tmdb_vote_average, row.tmdb_vote_count),
+    tmdbId: row.tmdb_id,
+    vjs: distinctVjs(seriesVersions(row)),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Lists
 // ---------------------------------------------------------------------------
 export interface TitleListOptions {
@@ -127,8 +185,7 @@ export async function listMovies(options: TitleListOptions = {}): Promise<Catalo
   let query = catalogueClient()
     .from("movies")
     .select(
-      `id, slug, title, poster_path, release_date, tmdb_vote_average, tmdb_vote_count, published_at,
-       movie_versions(id, title_override, vjs(${VJ}))
+      `${MOVIE_SUMMARY}
        ${options.vjSlug ? ", filter_vj:movie_versions!inner(vjs!inner(slug))" : ""}
        ${options.genreSlug ? ", filter_genre:movie_genres!inner(genres!inner(slug))" : ""}`,
     )
@@ -143,46 +200,18 @@ export async function listMovies(options: TitleListOptions = {}): Promise<Catalo
     query = query.or(`published_at.lt."${cursor.publishedAt}",and(published_at.eq."${cursor.publishedAt}",id.lt.${cursor.id})`);
   }
 
-  const { data, error } = await query.overrideTypes<
-    {
-      id: number;
-      slug: string;
-      title: string;
-      poster_path: string | null;
-      release_date: string | null;
-      tmdb_vote_average: number | null;
-      tmdb_vote_count: number | null;
-      published_at: string;
-      movie_versions: VersionRow[];
-    }[],
-    { merge: false }
-  >();
+  const { data, error } = await query.overrideTypes<MovieSummaryRow[], { merge: false }>();
   if (error) fail("movies", error);
 
   const rows = data.slice(0, size);
   const last = rows.at(-1);
   return {
-    items: rows.map((row) => ({
-      kind: "movie",
-      id: row.id,
-      slug: row.slug,
-      title: row.title,
-      posterPath: row.poster_path,
-      releaseYear: toYear(row.release_date),
-      rating: toRating(row.tmdb_vote_average, row.tmdb_vote_count),
-      vjs: distinctVjs(row.movie_versions),
-    })),
+    items: rows.map(toMovieSummary),
     nextCursor: data.length > size && last ? encodeCursor(last.published_at, last.id) : null,
   };
 }
 
-type SeriesVersionTree = { seasons: { episodes: { episode_versions: VersionRow[] }[] }[] };
-
-function seriesVersions(row: SeriesVersionTree): VersionRow[] {
-  return row.seasons.flatMap((season) => season.episodes.flatMap((episode) => episode.episode_versions));
-}
-
-/** Published series, newest first. A series is available from every VJ of any of its episodes. */
+/** Published series, newest first. */
 export async function listSeries(options: TitleListOptions = {}): Promise<CataloguePage<TitleSummary>> {
   const size = pageSize(options.limit);
   const cursor = decodeCursor(options.cursor);
@@ -190,8 +219,7 @@ export async function listSeries(options: TitleListOptions = {}): Promise<Catalo
   let query = catalogueClient()
     .from("series")
     .select(
-      `id, slug, title, poster_path, first_air_date, tmdb_vote_average, tmdb_vote_count, published_at,
-       seasons(episodes(episode_versions(id, title_override, vjs(${VJ}))))
+      `${SERIES_SUMMARY}
        ${options.vjSlug ? ", filter_vj:seasons!inner(episodes!inner(episode_versions!inner(vjs!inner(slug))))" : ""}
        ${options.genreSlug ? ", filter_genre:series_genres!inner(genres!inner(slug))" : ""}`,
     )
@@ -206,36 +234,43 @@ export async function listSeries(options: TitleListOptions = {}): Promise<Catalo
     query = query.or(`published_at.lt."${cursor.publishedAt}",and(published_at.eq."${cursor.publishedAt}",id.lt.${cursor.id})`);
   }
 
-  const { data, error } = await query.overrideTypes<
-    ({
-      id: number;
-      slug: string;
-      title: string;
-      poster_path: string | null;
-      first_air_date: string | null;
-      tmdb_vote_average: number | null;
-      tmdb_vote_count: number | null;
-      published_at: string;
-    } & SeriesVersionTree)[],
-    { merge: false }
-  >();
+  const { data, error } = await query.overrideTypes<SeriesSummaryRow[], { merge: false }>();
   if (error) fail("series", error);
 
   const rows = data.slice(0, size);
   const last = rows.at(-1);
   return {
-    items: rows.map((row) => ({
-      kind: "series",
-      id: row.id,
-      slug: row.slug,
-      title: row.title,
-      posterPath: row.poster_path,
-      releaseYear: toYear(row.first_air_date),
-      rating: toRating(row.tmdb_vote_average, row.tmdb_vote_count),
-      vjs: distinctVjs(seriesVersions(row)),
-    })),
+    items: rows.map(toSeriesSummary),
     nextCursor: data.length > size && last ? encodeCursor(last.published_at, last.id) : null,
   };
+}
+
+/**
+ * Published titles of one kind, looked up by internal id or by the TMDB id they
+ * were matched to (My List). Ids that are unknown or not public are simply
+ * absent from the result; order is not preserved.
+ */
+export async function findTitles(kind: CatalogueKind, by: "id" | "tmdb_id", ids: number[]): Promise<TitleSummary[]> {
+  if (ids.length === 0) return [];
+  const client = catalogueClient();
+
+  if (kind === "movie") {
+    const { data, error } = await client
+      .from("movies")
+      .select(MOVIE_SUMMARY)
+      .in(by, ids)
+      .overrideTypes<MovieSummaryRow[], { merge: false }>();
+    if (error) fail("movies by id", error);
+    return data.map(toMovieSummary);
+  }
+
+  const { data, error } = await client
+    .from("series")
+    .select(SERIES_SUMMARY)
+    .in(by, ids)
+    .overrideTypes<SeriesSummaryRow[], { merge: false }>();
+  if (error) fail("series by id", error);
+  return data.map(toSeriesSummary);
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +281,7 @@ export async function getMovie(slug: string): Promise<MovieDetail | null> {
     .from("movies")
     .select(
       `id, slug, title, original_title, overview, release_date, runtime_minutes, poster_path, backdrop_path,
-       tmdb_vote_average, tmdb_vote_count,
+       tmdb_id, tmdb_vote_average, tmdb_vote_count,
        movie_versions(id, title_override, vjs(${VJ})),
        movie_genres(genres(id, slug, name))`,
     )
@@ -263,6 +298,7 @@ export async function getMovie(slug: string): Promise<MovieDetail | null> {
         runtime_minutes: number | null;
         poster_path: string | null;
         backdrop_path: string | null;
+        tmdb_id: number | null;
         tmdb_vote_average: number | null;
         tmdb_vote_count: number | null;
         movie_versions: VersionRow[];
@@ -284,6 +320,7 @@ export async function getMovie(slug: string): Promise<MovieDetail | null> {
     backdropPath: data.backdrop_path,
     releaseYear: toYear(data.release_date),
     rating: toRating(data.tmdb_vote_average, data.tmdb_vote_count),
+    tmdbId: data.tmdb_id,
     runtimeMinutes: data.runtime_minutes,
     genres: toGenres(data.movie_genres),
     vjs: distinctVjs(data.movie_versions),
@@ -296,7 +333,7 @@ export async function getSeries(slug: string): Promise<SeriesDetail | null> {
     .from("series")
     .select(
       `id, slug, title, original_title, overview, first_air_date, poster_path, backdrop_path,
-       tmdb_vote_average, tmdb_vote_count,
+       tmdb_id, tmdb_vote_average, tmdb_vote_count,
        series_genres(genres(id, slug, name)),
        seasons(id, season_number, title, overview, air_date, poster_path,
          episodes(id, episode_number, title, overview, air_date, runtime_minutes, still_path,
@@ -316,6 +353,7 @@ export async function getSeries(slug: string): Promise<SeriesDetail | null> {
         first_air_date: string | null;
         poster_path: string | null;
         backdrop_path: string | null;
+        tmdb_id: number | null;
         tmdb_vote_average: number | null;
         tmdb_vote_count: number | null;
         series_genres: { genres: Genre }[];
@@ -373,6 +411,7 @@ export async function getSeries(slug: string): Promise<SeriesDetail | null> {
     backdropPath: data.backdrop_path,
     releaseYear: toYear(data.first_air_date),
     rating: toRating(data.tmdb_vote_average, data.tmdb_vote_count),
+    tmdbId: data.tmdb_id,
     genres: toGenres(data.series_genres),
     vjs: distinctVjs(seriesVersions(data)),
     seasons,

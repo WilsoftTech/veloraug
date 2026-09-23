@@ -6,7 +6,7 @@ import { BackdropImage } from "@/components/media-image";
 import { Rating } from "@/components/rating";
 import { WatchlistButton } from "@/components/watchlist-button";
 import { getTrending } from "@/lib/tmdb/media";
-import { mediaHref, toSummary } from "@/lib/utils";
+import { mediaHref, mediaWatchlistItem } from "@/lib/utils";
 import type { Media } from "@/types/media";
 
 const SLIDE_COUNT = 5;
@@ -41,7 +41,7 @@ function HeroSlide({ item, first }: { item: Media; first: boolean }) {
             <Play aria-hidden className="size-4 fill-current" />
             View Details
           </Link>
-          <WatchlistButton item={toSummary(item)} />
+          <WatchlistButton item={mediaWatchlistItem(item)} />
         </div>
       </div>
     </div>

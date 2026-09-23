@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { getSession, subscribeSession, type SessionState } from "@/lib/session";
-import { toSummary } from "@/lib/utils";
+import { mediaWatchlistItem, watchlistRefKey } from "@/lib/utils";
 import {
   addToWatchlist,
   importWatchlist,
@@ -9,13 +9,18 @@ import {
   type WatchlistError,
   type WatchlistResult,
 } from "@/lib/watchlist-actions";
-import type { MediaRef, MediaSummary } from "@/types/media";
+import type { MediaSummary } from "@/types/media";
+import type { WatchlistItem, WatchlistRef } from "@/types/watchlist";
 
 /**
  * My List. One interface, two homes:
  *
  *   guest      → localStorage (this file; only what is needed to render a row)
- *   signed in  → Postgres via server actions (ids only; TMDB supplies the rest)
+ *   signed in  → Postgres via server actions (ids only; the catalogue, or TMDB
+ *                for legacy saves, supplies the rest)
+ *
+ * A title may be known by its catalogue id or by the TMDB id it was matched to,
+ * so matching (`sameTitle`) accepts either.
  *
  * When a guest signs in, their local list is merged into the account and the
  * local copy is cleared only after the server confirms (see `runSync`).
@@ -28,13 +33,13 @@ export type MutationError = WatchlistError | "loading";
 
 interface Snapshot {
   /** null until the current source is readable, so callers can show a skeleton instead of a false "empty" state. */
-  items: MediaSummary[] | null;
+  items: WatchlistItem[] | null;
   status: WatchlistStatus;
   /** Guest items could not be moved into the account. They remain safe in this browser. */
   importFailed: boolean;
   loadError: WatchlistError | null;
-  /** The last change that had to be rolled back, keyed to the title it concerned. */
-  mutationError: { key: string; error: MutationError } | null;
+  /** The last change that had to be rolled back, and the title it concerned. */
+  mutationError: { item: WatchlistItem; error: MutationError } | null;
 }
 
 const LOADING: Snapshot = { items: null, status: "loading", importFailed: false, loadError: null, mutationError: null };
@@ -50,44 +55,68 @@ function publish(patch: Partial<Snapshot>) {
   listeners.forEach((listener) => listener());
 }
 
-/** Stable identity of a title, for matching a rolled-back change to the button that made it. */
-export function watchlistKey({ mediaType, id }: MediaRef) {
-  return `${mediaType}-${id}`;
+/** The TMDB identity a catalogue item was matched to, as a ref. */
+function tmdbAlias({ ref, tmdbId }: WatchlistItem): WatchlistRef | null {
+  if (ref.source !== "catalogue" || tmdbId === null) return null;
+  return { source: "tmdb", mediaType: ref.kind === "movie" ? "movie" : "tv", id: tmdbId };
 }
 
-function isSame(a: MediaRef, b: MediaRef) {
-  return a.id === b.id && a.mediaType === b.mediaType;
-}
-
-function refOf({ id, mediaType }: MediaRef): MediaRef {
-  return { id, mediaType };
+/** Whether two entries are the same title, whichever id each page knows it by. */
+export function sameTitle(a: WatchlistItem, b: WatchlistItem) {
+  const keys = (item: WatchlistItem) => [item.ref, tmdbAlias(item)].flatMap((ref) => (ref ? [watchlistRefKey(ref)] : []));
+  const other = keys(b);
+  return keys(a).some((key) => other.includes(key));
 }
 
 // ---------------------------------------------------------------------------
 // Guest storage
 // ---------------------------------------------------------------------------
 
-let guestCache: MediaSummary[] | null = null;
+let guestCache: WatchlistItem[] | null = null;
 
-function isSummary(value: unknown): value is MediaSummary {
-  if (typeof value !== "object" || value === null) return false;
-  const item = value as Record<string, unknown>;
-  return (
-    typeof item.id === "number" &&
-    (item.mediaType === "movie" || item.mediaType === "tv") &&
-    typeof item.title === "string" &&
-    (typeof item.posterPath === "string" || item.posterPath === null) &&
-    (typeof item.releaseYear === "number" || item.releaseYear === null) &&
-    (typeof item.rating === "number" || item.rating === null)
-  );
+type Fields = Record<string, unknown>;
+
+const isObject = (value: unknown): value is Fields => typeof value === "object" && value !== null;
+const isId = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) > 0;
+const orNull = (value: unknown, type: "string" | "number") => value === null || typeof value === type;
+
+function hasDisplayFields(item: Fields) {
+  return typeof item.title === "string" && orNull(item.posterPath, "string") && orNull(item.releaseYear, "number") && orNull(item.rating, "number");
 }
 
-function readGuest(): MediaSummary[] {
+function isRef(value: unknown): value is WatchlistRef {
+  if (!isObject(value) || !isId(value.id)) return false;
+  if (value.source === "catalogue") return value.kind === "movie" || value.kind === "series";
+  return value.source === "tmdb" && (value.mediaType === "movie" || value.mediaType === "tv");
+}
+
+const isLocalPath = (value: unknown) => value === null || (typeof value === "string" && value.startsWith("/") && !value.startsWith("//"));
+
+/**
+ * Accepts the current entry shape and the pre-catalogue one (a TMDB MediaSummary),
+ * rebuilt from known fields only: storage is user-editable, and the ref is later
+ * sent to a strict server schema.
+ */
+function fromStorage(value: unknown): WatchlistItem | null {
+  if (!isObject(value) || !hasDisplayFields(value)) return null;
+  const { ref, tmdbId, title, posterPath, releaseYear, rating, href } = value as Fields & Omit<WatchlistItem, "ref">;
+  if (isRef(ref) && (tmdbId === null || isId(tmdbId)) && isLocalPath(href)) {
+    const clean: WatchlistRef =
+      ref.source === "catalogue" ? { source: "catalogue", kind: ref.kind, id: ref.id } : { source: "tmdb", mediaType: ref.mediaType, id: ref.id };
+    return { ref: clean, tmdbId, title, posterPath, releaseYear, rating, href };
+  }
+  if (isId(value.id) && (value.mediaType === "movie" || value.mediaType === "tv")) {
+    return mediaWatchlistItem(value as unknown as MediaSummary);
+  }
+  return null;
+}
+
+function readGuest(): WatchlistItem[] {
   if (guestCache) return guestCache;
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     const parsed: unknown = raw ? JSON.parse(raw) : [];
-    guestCache = Array.isArray(parsed) ? parsed.filter(isSummary) : [];
+    guestCache = Array.isArray(parsed) ? parsed.flatMap((value) => fromStorage(value) ?? []) : [];
   } catch (error) {
     console.warn("Could not read My List from storage.", error);
     guestCache = [];
@@ -95,7 +124,7 @@ function readGuest(): MediaSummary[] {
   return guestCache;
 }
 
-function writeGuest(next: MediaSummary[]) {
+function writeGuest(next: WatchlistItem[]) {
   guestCache = next;
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
@@ -104,10 +133,10 @@ function writeGuest(next: MediaSummary[]) {
   }
 }
 
-function removeFromGuest(imported: MediaRef[]) {
+function removeFromGuest(imported: WatchlistItem[]) {
   // Re-read first: anything saved in another tab in the meantime must survive.
   guestCache = null;
-  writeGuest(readGuest().filter((item) => !imported.some((gone) => isSame(gone, item))));
+  writeGuest(readGuest().filter((item) => !imported.some((gone) => sameTitle(gone, item))));
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +173,7 @@ async function runSync() {
   let importFailed = false;
 
   if (pending.length > 0) {
-    const imported = await importWatchlist(pending.map(refOf));
+    const imported = await importWatchlist(pending.map((item) => item.ref));
     if (session !== "signed-in") return;
     if (imported.ok) {
       removeFromGuest(pending);
@@ -209,28 +238,27 @@ function currentList() {
   return session === "signed-in" ? snapshot.items : readGuest();
 }
 
-function guestSet(summary: MediaSummary, saved: boolean) {
-  const others = readGuest().filter((item) => !isSame(item, summary));
-  const next = saved ? [summary, ...others] : others;
+function guestSet(entry: WatchlistItem, saved: boolean) {
+  const others = readGuest().filter((item) => !sameTitle(item, entry));
+  const next = saved ? [entry, ...others] : others;
   writeGuest(next);
   publish({ items: next, mutationError: null });
 }
 
-async function accountSet(summary: MediaSummary, saved: boolean) {
-  const key = watchlistKey(summary);
+async function accountSet(entry: WatchlistItem, saved: boolean) {
   const before = snapshot.items;
   if (!before) {
-    publish({ mutationError: { key, error: "loading" } });
+    publish({ mutationError: { item: entry, error: "loading" } });
     return;
   }
 
   // Optimistic: the list changes now and is rolled back if the server refuses.
-  const without = (list: MediaSummary[]) => list.filter((item) => !isSame(item, summary));
-  publish({ items: saved ? [summary, ...without(before)] : without(before), mutationError: null });
+  const without = (list: WatchlistItem[]) => list.filter((item) => !sameTitle(item, entry));
+  publish({ items: saved ? [entry, ...without(before)] : without(before), mutationError: null });
 
   let result: WatchlistResult;
   try {
-    result = await (saved ? addToWatchlist(refOf(summary)) : removeFromWatchlist(refOf(summary)));
+    result = await (saved ? addToWatchlist(entry.ref) : removeFromWatchlist(entry.ref));
   } catch (error) {
     console.error("My List change did not reach the server.", error);
     result = { ok: false, error: "unavailable" };
@@ -239,12 +267,12 @@ async function accountSet(summary: MediaSummary, saved: boolean) {
 
   // Undo against the current list, so unrelated changes made meanwhile survive.
   const current = snapshot.items ?? [];
-  publish({ items: saved ? without(current) : [summary, ...without(current)], mutationError: { key, error: result.error } });
+  publish({ items: saved ? without(current) : [entry, ...without(current)], mutationError: { item: entry, error: result.error } });
 }
 
-function setSaved(summary: MediaSummary, saved: boolean) {
-  if (session === "signed-in") void accountSet(summary, saved);
-  else guestSet(summary, saved);
+function setSaved(entry: WatchlistItem, saved: boolean) {
+  if (session === "signed-in") void accountSet(entry, saved);
+  else guestSet(entry, saved);
 }
 
 function subscribe(listener: () => void) {
@@ -268,14 +296,15 @@ export function useWatchlist() {
     importFailed,
     loadError,
     mutationError,
-    has: (media: MediaRef) => items?.some((item) => isSame(item, media)) ?? false,
-    toggle: (media: MediaSummary) => {
-      const saved = currentList()?.some((item) => isSame(item, media)) ?? false;
-      setSaved(toSummary(media), !saved);
+    has: (entry: WatchlistItem) => items?.some((item) => sameTitle(item, entry)) ?? false,
+    /** Removing uses the saved entry, so the server matches the form it was stored in. */
+    toggle: (entry: WatchlistItem) => {
+      const existing = currentList()?.find((item) => sameTitle(item, entry));
+      setSaved(existing ?? entry, !existing);
     },
-    remove: (media: MediaRef) => {
-      const item = currentList()?.find((candidate) => isSame(candidate, media));
-      if (item) setSaved(item, false);
+    remove: (entry: WatchlistItem) => {
+      const existing = currentList()?.find((item) => sameTitle(item, entry));
+      if (existing) setSaved(existing, false);
     },
     /** Tries the account sync again after a load or import failure. */
     retry: () => {

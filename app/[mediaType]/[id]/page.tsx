@@ -10,7 +10,7 @@ import { SectionHeader } from "@/components/section-header";
 import { TrailerPlayer } from "@/components/trailer-player";
 import { WatchlistButton } from "@/components/watchlist-button";
 import { getMediaDetail } from "@/lib/tmdb/media";
-import { formatRuntime, mediaTypeLabel, parseMediaRoute, summarize, toSummary } from "@/lib/utils";
+import { formatRuntime, mediaTypeLabel, mediaWatchlistItem, parseMediaRoute, summarize } from "@/lib/utils";
 
 async function loadDetail(mediaType: string, rawId: string) {
   const route = parseMediaRoute(mediaType, rawId);
@@ -110,7 +110,7 @@ export default async function MediaDetailPage({ params }: PageProps<"/[mediaType
                     Watch Trailer
                   </a>
                 )}
-                <WatchlistButton item={toSummary(detail)} variant={detail.trailerKey ? "secondary" : "primary"} />
+                <WatchlistButton item={mediaWatchlistItem(detail)} variant={detail.trailerKey ? "secondary" : "primary"} />
               </div>
             </div>
           </div>
