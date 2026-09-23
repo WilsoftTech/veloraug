@@ -234,3 +234,53 @@ was byte-identical to the repository copy.
 `20260923180000_search_events_retention.sql`. **Not pushed.** The real push needs
 explicit authorization. After it runs, verify on hosted that the job exists as above and
 that the first 00:17 UTC run appears in `cron.job_run_details` as `succeeded`.
+
+## 7. Final Pre-B hosted verification (2026-09-23, 19:57 UTC)
+
+Status: **PRE-B GATE: PASS**, with one check still pending: the first scheduled run
+is due at 00:17 UTC on 2026-09-24.
+
+The session was read-only throughout. Only catalog/data `SELECT`s, listings and advisors
+were used.
+
+### MCP posture (re-verified)
+
+| Property | Observed | Status |
+| --- | --- | --- |
+| Project scope | `get_project_url` → `https://utxtqsfelovmhhcrknrz.supabase.co` | PASS |
+| Role | `current_user` = `session_user` = `supabase_read_only_user` | PASS |
+| Read-only transactions | `transaction_read_only` = `on`, `default_transaction_read_only` = `on` | PASS |
+| Role memberships | `pg_read_all_data` yes; `pg_write_all_data` no; `postgres` no | PASS |
+| Mutating tools | `apply_migration`, `deploy_edge_function` and branch create/merge/reset are no longer offered | PASS |
+
+### Retention migration on hosted
+
+| Check | Observed | Status |
+| --- | --- | --- |
+| Migration history | Exactly 5 rows, ending `20260923180000 search_events_retention`; B-1/B-2 not pushed | PASS |
+| Extension | `pg_cron` 1.6.4 in `pg_catalog` | PASS |
+| Job | Exactly one: `velora-purge-search-events`, `17 0 * * *`, `select private.purge_search_events(interval '30 days', 5000)`, `postgres`, active | PASS |
+| Purge function ACL | `{postgres=X/postgres}` only | PASS |
+| Client reach into `cron` | `anon`/`authenticated`: no `USAGE` on `cron` (ACL `supabase_admin`, `postgres` only), so pg_cron's non-revocable `PUBLIC` SELECT on the job tables can't be reached; no reachable EXECUTE on any `cron` function or the purge function; no `USAGE` on `private` | PASS |
+| First scheduled run | `cron.job_run_details` is empty. The first run is due 2026-09-24 00:17 UTC | **PENDING** |
+
+### Baseline drift
+
+14 tables (RLS on all 14), 106 constraints, 46 indexes, 7 policies, 7 functions (all
+`search_path=""`; definers `enforce_watchlist_limit`, `handle_new_user`,
+`record_search`, `trending_searches`), 11 enabled triggers, 0 `anon`/`authenticated`
+privileges on the 10 catalogue tables, all tables empty. This is identical to the
+bootstrap audit.
+
+### Advisors
+
+- Security: the same findings as the bootstrap audit (`rls_enabled_no_policy` INFO ×11;
+  `record_search`/`trending_searches` definer WARN ×4, accepted in Phase 3). None are new,
+  and none relate to cron.
+- Performance: `unused_index` INFO ×13 (was 14), expected on empty tables.
+
+### Remaining follow-up
+
+After 2026-09-24 00:17 UTC, run
+`select status, username, start_time, return_message from cron.job_run_details order by start_time desc limit 1`
+and confirm the result is `succeeded` as `postgres`.

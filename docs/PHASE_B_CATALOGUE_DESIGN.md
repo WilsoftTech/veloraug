@@ -6,13 +6,13 @@ Baseline: `phase-a-foundation` at `a6c8885`. Hosted migrations 1–5 applied.
 
 ## Entry gate
 
-Phase A is complete in the repository. One gate remains open: **hosted verification
-of the Pre-B retention migration `20260923180000`**. The Supabase MCP server's new
-read-only configuration needs OAuth sign-in (`claude mcp get supabase` →
-"Needs authentication"), so the current session still has write access.
+**Closed 2026-09-23.** The Pre-B retention migration `20260923180000` was verified on
+hosted over a read-only MCP connection (`supabase_read_only_user`, read-only
+transactions). See `docs/HOSTED_BOOTSTRAP_AUDIT.md` §7. One post-run check is still
+open: confirm that the first 00:17 UTC run on 2026-09-24 succeeded.
 
-Until that gate closes, Phase B work stays local: migrations validated on a clean
-local Supabase, nothing pushed to hosted.
+B-1 and B-2 were deployed to hosted on 2026-09-23 and verified there. See "Hosted deployment
+(B-1 + B-2)" below.
 
 ## What Phase B already has
 
@@ -143,7 +143,7 @@ there only if real VJ names don't fit the badge.
 
 ## B-1 result: ingestion and review tables
 
-Status: **validated locally, ready to deploy.** Not pushed to hosted.
+Status: **deployed to hosted 2026-09-23 and verified.** See "Hosted deployment (B-1 + B-2)".
 
 Migration `20260923200000_catalogue_ingestion_tables.sql`:
 
@@ -181,7 +181,8 @@ Clean local chain (migrations 1–6, PostgreSQL 17):
 
 ## B-2 result: public read contract and data layer
 
-Status: **validated locally, ready to deploy together with B-1.** Not pushed to hosted.
+Status: **deployed to hosted with B-1 on 2026-09-23 and verified.** See "Hosted deployment
+(B-1 + B-2)".
 
 Migration `20260923210000_catalogue_public_read.sql` (D1):
 
@@ -233,6 +234,58 @@ Validation (clean local chain, migrations 1–7):
 | `npm run lint` / `typecheck` / `build` | PASS / PASS / PASS |
 | `db push --linked --dry-run` | Proposes exactly B-1 and B-2 |
 
-Not yet run: the hosted Supabase advisors (they need the MCP sign-in). Expect
-`rls_enabled_no_policy` to disappear for the 10 catalogue tables and new
-informational notices for the `catalogue_access` definer functions.
+## Hosted deployment (B-1 + B-2)
+
+Date: 2026-09-23. Status: **HOSTED B-1/B-2: PASS.**
+
+### Deployment
+
+- The CLI access token (both the stored login and the `SUPABASE_ACCESS_TOKEN` in
+  `.env.local`) lacks the `database_write` permission, so `db push --linked` fails
+  with 403. The push went through the session pooler instead: `db push --db-url`
+  with the `DATABASE_URL` connection on port 5432. The direct `db.` host does not
+  resolve on this network.
+- The dry-run proposed exactly `20260923200000_catalogue_ingestion_tables.sql` and
+  `20260923210000_catalogue_public_read.sql`, with no seeds and no roles. Both files
+  were unchanged from their commits.
+- Push authorized explicitly by the owner. Both applied. Hosted history now has 7
+  migrations, identical to `supabase/migrations/`.
+
+### Verification (read-only MCP, `supabase_read_only_user`)
+
+| Check | Observed | Status |
+| --- | --- | --- |
+| Structure | 17 tables, RLS on all 17 (none forced); 149 constraints; 60 indexes; 20 FKs; 17 policies; 13 enabled triggers; all tables empty. Matches the local chain | PASS |
+| FK index coverage | 18 FKs are covered by a leading-column index. The 2 composite `(telegram_media_id, telegram_media_bot_type)` FKs have a unique index on `telegram_media_id` only, which reaches at most one row per lookup | PASS (see advisors) |
+| New private tables | `telegram_media`, `ingestion_events`, `metadata_match_candidates`: ACL `postgres` only; 0 privileges for `anon`/`authenticated`/`service_role`; no client `USAGE` on `private` | PASS |
+| Ready requires media | `movie_versions_ready_media_check` and `episode_versions_ready_media_check` present | PASS |
+| Policies | 10 catalogue `SELECT` policies `TO anon, authenticated` exactly as in the migration; the 7 Phase 2/3 policies unchanged | PASS |
+| `catalogue_access` | 4 functions: `SECURITY DEFINER`, `STABLE`, `search_path=""`, owner `postgres`, EXECUTE for `anon`/`authenticated` only; whitespace-normalised body MD5s equal the repository. Schema `USAGE` for `anon`/`authenticated` only, none for `service_role` | PASS |
+| Existing functions | Still 7 in `public`/`private` | PASS |
+| Column grants | Display fields only, identical for `anon` and `authenticated`, exactly as the migration lists them. No workflow, `is_active`, timestamp or Telegram column. No table-level `SELECT`, no write privilege (table or column), no client sequence privilege, nothing for `service_role` | PASS |
+
+### Public visibility boundary (live Data API, publishable key, reads only)
+
+| Request | Result | Status |
+| --- | --- | --- |
+| `movies` with named display columns | 200 `[]` | PASS |
+| Nested `movies → movie_versions → vjs`; `series → seasons → episodes → episode_versions`; `genres` | 200 `[]` | PASS |
+| `movies?select=*`; filter on `publication_status`; `movie_versions.telegram_media_id`; `vjs.is_active` | 401 `42501` | PASS |
+| `POST /rpc/movie_is_public` | 404 `PGRST202` | PASS |
+| `Accept-Profile: catalogue_access` / `private` | 406 `PGRST106` (exposed: `public`, `graphql_public`) | PASS |
+| `telegram_media` via `public` | 404 `PGRST205` | PASS |
+| Anonymous `POST /movies` (sent unintentionally in the probe script) | Rejected; `movies` has 0 rows and 0 inserts ever | PASS |
+
+Row-level visibility (drafts, archived, blocked rights, inactive VJs, unready
+versions) needs fixture writes, so it was not repeated on hosted. The local
+two-role run above covered it. Hosted policies, grants and predicate bodies are
+identical to what that run tested.
+
+### Advisors
+
+| Finding | Level | Classification |
+| --- | --- | --- |
+| `rls_enabled_no_policy` ×4 (`private.search_events`, `telegram_media`, `ingestion_events`, `metadata_match_candidates`) | INFO | Intended: server-only tables. The 10 catalogue tables no longer appear |
+| `anon`/`authenticated_security_definer_function_executable`: `record_search`, `trending_searches` | WARN | Existing, accepted in Phase 3. The `catalogue_access` functions raise nothing (schema not exposed) |
+| `unindexed_foreign_keys` ×2: `movie_versions_telegram_media_fkey`, `episode_versions_telegram_media_fkey` | INFO | Accepted. The unique `telegram_media_id` index serves the FK check (at most one row), and a second two-column index would be redundant. Revisit only if `telegram_media` deletes show up in slow queries |
+| `unused_index` ×15 | INFO | Expected: all tables empty |
