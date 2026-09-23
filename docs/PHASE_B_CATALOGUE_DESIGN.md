@@ -178,3 +178,61 @@ Clean local chain (migrations 1–6, PostgreSQL 17):
 | `supabase db lint` | No schema errors |
 | `npm run lint` / `typecheck` / `build` | PASS / PASS / PASS |
 | `db push --linked --dry-run` | Proposes only `20260923200000_catalogue_ingestion_tables.sql` |
+
+## B-2 result: public read contract and data layer
+
+Status: **validated locally, ready to deploy together with B-1.** Not pushed to hosted.
+
+Migration `20260923210000_catalogue_public_read.sql` (D1):
+
+- Schema `catalogue_access` (not exposed by the Data API): `movie_is_public`,
+  `series_is_public`, `season_is_public`, `episode_is_public`. Each is `STABLE
+  SECURITY DEFINER`, `search_path=""`, returns only a boolean, and is executable
+  only by `anon`/`authenticated`. `USAGE` on the schema is granted to those two
+  roles only.
+- 10 `SELECT` policies for `anon`/`authenticated`:
+  - active VJs;
+  - published titles with a ready, rights-cleared version from an active VJ;
+  - seasons and episodes of published series that have such a version;
+  - versions that are themselves ready, cleared, from an active VJ, and belong to
+    a public title;
+  - all genres, and genre links for public titles only.
+- Column-level `SELECT` grants on display fields only. Workflow state
+  (publication, availability, rights, metadata status and sync times),
+  `is_active`, timestamps and the Telegram link columns are never granted, so
+  they can be neither read nor filtered on. No write, sequence or `service_role`
+  grant.
+- Bug found and fixed in testing: the version policies first read
+  `vjs.is_active` directly. Clients have no grant on that column, so every read
+  failed. They now rely on the `vjs` policy (active only).
+
+Data layer:
+
+- `lib/catalogue.ts` (server-only): `listMovies`, `listSeries` (newest first,
+  opaque keyset cursor on `(published_at, id)`, optional `featured`/`vjSlug`/
+  `genreSlug`), `getMovie`, `getSeries` (ordered seasons/episodes), `listVjs`,
+  `getVj`, `listGenres`.
+- It runs on a session-free client using the publishable key, so the published-
+  only policies apply to every query. Nothing uses it yet: Phase D wires the UI.
+- `types/catalogue.ts` holds the framework-independent domain types.
+  `database.types.ts` gains read-only catalogue rows limited to the granted
+  columns.
+
+Validation (clean local chain, migrations 1–7):
+
+| Check | Result |
+| --- | --- |
+| All seven apply from clean | PASS |
+| Visibility as `anon` and `authenticated` (fixtures for every hidden case) | PASS: only the active VJ, the published ready movie, the published series with a ready episode, its populated season, and that episode/version. Hidden: draft, archived, no-version, rights-blocked, inactive-VJ-only and unready-version titles; the inactive VJ's version of a public movie; empty seasons; draft-series episodes |
+| Denied as both roles | PASS: workflow and Telegram columns, `is_active`, `private` schema, `INSERT`/`UPDATE`/`DELETE` |
+| Data API (PostgREST) | PASS: nested movie → versions → VJ and series → seasons → episodes → versions queries work. `select=*` and filters on hidden columns 401; `/rpc/movie_is_public` 404; the `catalogue_access` and `private` profiles are refused |
+| Query plan | The newest-first list uses `movies_published_cursor_idx` |
+| Data layer against the local API | PASS: 8 items over 3 pages across tied timestamps, no duplicates; featured, genre and VJ filters for movies and series; invalid cursor restarts; hidden slugs return `null`; the series tree holds only available seasons/episodes |
+| Regressions | 7 original functions unchanged; retention job intact; 17 policies (7 + 10) |
+| `supabase db lint` (`public`, `private`, `catalogue_access`) | No schema errors |
+| `npm run lint` / `typecheck` / `build` | PASS / PASS / PASS |
+| `db push --linked --dry-run` | Proposes exactly B-1 and B-2 |
+
+Not yet run: the hosted Supabase advisors (they need the MCP sign-in). Expect
+`rls_enabled_no_policy` to disappear for the 10 catalogue tables and new
+informational notices for the `catalogue_access` definer functions.
