@@ -455,6 +455,18 @@ tmdb_movie_id
 
 and application-specific user data rather than duplicating the entire TMDB catalogue.
 
+### Migration privilege invariant
+
+Every migration that creates or replaces a table, sequence, view, materialized view, or function must explicitly audit and establish its privileges.
+
+Never rely on PostgreSQL/Supabase default privileges. Supabase's defaults in `public` grant `anon` and `authenticated` full access to new tables, sequences, and functions.
+
+* Objects not intended for direct client access must explicitly revoke unintended privileges from `PUBLIC`, `anon`, and `authenticated`.
+* Grant only what the app uses, as narrowly as possible.
+* Functions must also be reviewed for `SECURITY INVOKER` vs `SECURITY DEFINER`, a pinned `search_path` (prefer `''` with schema-qualified objects), `EXECUTE` privileges, and caller-controlled dynamic SQL.
+
+Applied migrations are immutable history. Change the database only through a new migration.
+
 ---
 
 # 15. TypeScript Rules
