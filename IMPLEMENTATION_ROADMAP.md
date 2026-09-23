@@ -1,1658 +1,453 @@
-# VELORA — Implementation Roadmap
+# Velora UG — Implementation Roadmap
 
-> Production roadmap for the Velora movie and TV discovery platform.
+> Controlled migration from the existing Velora discovery application to a production-oriented Ugandan VJ-translated streaming platform.
 
----
+## 1. Purpose and baseline
 
-## 1. Purpose
+Velora UG is not a greenfield rewrite. It evolves the existing Next.js/Supabase application while preserving working UI, authentication, watchlists, search work, accessibility, performance, and security controls.
 
-This document defines the implementation roadmap for **Velora** from its current state to a production-ready application.
+The architecture audit is in [`docs/VELORA_UG_MIGRATION_PLAN.md`](docs/VELORA_UG_MIGRATION_PLAN.md). Engineering rules remain in `AGENTS.md`; visual foundations remain in `DESIGN.md` and semantic tokens in `app/globals.css`.
 
-Development is divided into **7 phases**.
+### Completed legacy foundation
 
-Each phase must:
+- **Phase 1 complete on `main`:** TMDB discovery UI, responsive deep-blue design, reusable media components, search/details, async states, guest My List, accessibility, and release verification.
+- **Phase 2 complete on `main`:** Supabase auth, profiles, persistent own-row watchlists, guest merge, grants/RLS, and concurrency-safe 500-item cap.
+- **Phase 3 implemented on `origin/phase3-discover`, not merged into `main`:** Discover filters, search analytics, and recent-search history. Its audit says its migration is live and analytics retention is unscheduled.
 
-1. Build on the existing application.
-2. Reuse existing components and infrastructure.
-3. Remain lightweight.
-4. Preserve working functionality.
-5. Be completed and verified before the next phase begins.
+The first Velora UG task is reconciliation, not feature construction.
 
-This roadmap defines **what we build and in what order**.
+## 2. Product and data rules
 
-Engineering rules are defined in:
+- Supabase determines what Velora UG offers.
+- Telegram is the private media origin.
+- TMDB enriches ingested/approved records only; it never creates the public catalogue by itself.
+- VJs are first-class database entities.
+- Movies and series are separate roots; series normalize into seasons and episodes.
+- Browser code never receives Telegram/channel/payment/service-role/database secrets.
+- Supabase auth remains. Ownership and entitlement are server/database enforced.
+- Plans and prices are database-driven; payment success is provider-verified and reconciled.
+- Reuse existing components and boundaries before adding new ones.
 
-```text
-AGENTS.md
-```
+## 3. Phase overview
 
-Design direction is defined in:
+| Phase | Focus | Milestone |
+| --- | --- | --- |
+| A | Migration/Foundation | Reconciled, branded, theme-ready baseline |
+| B | Catalogue Domain | Supabase-owned VJ/movie/series catalogue |
+| C | Telegram Ingestion | Idempotent bots, matching, review states |
+| D | Discovery UI | Database-driven public Velora UG |
+| E | Playback + History | Secure playback and resume flows |
+| F | Subscription + Mobile Money | Verified entitlements and collections |
+| G | Production/PWA | Operable, tested production release |
 
-```text
-DESIGN.md
-```
+Do not mix phases into one uncontrolled change set. Audit each phase before starting the next.
 
-Agents working on this repository must read those documents before implementing roadmap items.
-
----
-
-# 2. Core Development Principle
-
-Velora must evolve incrementally.
-
-Do not rebuild the application between phases.
-
-Follow:
-
-```text
-REUSE
-  ↓
-COMPOSE
-  ↓
-EXTEND
-  ↓
-CREATE
-```
-
-Before implementing any roadmap item:
-
-* Inspect the existing repository.
-* Search for existing components.
-* Search for existing utilities.
-* Search for existing types.
-* Search for existing data-fetching functions.
-* Search for existing UI patterns.
-* Determine the smallest coherent change.
-
-Do not create parallel implementations of functionality that already exists.
-
----
-
-# 3. Product Goal
-
-Velora will become a production-grade movie and TV discovery platform supporting:
-
-* Movie discovery
-* TV discovery
-* Search
-* Movie and TV details
-* Cast information
-* Trailers
-* Related content
-* Accounts
-* Profiles
-* Watchlists
-* Personalization
-* Search analytics
-* Recommendations
-* Progressive Web App installation
-* Future Expo / React Native applications
-
-The product must remain:
-
-* Fast
-* Lightweight
-* Responsive
-* Mobile-first
-* Accessible
-* SEO-friendly
-* Maintainable
-* Secure
-* Production-ready
-
----
-
-# 4. Technology Direction
-
-Current core:
-
-```text
-Next.js
-React
-TypeScript
-Tailwind CSS
-TMDB
-Lucide
-```
-
-Planned infrastructure should be introduced only when the corresponding phase requires it.
-
-Potential additions:
-
-```text
-Supabase
-PostgreSQL
-Playwright
-Vitest
-Sentry
-PostHog
-Vercel
-Expo / React Native
-```
-
-Do NOT install future dependencies prematurely.
-
-Every dependency must solve an existing problem.
-
----
-
-# 5. Phase Overview
-
-| Phase | Focus                        | Milestone                    |
-| ----- | ---------------------------- | ---------------------------- |
-| 1     | Foundation & Discovery       | Stable discovery application |
-| 2     | Accounts & Persistent Data   | Multi-user application       |
-| 3     | Discovery Intelligence       | Advanced discovery platform  |
-| 4     | Personalization & Engagement | Personalized product         |
-| 5     | PWA & Mobile Readiness       | Installable mobile-ready app |
-| 6     | Production Engineering       | Release candidate            |
-| 7     | Launch & Growth              | Production v1.0              |
-
----
-
-# PHASE 1 — FOUNDATION & DISCOVERY
+# Phase A — Migration/Foundation
 
 ## Objective
 
-Complete and stabilize the existing Velora discovery experience before introducing accounts or database infrastructure.
+Establish a trustworthy repository/database baseline, migrate product identity, and add theme foundations without changing catalogue behavior yet.
 
-Much of this phase already exists.
+## Work
 
-The purpose of this phase is therefore:
+### A1. Reconcile Phase 3 and live schema
 
-**audit → complete → polish → stabilize**
+- Compare `main`, `origin/phase3-discover`, live migration history, and live schema.
+- Preserve Phase 3 Discover/search history/analytics unless explicitly superseded.
+- Merge/rebase as a reviewed change; never recreate its live migration under a new version.
+- Schedule and verify bounded search-event retention before public release.
+- Re-run Phase 1–3 regressions.
 
-rather than rewrite.
+### A2. Approve domain decisions
 
----
+- Decide whether one TMDB title may have multiple entries for different VJs.
+- Approve internal ID/slug strategy and legacy redirects.
+- Approve watchlist handling for unavailable/ambiguous legacy items.
+- Confirm content rights and trusted admin/reviewer authorization.
+- Decision record: `docs/VELORA_UG_SCHEMA_BASELINE.md`.
+- First migration: `20260922080911_velora_ug_catalogue_baseline.sql`.
 
-## Existing Foundation
+### A3. Brand migration
 
-The repository already contains functionality including:
+- Update product-facing metadata, headings, auth/account copy, accessible labels, logo/footer, and relevant docs to Velora UG.
+- Do not rename repository/package/database schema/directories/environment keys without need.
+- Keep TMDB attribution wherever its metadata/artwork is used.
+- Implemented product-facing identity: Velora UG metadata, accessible branding,
+  home/auth copy, and logo treatment; internal package/storage names remain
+  unchanged.
 
-* Homepage
-* Hero
-* Trending content
-* Popular movies
-* Popular TV
-* Top-rated content
-* Movie browsing
-* TV browsing
-* Trending page
-* Search
-* Search scopes
-* Movie/TV details
-* Cast
-* Trailers
-* Similar titles
-* My List
-* Responsive navigation
-* Mobile bottom navigation
-* Loading states
-* Error states
-* Empty states
-* TMDB abstraction
-* Image abstraction
-* Reusable media components
-* SEO metadata
+### A4. Theme foundation
 
-Preserve and improve these implementations.
+- Extend semantic tokens for deliberate light and dark themes.
+- Implement persisted `system | light | dark` with pre-paint initialization and accessible settings control.
+- Test contrast, focus, motion, artwork, skeletons, and forms in both themes.
+- Add no theme dependency unless platform features prove insufficient.
+- Implemented with semantic CSS tokens, a pre-paint initializer, and one native
+  footer control persisted as `system | light | dark`.
 
-Do not recreate them.
+### A5. Environment/documentation cleanup
 
----
+- Remove duplicate `.env.example` entries and add only variables consumed by Phase A.
+- Update README/CLAUDE after behavior/branding land.
+- Preserve server-only naming and production checks.
 
-## 1.1 Repository Audit
+## Acceptance criteria
 
-Audit the existing project.
+- Git and live migration history agree; no applied migration is absent from the chosen branch.
+- Search retention is verified, or analytics writing remains disabled.
+- Lint, typecheck, build, auth, watchlist, search, and responsive checks pass.
+- Product identity is Velora UG without risky internal renames.
+- Light/dark/system persist without wrong-theme flash and meet contrast requirements.
+- Existing catalogue behavior remains until deliberately replaced.
 
-Check:
-
-* Components
-* Routes
-* TMDB integration
-* Type definitions
-* Utilities
-* Responsive behavior
-* Accessibility
-* Loading states
-* Error states
-* Image handling
-* Metadata
-* Dead code
-* Duplicate code
-
-Document significant problems before making broad changes.
-
----
-
-## 1.2 Instruction Consolidation
-
-Repository instructions should have clear ownership.
-
-Target:
-
-```text
-AGENTS.md
-DESIGN.md
-IMPLEMENTATION_ROADMAP.md
-CLAUDE.md
-```
-
-Responsibilities:
-
-### AGENTS.md
-
-Engineering rules.
-
-### DESIGN.md
-
-Visual and UX direction.
-
-### IMPLEMENTATION_ROADMAP.md
-
-Product implementation sequence.
-
-### CLAUDE.md
-
-Small entry point instructing Claude Code to read the documents above.
-
-Avoid multiple competing design or agent instruction files.
-
----
-
-## 1.3 Homepage
-
-Verify and polish:
-
-* Hero
-* Trending section
-* Popular movies
-* Popular TV
-* Top rated
-* Section navigation
-* Loading states
-* Responsive layout
-
-Preserve independent Suspense streaming.
-
-Do not combine everything into a large Client Component.
-
----
-
-## 1.4 Browse Pages
-
-Verify:
-
-```text
-/movies
-/tv
-/trending
-```
-
-Ensure:
-
-* Consistent layouts
-* Pagination where required
-* Correct empty states
-* Correct error states
-* Mobile responsiveness
-* Reusable media grids
-* URL-based filters where applicable
-
----
-
-## 1.5 Search
-
-Complete the search experience.
-
-Verify:
-
-* Debouncing
-* URL-based query state
-* Movie filter
-* TV filter
-* All filter
-* Loading state
-* Empty state
-* Error handling
-* Mobile keyboard behavior
-* Accessible search controls
-
-Do not introduce a client-side data library unless required.
-
----
-
-## 1.6 Detail Pages
-
-Verify:
-
-```text
-/movie/[id]
-/tv/[id]
-```
-
-or the existing equivalent dynamic route.
-
-Ensure detail pages include:
-
-* Backdrop
-* Poster
-* Title
-* Release information
-* Rating
-* Runtime/seasons
-* Genres
-* Overview
-* Trailer
-* Cast
-* Similar content
-* Watchlist action
-* Metadata
-* Open Graph metadata
-* Canonical URL
-
-Reuse existing components.
-
----
-
-## 1.7 My List — Guest Version
-
-Keep the existing guest watchlist implementation operational.
-
-At this stage:
-
-```text
-localStorage
-```
-
-is acceptable.
-
-Do not introduce database synchronization until Phase 2.
-
-Ensure:
-
-* Add works
-* Remove works
-* Refresh persistence works
-* Empty state works
-* Cross-tab behavior works where supported
-* Hydration behavior is correct
-
----
-
-## 1.8 Responsive Audit
-
-Test at approximately:
-
-```text
-320px
-360px
-375px
-390px
-430px
-768px
-1024px
-1280px
-1440px+
-```
-
-Check:
-
-* Navigation
-* Hero
-* Cards
-* Grids
-* Search
-* Detail pages
-* Cast
-* Trailer
-* My List
-* Bottom navigation
-* Touch targets
-
-No essential feature may depend on hover.
-
----
-
-## 1.9 Image Performance
-
-Audit TMDB imagery.
-
-Verify:
-
-* Appropriate image sizes
-* Correct aspect ratios
-* Responsive `sizes`
-* Lazy loading
-* Priority/preload only where justified
-* Image fallbacks
-* Minimal layout shift
-
-Do not download unnecessarily large TMDB images for small cards.
-
----
-
-## 1.10 Accessibility
-
-Audit:
-
-* Semantic HTML
-* Heading hierarchy
-* Keyboard navigation
-* Focus indicators
-* Image alt text
-* Search labels
-* Buttons
-* Links
-* Dialogs if present
-* Contrast
-* Reduced motion
-
----
-
-## 1.11 Code Quality
-
-Before completing Phase 1:
-
-```bash
-npm run lint
-npm run build
-```
-
-must succeed.
-
-Resolve:
-
-* TypeScript errors
-* ESLint errors
-* Broken routes
-* Obvious console errors
-* Duplicate components
-* Dead imports
-* Dead code where confidently removable
-
----
-
-## Phase 1 Exit Criteria
-
-Phase 1 is complete when:
-
-* Core discovery flows work.
-* Search works.
-* Detail pages work.
-* Guest My List works.
-* Mobile layouts work.
-* Desktop layouts work.
-* Images are optimized.
-* Accessibility baseline is acceptable.
-* No obvious duplicate components remain.
-* Build succeeds.
-* Lint succeeds.
-* No unnecessary dependency has been introduced.
-
-Milestone:
-
-```text
-v0.1 — Foundation
-```
-
----
-
-# PHASE 2 — ACCOUNTS & PERSISTENT DATA
+# Phase B — Catalogue Domain
 
 ## Objective
 
-Transform Velora from an anonymous discovery frontend into a persistent multi-user application.
+Create the normalized Supabase source of truth for VJs, available movies, series, seasons, episodes, genres, Telegram references, and review state.
 
-Introduce:
+## Work
 
-```text
-Supabase
-PostgreSQL
-Supabase Auth
-```
+### B1. Migration design and verification
 
-Keep infrastructure minimal.
+- Resolve schema workflow from the reconciled repository.
+- Create migrations through the Supabase CLI workflow; do not invent history around live objects.
+- Add PKs, FKs, unique/check constraints, timestamps, indexes, grants, and RLS.
+- Public policies read published rows only; raw/provider tables have no client access.
+- Run advisors and adversarial RLS tests.
 
----
+### B2. Catalogue entities
 
-## 2.1 Supabase Foundation
+- Add VJs, movies, series, seasons, episodes, normalized genres/joins, Telegram media, ingestion events, and match-review records.
+- Store approved TMDB snapshots/sync timestamps locally.
+- Keep drafts, ambiguous, rejected, and unavailable records non-public.
 
-Configure:
+### B3. Catalogue data layer
 
-* Supabase project
-* Environment variables
-* Browser client where required
-* Server client
-* Session handling
-* Database migrations/schema
-* Generated or maintained database types
+- Add server-only query modules returning framework-independent domain types.
+- Support published lists, featured/latest/popular, VJ, genre, details, seasons, and episodes.
+- Use deterministic keyset pagination as data grows.
+- Never expose Telegram identifiers in public shapes.
 
-Never expose service-role credentials to the browser.
+### B4. Watchlist compatibility
 
----
+- Add internal movie/series references alongside legacy TMDB references.
+- Backfill only unambiguous approved mappings; report exceptions.
+- Support both formats without losing guest/account data.
+- Stop legacy writes first; remove legacy columns only later after verification.
 
-## 2.2 Authentication
+### B5. TMDB boundary
 
-Implement:
+- Retain centralized server TMDB access for admin matching and refresh.
+- Remove TMDB from ordinary catalogue read paths.
+- Disable sample catalogue in production.
 
-* Sign up
-* Sign in
-* Sign out
-* Session persistence
-* Protected account functionality
-* Auth loading/error states
+## Acceptance criteria
 
-Choose the simplest appropriate authentication methods initially.
+- Constraints prevent orphan seasons/episodes, duplicate deliveries, invalid workflows, and cross-user access.
+- Common FKs/RLS filters have appropriate indexes.
+- Public roles see only active VJs and published, ready content.
+- Draft/ingestion/payment/Telegram rows have no unintended client grants.
+- Existing watchlists survive and unresolved rows remain removable.
+- Normal home/browse/detail/watchlist renders make zero TMDB calls.
+- Migrations, database types, advisors, lint, typecheck, and build pass.
 
-Do not build a complex identity system.
-
----
-
-## 2.3 Profiles
-
-Create a minimal profile model.
-
-Potential fields:
-
-```text
-id
-display_name
-avatar_url
-created_at
-updated_at
-```
-
-Do not collect unnecessary personal information.
-
----
-
-## 2.4 Persistent Watchlists
-
-Create persistent user watchlists.
-
-Initial schema can remain lightweight.
-
-Example:
-
-```text
-watchlist_items
-
-id
-user_id
-tmdb_id
-media_type
-created_at
-```
-
-Enforce uniqueness for:
-
-```text
-user_id + tmdb_id + media_type
-```
-
-Do not duplicate the complete TMDB catalogue in PostgreSQL.
-
-TMDB remains the source of truth for media metadata unless a later requirement justifies caching selected metadata.
-
----
-
-## 2.5 Row Level Security
-
-Enable Supabase RLS.
-
-Users must only be able to:
-
-* Read their own private watchlist data
-* Create their own watchlist entries
-* Delete their own watchlist entries
-* Modify their own profile where permitted
-
-Never rely solely on frontend authorization.
-
----
-
-## 2.6 Preserve Existing Components
-
-Do NOT rewrite:
-
-```text
-MovieCard
-MovieListItem
-MovieSection
-WatchlistButton
-My List presentation
-```
-
-merely because persistence changes.
-
-Replace or extend the underlying data layer.
-
-Desired architecture:
-
-```text
-UI
- ↓
-watchlist interface
- ↓
-guest → localStorage
-authenticated → Supabase
-```
-
----
-
-## 2.7 Guest Watchlist Migration
-
-Anonymous users may build a local watchlist.
-
-When they authenticate:
-
-```text
-localStorage watchlist
-        ↓
-authenticate
-        ↓
-merge with server watchlist
-        ↓
-deduplicate
-        ↓
-persist to Supabase
-        ↓
-clean migrated local state
-```
-
-Migration must be safe and idempotent.
-
----
-
-## 2.8 Account UX
-
-Add only necessary account UI:
-
-* Sign in
-* Sign up
-* Profile/account
-* Sign out
-* My List
-
-Keep authentication screens lightweight.
-
----
-
-## Phase 2 Exit Criteria
-
-* Users can register.
-* Users can sign in.
-* Sessions persist.
-* Users can sign out.
-* Watchlists persist across devices.
-* Guest watchlists can migrate.
-* RLS protects user data.
-* Existing media components remain reused.
-* Build and lint pass.
-* Authentication flows work on mobile and desktop.
-
-Milestone:
-
-```text
-v0.2 — Accounts
-```
-
----
-
-# PHASE 3 — DISCOVERY INTELLIGENCE
+# Phase C — Telegram Ingestion
 
 ## Objective
 
-Make Velora substantially better at helping users find content.
+Ingest movie/series channel posts through separate bots, attach normalized records, enrich metadata, and route ambiguity to review.
 
----
+## Work
 
-## 3.1 Discover Experience
+### C1. Server boundary
 
-Introduce a dedicated discovery experience.
+- Add typed server-only Telegram transport/validation.
+- Configure separate movie/series tokens, channel IDs, and webhook secrets.
+- Add POST routes with body limits, strict schemas, secret checks, and channel allow-lists.
 
-Potential filters:
+### C2. Idempotent persistence
 
-* Genre
-* Movie/TV
-* Release year
-* Rating
-* Popularity
-* Language where useful
+- Deduplicate by bot/update and bot/chat/message.
+- Store both Telegram file IDs plus filenames/captions/sizes and safe metadata.
+- Acknowledge after durable recording; make retries/reprocessing safe.
 
-Keep filters URL-driven where practical.
+### C3. Parsing and review
 
-Example:
+- Parse title/year/VJ and series/season/episode as suggestions.
+- Resolve VJs from database data, not hardcoded reusable logic.
+- Unknown/conflicting parses enter `needs_review`.
+- Provide minimal audited correction operations.
 
-```text
-/discover?type=movie&genre=28&year=2026
-```
+### C4. TMDB matching
 
-This makes states:
+- Search only for existing ingestion/draft records.
+- Score multiple signals and record reasons.
+- Auto-match only clear high-confidence candidates; never auto-publish ambiguity.
+- Store metadata locally and publish transactionally only when ready.
 
-* Shareable
-* Bookmarkable
-* SEO-compatible where appropriate
-* Easier to debug
+### C5. Operations
 
----
+- Add authenticated/internal replay and reconciliation.
+- Redact logs and retain raw payloads only as justified.
+- Monitor failures, review backlog, and parser regressions.
 
-## 3.2 Genre Discovery
+## Acceptance criteria
 
-Users should be able to browse titles by genre.
+- Movie and series credentials/updates cannot cross channels.
+- Bad secrets/channels/bodies/schemas/media fail safely.
+- Concurrent/replayed updates produce one durable result.
+- Ambiguous TMDB/VJ/episode matches cannot become public.
+- Corrections are audited and reprocessing is idempotent.
+- Tokens/private IDs are absent from client code, responses, and logs.
+- Failure, empty, pending, review, rejected, and published states are tested.
 
-Reuse existing:
-
-```text
-MovieCard
-MovieGrid
-BrowsePage
-```
-
-or their current equivalents.
-
-Do not create genre-specific card systems.
-
----
-
-## 3.3 Search History
-
-For authenticated users, optionally persist recent searches.
-
-Provide:
-
-* Recent queries
-* Remove query
-* Clear history
-
-Do not store unnecessary search data.
-
----
-
-## 3.4 Search Analytics
-
-Introduce anonymous/product-level search event tracking.
-
-Potential model:
-
-```text
-search_events
-
-id
-user_id nullable
-query
-result_count
-created_at
-```
-
-Consider privacy and data minimization.
-
----
-
-## 3.5 Real Trending Searches
-
-Replace the current conceptual TMDB-based trending-search suggestions with actual Velora search trends.
-
-Calculate trends from Velora search activity.
-
-The UI should continue to reuse the existing search experience.
-
----
-
-## 3.6 Recently Viewed
-
-Optionally track recently viewed titles.
-
-Potential uses:
-
-```text
-Continue exploring
-Recently viewed
-Return to title
-```
-
-Keep storage and retention proportional to the feature.
-
----
-
-## 3.7 Recommendations
-
-Start simple.
-
-Use signals such as:
-
-* Genres
-* Saved titles
-* Similar-title data
-* Recent interactions
-* TMDB recommendations
-
-Do NOT introduce custom machine-learning infrastructure yet.
-
----
-
-## Phase 3 Exit Criteria
-
-* Discover page works.
-* Genre browsing works.
-* Filters work.
-* Search analytics exist.
-* Trending searches represent Velora activity.
-* Recently viewed works if implemented.
-* Basic recommendations work.
-* Existing media components are reused.
-* Performance remains acceptable.
-
-Milestone:
-
-```text
-v0.3 — Discovery
-```
-
----
-
-# PHASE 4 — PERSONALIZATION & ENGAGEMENT
+# Phase D — Velora UG Discovery UI
 
 ## Objective
 
-Make Velora useful as a persistent personal entertainment product.
+Replace TMDB-first discovery with polished database-driven Movies, Series, VJs, and Search using the existing UI system.
 
----
+## Work
 
-## 4.1 Personalized Homepage
+### D1. Information architecture
 
-Authenticated users may receive sections such as:
+- Desktop: Home, Search, Movies, Series, VJs, My List, History, Account/Settings.
+- Mobile: Home, Search, Movies, Series, Library/Profile.
+- Fix existing 768–960 px header compression instead of cramming more labels.
+- Redirect deprecated `/tv`, `/trending`, and legacy details.
 
-```text
-Recommended for You
-Because You Saved...
-Recently Viewed
-Your Genres
-Popular This Week
-```
+### D2. Posters and VJs
 
-Do not overwhelm the homepage.
+- Extend existing card/image composition with reusable top-left `VjBadge`.
+- Use database names/variants and semantic tokens.
+- Preserve lazy/responsive images, fallbacks, touch, and keyboard access.
 
-Prioritize useful sections.
+### D3. Home
 
----
+- Featured, Continue Watching, Latest Movies/Episodes, Popular Movies/Series, VJs, Recently Added, and database genre rows.
+- Render only useful non-empty sections and available records.
+- Preserve independent streaming boundaries where beneficial.
 
-## 4.2 Favourites
+### D4. Movies and Series
 
-Only introduce favourites if product behavior clearly differs from watchlists.
+- Responsive grids; URL VJ/genre/sort filters; keyset pagination; complete async states.
+- Series details expose normalized seasons/episodes and next-episode relationships.
+- Mobile filters use compact accessible controls.
 
-Potential distinction:
+### D5. VJs and search
 
-```text
-Watchlist
-→ things I want to watch
+- VJ index/detail with movie/series sections.
+- Search published movies, series, and VJs in Postgres.
+- Adapt Phase 3 search history/analytics scopes and retention.
+- Keep TMDB search admin-only.
 
-Favourite
-→ things I already love
-```
+### D6. SEO
 
-Do not add duplicate concepts without meaningful UX differences.
+- Local metadata drives title/description/canonical/Open Graph.
+- Published details are indexable; filter pages get intentional canonical/index rules.
+- Unpublished records never leak through metadata.
 
----
+## Acceptance criteria
 
-## 4.3 Ratings
+- Public pages contain only published/available Supabase catalogue content.
+- Relevant posters carry readable overlays without modified artwork.
+- Filters survive refresh/back/forward and have canonical URL state.
+- Search returns movies/series/VJs, never unavailable TMDB titles.
+- 360, 390, 430, 768, 1024, and 1280+ layouts have no overflow and have touch targets.
+- Keyboard/headings/labels/focus/contrast/motion/async states pass.
+- Auth, guest/account watchlists, guest merge, search history, and themes regressions pass.
+- Image/client-bundle budgets do not regress without justification.
 
-If user ratings are introduced:
-
-* Keep the interaction simple.
-* Store ratings per user/title.
-* Allow editing/removal.
-* Keep TMDB ratings visually distinct from Velora user ratings.
-
----
-
-## 4.4 Profile
-
-Expand profile functionality only as needed.
-
-Potential information:
-
-* Display name
-* Avatar
-* Joined date
-* Saved count
-* Favourite genres
-
-Avoid turning profiles into social networks prematurely.
-
----
-
-## 4.5 Settings
-
-Potential settings:
-
-* Theme when light mode exists
-* Content preferences
-* Language
-* Privacy preferences
-* Account management
-
-Only implement settings backed by real behavior.
-
----
-
-## 4.6 Recommendation Signals
-
-Improve recommendations using available first-party signals.
-
-Possible signals:
-
-```text
-watchlist
-favourites
-ratings
-genres
-searches
-recently viewed
-```
-
-Keep algorithms understandable initially.
-
----
-
-## Phase 4 Exit Criteria
-
-* Homepage can personalize appropriately.
-* User preferences persist.
-* Profile experience is complete.
-* Personalization works across sessions.
-* Recommendation logic remains maintainable.
-* No unnecessary social features exist.
-* Performance remains acceptable.
-
-Milestone:
-
-```text
-v0.4 — Personalization
-```
-
----
-
-# PHASE 5 — PWA & MOBILE READINESS
+# Phase E — Playback + History
 
 ## Objective
 
-Make Velora feel like an application on mobile devices and prepare the architecture for future native apps.
+Deliver entitled Telegram-backed media securely and add resume, Continue Watching, History, and next episode.
 
----
+## Work
 
-## 5.1 Web App Manifest
+### E1. Delivery spike (blocks player work)
 
-Implement:
+- Measure real file sizes/codecs and verify the authorized Telegram path.
+- Test byte ranges, seeking, throughput, concurrency, token refresh, and hosting limits.
+- Compare hosted/local Bot API or another permitted server delivery gateway.
+- Document cost, failure, legal/terms, and rollback.
 
-* App name
-* Short name
-* Description
-* Icons
-* Theme colors
-* Start URL
-* Display behavior
+### E2. Playback authorization
 
-Users should be able to install Velora where supported.
+- Issue short-lived server playback sessions only for published media and entitled users.
+- Never expose bot credentials/permanent private URLs.
+- Add rate/abuse controls and safe cache headers.
 
----
+### E3. Player and progress
 
-## 5.2 App Icons
+- Build a lightweight accessible player with mobile-data awareness.
+- Persist progress through bounded/throttled idempotent writes.
+- Define completion and restart.
 
-Create production-quality Velora icons for required sizes.
+### E4. Series continuity
 
-Maintain consistent branding.
+- Resolve next episode from normalized order.
+- Persist autoplay-next setting and handle missing next episodes.
 
----
+### E5. Continue Watching and History
 
-## 5.3 Mobile Navigation Audit
+- Derive own-user rows from progress/history.
+- Provide RLS-protected clear/remove controls.
+- Keep these distinct from My List.
 
-Verify:
+## Acceptance criteria
 
-* Bottom navigation
-* Search
-* Account access
-* My List
-* Safe-area behavior
-* Keyboard behavior
-* Touch targets
+- Spike proves secure seek/range playback for representative feature-length files.
+- Unauthenticated/unentitled/unpublished/expired/cross-user/tampered requests cannot play.
+- Network/browser output contains no bot or privileged keys.
+- Resume survives sessions/devices without write flooding.
+- Continue Watching, History, completion, restart, next episode, and autoplay work on mobile/desktop.
+- Loading, expired, missing, network-error, and recovery states work.
 
----
-
-## 5.4 PWA Caching
-
-Use caching carefully.
-
-Good candidates:
-
-* Static assets
-* App shell resources
-* Selected non-sensitive resources
-
-Be conservative with dynamic TMDB data.
-
-Avoid complicated offline synchronization unless there is a concrete product requirement.
-
----
-
-## 5.5 Offline Experience
-
-Provide a graceful offline state.
-
-Do not attempt to make every Velora feature fully offline.
-
----
-
-## 5.6 Mobile Architecture Preparation
-
-Identify logic suitable for future sharing:
-
-```text
-types
-schemas
-API contracts
-business logic
-constants
-utilities
-```
-
-Do not prematurely convert the repository into a monorepo unless native development is actually beginning.
-
----
-
-## 5.7 Future Native Direction
-
-Native target:
-
-```text
-Expo
-React Native
-TypeScript
-```
-
-When native development begins, potential structure:
-
-```text
-apps/
-├── web/
-└── mobile/
-
-packages/
-├── api/
-├── types/
-├── validation/
-├── config/
-└── utils/
-```
-
-Do not share UI merely for the sake of sharing code.
-
-Share domain logic.
-
----
-
-## Phase 5 Exit Criteria
-
-* Velora is installable where PWA installation is supported.
-* Manifest is valid.
-* Icons work.
-* Mobile navigation is polished.
-* Offline failure is graceful.
-* Touch interactions are reliable.
-* Architecture is ready for a future Expo client.
-* No unnecessary PWA complexity has been introduced.
-
-Milestone:
-
-```text
-v0.5 — Mobile Ready
-```
-
----
-
-# PHASE 6 — PRODUCTION ENGINEERING
+# Phase F — Subscription + Mobile Money
 
 ## Objective
 
-Turn the feature-complete product into a dependable production release candidate.
+Add database plans, server-derived entitlement, MTN/Airtel collection, verified callbacks, and reconciliation.
 
----
+## Work
 
-## 6.1 Testing Infrastructure
+### F1. Plans and subscriptions
 
-Introduce testing deliberately.
+- Add active/sorted UGX plans without inventing final prices.
+- Add subscription terms/state snapshots and server entitlement service.
+- Define renewal/cancellation/expiry/revocation/refund/device semantics before UI claims them.
 
-Potential stack:
+### F2. Provider-neutral service
 
-```text
-Vitest
-React Testing Library
-Playwright
-```
+- Typed provider interface and server-side validation/phone normalization.
+- Load plan/amount/currency server-side.
+- Persist pending before remote initiation.
+- Enforce immutable references, user idempotency, transitions, and redaction.
 
-Do not chase meaningless coverage percentages.
+### F3. MTN MoMo
 
-Prioritize behavior and critical journeys.
+- Sandbox OAuth, RequestToPay, callback, status polling, error mapping.
+- Treat asynchronous acceptance as pending.
+- Reconcile because callbacks may be sent once only.
 
----
+### F4. Airtel Money
 
-## 6.2 End-to-End Testing
+- Obtain official Uganda merchant documentation/sandbox access first.
+- Implement only documented auth, collection, callback verification, and status behavior.
+- Never use unofficial examples as the contract.
 
-Critical flows should include:
+### F5. Verification and activation
 
-### Discovery
+- Persist/deduplicate events and prevent replay.
+- Verify server-side, lock terminal transitions, activate/extend transactionally.
+- Add protected reconciliation and runbooks.
 
-```text
-Homepage
-→ browse
-→ select title
-→ detail page
-```
+### F6. UX
 
-### Search
+- Plans, provider selection, Uganda phone input, pending/failure/success, subscription summary, payment history.
+- Explain phone approval and that pending is not success.
 
-```text
-Search
-→ results
-→ filter
-→ detail
-```
+## Acceptance criteria
 
-### Authentication
+- Prices/durations/currency/entitlement are server-derived.
+- Browser tampering with plan/amount/user/reference/success has no authority.
+- Duplicate initiation/callback/reconciliation never double-extends.
+- MTN sandbox covers initiation, missed callback polling, success/rejection/expiry/failure.
+- Airtel requires official Uganda contract tests and sandbox evidence before enablement.
+- Only verified success activates access.
+- RLS/two-user tests, limits, secret scans, redaction, lint, typecheck, build, and E2E pass.
 
-```text
-Sign up
-→ session
-→ sign out
-→ sign in
-```
-
-### Watchlist
-
-```text
-Sign in
-→ add title
-→ My List
-→ verify title
-→ remove title
-```
-
-### Guest Migration
-
-```text
-guest
-→ save title
-→ authenticate
-→ verify title migrated
-```
-
----
-
-## 6.3 Security Review
-
-Audit:
-
-* Environment variables
-* Secrets
-* Authentication
-* Authorization
-* RLS
-* Input validation
-* Redirects
-* External URLs
-* API usage
-* Database permissions
-* Error messages
-
-Never expose internal credentials.
-
----
-
-## 6.4 Rate Limiting
-
-Add rate limiting only where abuse risk warrants it.
-
-Potential candidates:
-
-* Authentication-related endpoints
-* Search/event collection
-* Expensive server endpoints
-
-Do not add infrastructure solely because rate limiting sounds production-ready.
-
----
-
-## 6.5 Performance Audit
-
-Measure:
-
-* Core Web Vitals
-* Initial JavaScript
-* Image weight
-* Fonts
-* Server response times
-* TMDB calls
-* Database calls
-* Hydration
-* Client Components
-
-Optimize measured bottlenecks.
-
----
-
-## 6.6 Bundle Audit
-
-Identify:
-
-* Large dependencies
-* Duplicate dependencies
-* Unnecessary client libraries
-* Components accidentally moved client-side
-
-Remove unnecessary weight.
-
----
-
-## 6.7 Monitoring
-
-Introduce production error monitoring.
-
-Preferred direction:
-
-```text
-Sentry
-```
-
-Track actionable errors.
-
-Avoid collecting unnecessary user data.
-
----
-
-## 6.8 CI
-
-GitHub Actions should verify relevant checks.
-
-Potential pipeline:
-
-```text
-install
-   ↓
-lint
-   ↓
-type check
-   ↓
-tests
-   ↓
-build
-```
-
-E2E strategy should remain practical for the project's deployment workflow.
-
----
-
-## 6.9 Accessibility Audit
-
-Perform a final accessibility pass.
-
-Verify:
-
-* Keyboard navigation
-* Focus
-* Contrast
-* Screen-reader semantics
-* Forms
-* Error messages
-* Modals
-* Mobile navigation
-* Reduced motion
-
----
-
-## Phase 6 Exit Criteria
-
-* Critical E2E flows pass.
-* Unit/component tests cover important logic where useful.
-* CI passes.
-* Security review is complete.
-* RLS is verified.
-* Production errors can be monitored.
-* Performance has been measured.
-* Major performance issues are resolved.
-* Accessibility has been audited.
-* Production build succeeds.
-
-Milestone:
-
-```text
-v0.9 — Release Candidate
-```
-
----
-
-# PHASE 7 — PRODUCTION LAUNCH & GROWTH
+# Phase G — Production/PWA
 
 ## Objective
 
-Launch Velora as a production application with the operational infrastructure required to maintain and improve it.
+Make Velora UG installable, observable, maintainable, secure, and production-ready.
 
----
+## Work
 
-## 7.1 Production Deployment
+### G1. Lightweight admin
 
-Primary web deployment:
+- Pending ingestion, metadata review, published/rejected, VJs, series mapping, payments, subscriptions.
+- Reuse domain services; do not build a giant CMS.
+- Audit privileged actions and use trusted admin authorization.
 
-```text
-Vercel
-```
+### G2. Testing and CI
 
-Configure:
+- Add Vitest/RTL where useful and Playwright for critical flows.
+- Cover parser/idempotency, catalogue/RLS, auth/watchlist, discovery, playback, and payment machines.
+- CI: clean install, lint, typecheck, tests, build, migration checks.
 
-* Production environment
-* Environment variables
-* Domain
-* HTTPS
-* Deployment protections where appropriate
+### G3. Observability and operations
 
----
+- Sentry, structured redacted logs, operational dashboards/alerts.
+- PostHog only for approved minimal analytics.
+- Verify retention, backups/restore, rollback, provider reconciliation, and incidents.
 
-## 7.2 Environment Strategy
+### G4. Security and performance
 
-Maintain clear environments where useful:
+- Rate-limit risky/expensive/provider endpoints.
+- Run advisors, RLS/dependency/secret/CSP/callback/replay reviews.
+- Measure Web Vitals, latency, queries, imagery, playback start, JS, and mobile data.
 
-```text
-local
-preview/staging
-production
-```
+### G5. PWA/mobile readiness
 
-Production credentials must remain separate from development credentials where practical.
+- Manifest, production icons, install UX, safe areas, theme colors, graceful offline shell.
+- Cache only safe static/public resources, never auth/payment/playback/entitlement secrets.
+- Keep types/validation/contracts/business logic Expo-ready without premature monorepo conversion.
 
----
+### G6. Launch
 
-## 7.3 Domain
+- Provider production onboarding/callback allow-lists.
+- Legal approval for content, privacy, terms, subscriptions, refunds, and Uganda payments.
+- Staged release, monitoring, rollback, support, and reconciliation ownership.
 
-Configure the official Velora domain.
+## Acceptance criteria
 
-Ensure:
+- Critical E2E flows pass in CI/staging.
+- No high-severity security/RLS/advisor issue remains.
+- Retention/reconciliation/backups/restore/alerts/rollback/incidents are tested.
+- PWA works without caching sensitive responses.
+- Accessibility and real-device/browser checks cover representative layouts.
+- Catalogue/playback performance budgets pass.
+- Legal/content/provider approvals and operational owners are recorded.
 
-* HTTPS
-* Canonical host
-* Redirect behavior
-* Metadata URLs
-* Sitemap URLs
-* Open Graph URLs
+## Cross-phase engineering gates
 
-are correct.
+Every phase must:
 
----
+1. Inspect and reuse before creating.
+2. Keep Server Components default and client boundaries narrow.
+3. Add no dependency unless platform/existing packages cannot solve the need.
+4. Validate external input and keep secrets server-side.
+5. Handle loading, success, empty, and error states.
+6. Verify RLS/grants independently of UI authorization.
+7. Preserve mobile/touch/accessibility/image performance.
+8. Run relevant lint, typecheck, tests, build, advisors, and diff review.
+9. Document migrations, environment changes, operations, and debt.
+10. Stop at the phase boundary.
 
-## 7.4 SEO
+## Dependency policy
 
-Production SEO should include:
+- Current dependencies cover Next.js, React, Supabase, Zod, Tailwind, and icons.
+- Prefer native fetch/crypto, server modules, CSS, and browser APIs for Telegram, payments, theme, and UI.
+- Add testing packages with automated tests; Redis only when a concrete coordination/abuse need exists.
+- No Redux, GraphQL, alternate UI framework, heavy animation library, or speculative service layer.
 
-* Metadata
-* Canonical URLs
-* Sitemap
-* robots.txt
-* Open Graph
-* Social images
-* Semantic headings
-* Indexable media pages where appropriate
-* Structured data where it provides genuine value
-
-Avoid SEO spam.
-
----
-
-## 7.5 Product Analytics
-
-Introduce product analytics when there is real usage to analyze.
-
-Potential platform:
+## Architecture guardrails
 
 ```text
-PostHog
+UI / routes
+  -> domain services and validation
+    -> catalogue / auth / payment / Telegram boundaries
+      -> Supabase, TMDB enrichment, Telegram, payment providers
 ```
 
-Track meaningful events such as:
-
-```text
-search
-media_view
-watchlist_add
-watchlist_remove
-signup
-login
-trailer_play
-```
-
-Do not track every click.
-
----
-
-## 7.6 Privacy
-
-Document:
-
-* What information is collected
-* Why it is collected
-* How long it is retained
-* Which external services process it
-
-Provide appropriate:
-
-* Privacy policy
-* Cookie handling where applicable
-* Account deletion process
-* Data deletion process
-
-Requirements should reflect jurisdictions in which Velora operates.
-
----
-
-## 7.7 Database Operations
-
-Establish:
-
-* Migration process
-* Backup strategy
-* Recovery procedure
-* RLS review process
-
-Production database changes should be deliberate.
-
----
-
-## 7.8 Monitoring
-
-Monitor:
-
-* Application errors
-* Deployment failures
-* Database failures
-* Authentication issues
-* API failures
-* Performance regressions
-
-Alerts should be actionable.
-
----
-
-## 7.9 Analytics Review
-
-After launch, use actual product data to determine what to build next.
-
-Evaluate:
-
-```text
-What do users search for?
-What do they save?
-Where do they abandon flows?
-Which discovery sections are useful?
-How often do users return?
-Which devices dominate usage?
-```
-
-Do not optimize based purely on assumptions.
-
----
-
-## 7.10 Native Mobile Decision
-
-Only after the responsive/PWA product has meaningful usage should native development become a major engineering priority.
-
-At that point evaluate:
-
-```text
-Expo + React Native
-```
-
-using Velora's existing:
-
-* Backend
-* Authentication
-* Database
-* Types
-* API contracts
-* Business logic
-* Product analytics
-
-Do not rewrite the backend for mobile.
-
----
-
-## Phase 7 Exit Criteria
-
-* Production deployment is live.
-* Domain works.
-* HTTPS works.
-* SEO infrastructure works.
-* Monitoring works.
-* Analytics works.
-* Privacy requirements are addressed.
-* Backup/recovery strategy exists.
-* CI/CD is reliable.
-* Production environment is documented.
-* Critical user journeys work in production.
-
-Milestone:
-
-```text
-v1.0 — Production
-```
-
----
-
-# 6. Version Roadmap
-
-```text
-v0.1
-Foundation
-    ↓
-v0.2
-Accounts
-    ↓
-v0.3
-Discovery
-    ↓
-v0.4
-Personalization
-    ↓
-v0.5
-PWA / Mobile Ready
-    ↓
-v0.9
-Release Candidate
-    ↓
-v1.0
-Production
-```
-
----
-
-# 7. Dependency Policy
-
-Dependencies must be introduced when needed, not because they appear in the long-term architecture.
-
-Before installing a package ask:
-
-```text
-Can React solve it?
-        ↓
-Can Next.js solve it?
-        ↓
-Can Tailwind/CSS solve it?
-        ↓
-Can browser APIs solve it?
-        ↓
-Can an existing dependency solve it?
-        ↓
-Is a new dependency justified?
-```
-
-Examples:
-
-### Phase 1
-
-Keep the existing lightweight stack.
-
-### Phase 2
-
-Introduce Supabase packages required for authentication/database access.
-
-### Phase 3–5
-
-Add packages only for concrete requirements.
-
-### Phase 6
-
-Introduce testing and monitoring infrastructure.
-
-### Phase 7
-
-Introduce product analytics if justified.
-
-Do NOT install the complete future stack at once.
-
----
-
-# 8. Architecture Guardrails
-
-<!-- The original section was cut off after "# 8. Archite". This was drafted from decisions already stated in this roadmap and in AGENTS.md; edit or replace it freely. -->
-
-The architecture stays deliberately small. These guardrails restate decisions made elsewhere in this document and in `AGENTS.md`, so every phase builds on the same shape.
-
-## 8.1 Layers
-
-```text
-UI            Server Components first; small client islands
-   ↓
-Feature logic watchlist, search, discovery (no framework imports)
-   ↓
-Data access   TMDB client now; Supabase from Phase 2 (server-side only)
-   ↓
-Services      TMDB, Supabase, later monitoring and analytics
-```
-
-* Presentation components receive domain types; they do not call TMDB or Supabase directly.
-* Secrets stay on the server. Only `NEXT_PUBLIC_*` values are safe for the browser.
-* Authorization is enforced by the server and the database (RLS from Phase 2), never by hiding UI.
-
-## 8.2 Data
-
-* TMDB is the source of truth for media metadata; Velora stores identifiers plus user data (Phase 2.4).
-* Domain types (`types/media.ts`) are independent of TMDB response shapes. Mapping happens at the data-access boundary.
-* Respect TMDB's terms: keep the required attribution visible and do not cache TMDB content for longer than they allow.
-
-## 8.3 Portability
-
-Logic that may be shared with a future Expo client (Phase 5.6): types, schemas, API contracts, business logic, constants and utilities. UI is not shared for its own sake, and the repository does not become a monorepo until native work begins.
-
-## 8.4 Change discipline
-
-* Reuse before create (`AGENTS.md`): one component per concept.
-* Add a dependency only when it solves a current problem, in the phase that needs it (section 7).
-* Release gate: from a fresh clone, `npm ci` → lint → typecheck → build must pass before a phase is called complete.
+- Components consume Velora UG domain types, never raw provider payloads.
+- TMDB/Telegram/payment shapes stay at their adapters.
+- Catalogue/entitlement logic remains portable to a future Expo client.
+- Public reads are published-only; privileged writes use narrow audited server paths.
+- Preserve deliberate restrictions when regenerating database types.
+- Prefer the simplest solution satisfying correctness, security, performance, and migration safety.

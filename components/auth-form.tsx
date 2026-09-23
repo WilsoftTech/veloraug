@@ -21,7 +21,7 @@ const COPY = {
     lead: "Welcome back. Your list is waiting.",
     submit: "Sign in",
     pending: "Signing in…",
-    switchText: "New to Velora?",
+    switchText: "New to Velora UG?",
     switchLink: "Create an account",
     switchHref: "/sign-up",
   },

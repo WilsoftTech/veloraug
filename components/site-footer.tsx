@@ -1,5 +1,6 @@
 import Image from "next/image";
 import { Logo } from "@/components/logo";
+import { ThemeControl } from "@/components/theme-control";
 
 /**
  * TMDB's API terms (themoviedb.org/api-terms-of-use) require the TMDB logo to
@@ -15,6 +16,7 @@ export function SiteFooter() {
             <Logo className="h-7" />
             <p>Your World of Entertainment.</p>
           </div>
+          <ThemeControl />
           <p className="text-body-sm">© 2026 Wilsoft Technologies. All rights reserved.</p>
         </div>
 
