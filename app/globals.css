@@ -1,9 +1,9 @@
 @import "tailwindcss";
 
 /*
- * Velora design tokens, taken from DESIGN.md ("Cognitive Deep-Blue Glass").
- * Components reference only the semantic names below, so a future light theme
- * is a matter of overriding these variables.
+ * Velora UG design tokens, evolved from DESIGN.md ("Cognitive Deep-Blue Glass").
+ * Components reference only the semantic names below; light and dark modes
+ * change values without changing component contracts.
  */
 :root {
   color-scheme: dark;
@@ -33,6 +33,54 @@
   --destructive: #ffb4ab;
   /* Ratings keep the conventional star colour; the one non-palette hue. */
   --star: #f59e0b;
+  --ambient-glow: rgb(37 99 235 / 0.12);
+  --logo-backdrop: transparent;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --background: #f8f7f4;
+  --canvas-subtle: #eef1f6;
+  --surface: rgb(255 255 255 / 0.72);
+  --surface-elevated: #ffffff;
+  --border: rgb(15 23 42 / 0.14);
+  --foreground: #0f172a;
+  --muted: #475569;
+  --accent: #1d4ed8;
+  --accent-hover: #1e40af;
+  --accent-foreground: #ffffff;
+  --highlight: #0369a1;
+  --tertiary: #2563eb;
+  --destructive: #b42318;
+  --star: #b45309;
+  --ambient-glow: rgb(37 99 235 / 0.08);
+  --logo-backdrop: #0f172a;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+    --background: #f8f7f4;
+    --canvas-subtle: #eef1f6;
+    --surface: rgb(255 255 255 / 0.72);
+    --surface-elevated: #ffffff;
+    --border: rgb(15 23 42 / 0.14);
+    --foreground: #0f172a;
+    --muted: #475569;
+    --accent: #1d4ed8;
+    --accent-hover: #1e40af;
+    --accent-foreground: #ffffff;
+    --highlight: #0369a1;
+    --tertiary: #2563eb;
+    --destructive: #b42318;
+    --star: #b45309;
+    --ambient-glow: rgb(37 99 235 / 0.08);
+    --logo-backdrop: #0f172a;
+  }
 }
 
 @theme inline {
@@ -110,7 +158,7 @@
 body {
   background-color: var(--background);
   /* Layer 0: a faint ambient glow at the top of the canvas. */
-  background-image: radial-gradient(ellipse 70% 100% at 80% 0%, rgb(37 99 235 / 0.12), transparent 70%);
+  background-image: radial-gradient(ellipse 70% 100% at 80% 0%, var(--ambient-glow), transparent 70%);
   background-size: 100% 42rem;
   background-repeat: no-repeat;
   color: var(--foreground);

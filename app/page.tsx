@@ -24,7 +24,7 @@ function Catalog(props: Parameters<typeof CatalogSection>[0]) {
 export default function HomePage() {
   return (
     <>
-      <h1 className="sr-only">Velora — discover movies and TV shows</h1>
+      <h1 className="sr-only">Velora UG — discover movies and series</h1>
       <Suspense fallback={<HeroSkeleton />}>
         <Hero />
       </Suspense>

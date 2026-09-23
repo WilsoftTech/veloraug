@@ -163,9 +163,9 @@ This is an entertainment experience, not an analytics dashboard.
 
 # 5. Theme
 
-VELORA is a **dark-only** product for now: movie artwork and trailers benefit from a dark environment.
+VELORA UG supports **system, light, and dark** appearance preferences. Dark remains the cinematic signature; light uses a warm-neutral canvas while preserving the cobalt-and-sky identity.
 
-Structure the design tokens so a future light theme remains possible, and do NOT hard-code colours in components. Components use these semantic tokens, defined in `app/globals.css` from `DESIGN.md`:
+Do NOT hard-code colours in components. Both themes use the semantic tokens defined in `app/globals.css` from `DESIGN.md`:
 
 | Token | Value | `DESIGN.md` name | Use |
 | --- | --- | --- | --- |
