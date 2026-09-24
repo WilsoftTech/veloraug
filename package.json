@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "typecheck": "next typegen && tsc --noEmit"
+    "typecheck": "next typegen && tsc --noEmit",
+    "test:db": "npx supabase@2.117.0 db reset --local && npx supabase@2.117.0 test db --local"
   },
   "dependencies": {
     "@supabase/ssr": "0.12.7",

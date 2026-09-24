@@ -1,0 +1,42 @@
+# Local Supabase stack for migration validation and the database regression
+# suite (supabase/tests/database). It is never used for hosted deploys.
+# Only the services the tests need are enabled; the rest use CLI defaults.
+project_id = "veloraug"
+
+[api]
+enabled = true
+port = 54321
+# Matches hosted: catalogue_access and private are never exposed.
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[db.seed]
+enabled = false
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+
+[studio]
+enabled = false
+
+[storage]
+enabled = false
+
+[realtime]
+enabled = false
+
+[inbucket]
+enabled = false
+
+[analytics]
+enabled = false
+
+[edge_runtime]
+enabled = false

@@ -38,6 +38,7 @@ yarn-error.log*
 
 # supabase CLI local cache (may contain pooler credentials)
 /supabase/.temp/
+/supabase/.branches/
 
 # typescript
 *.tsbuildinfo
