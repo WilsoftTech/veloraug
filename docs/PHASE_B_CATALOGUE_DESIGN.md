@@ -26,7 +26,7 @@ work, not `B3`.
 | B-2 | `b40a99c` | B1 (published-only policies, column grants, adversarial RLS tests); B3 (server data layer) | Deployed and verified |
 | (deploy record) | `638a805` | B1 hosted verification | Documentation only |
 | B-3 | `6632328` | **B4, in part**: app-side dual-format watchlist, reads/removals of legacy rows, unresolved-row report | Implemented. App-only, no migration. On the remote branch |
-| B4 (roadmap label used from here on) | 2026-09-24 B4 commits | **B4, completed**: public-only identity guard (`20260924195306`), identity module and unit tests, diagnostic, DB tests | Implemented locally. Migration **not pushed** (dry-run proposes only it) |
+| B4 (roadmap label used from here on) | 2026-09-24 B4 commits | **B4, completed**: public-only identity guard (`20260924195306`), identity module and unit tests, diagnostic, DB tests | Implemented locally; migration not pushed at commit time. **Deployed later on 2026-09-24 and verified; B4 complete** (see "Hosted deployment (B4)") |
 | B-4 (planned) | — | B5: TMDB out of ordinary reads, sample catalogue off in production | Not started |
 | DB regression suite | 2026-09-24 reconciliation commit | B1 "adversarial RLS tests" and the Phase 2/3 regressions, now repeatable (`npm run test:db`) | Done in this checkpoint |
 
@@ -528,3 +528,82 @@ the unit-test tool AGENTS.md names. Pinned to 4.x because 5.x requires
 - Remove TMDB from home, browse, detail and watchlist reads, and disable the sample
   catalogue in production. Keep TMDB server-side for admin matching.
 - Later migration, after measurement: legacy column removal (still deferred).
+
+## Hosted deployment (B4)
+
+Date: 2026-09-24. Status: **B4 HOSTED VERIFICATION: PASS. Roadmap B4 is complete.**
+
+The "not deployed" statements in "B4 result" above were true when written. The owner
+then deployed the migration and reported that the push applied exactly
+`20260924195306_watchlist_public_identity_guard.sql` and proposed nothing else. This
+checkpoint did not run the push. It verified the result read-only (MCP as
+`supabase_read_only_user`, `transaction_read_only = on`, 20:11–20:13 UTC). It inserted
+no rows and ran no write tests; the clean local suite covers runtime behaviour.
+
+### Migration and definitions
+
+| Check | Observed | Status |
+| --- | --- | --- |
+| Migration history | Exactly **8**, ending `20260924195306 watchlist_public_identity_guard` | PASS |
+| Recorded statements | 2 statements, length 4825, MD5 `416d0048e4fb8e135c9f1e2575c5557c`. Identical to a clean local apply of the repository file | PASS |
+| `private.enforce_watchlist_limit()` | Whitespace-normalised body MD5 `2c750914fa70044cf950fe4979f334db`, identical to local. `SECURITY DEFINER`, `search_path=""`, owner `postgres`, ACL `{postgres=X/postgres}` | PASS |
+| Trigger | `watchlist_items_enforce_limit` BEFORE INSERT FOR EACH ROW → `private.enforce_watchlist_limit()`, enabled. The only trigger on `watchlist_items` | PASS |
+
+### Save-time guard (structure; no runtime writes)
+
+| Rule | Evidence in the deployed body | Status |
+| --- | --- | --- |
+| Internal movie identity must be public | `catalogue_access.movie_is_public` is called twice: once in TMDB normalization, once in the guard | PASS |
+| Internal series identity must be public | `catalogue_access.series_is_public` is called twice, the same way | PASS |
+| TMDB compatibility considers only public titles | `movie.tmdb_id = new.tmdb_id and catalogue_access.movie_is_public(movie.id)`, and the same for `series` | PASS |
+| Uniform rejection | `errcode = '23503'` present | PASS |
+| 500 cap and per-user lock | `pg_advisory_xact_lock` and `>= 500` present | PASS |
+
+### Security posture: hosted equals the clean local chain
+
+The same fingerprint query was run on hosted and on a clean local apply of migrations
+1–8. Every value matched:
+
+| Fingerprint (MD5) | Value |
+| --- | --- |
+| Table/sequence ACLs and RLS flags (`public`, `private`) | `f40ed6977543ac7cab4e9e3061eab614` |
+| Column ACLs | `f269b23ab18e45c7bcf505f4ba8846c5` |
+| Functions (definer, config, ACL) in `public`/`private`/`catalogue_access` | `60cbcab662c7a9290f6da07b584f222f` |
+| Policies | `104053b03b26c98e76b7c293a863ca4e` |
+| Schema ACLs (`public`, `private`, `catalogue_access`, `cron`) | `1bb84b4d828b96d1587c98b62e48c63a` |
+
+Point checks, identical on both sides:
+
+- 17 policies, and 0 tables without RLS.
+- 0 application functions without `search_path=""`.
+- The definer set is unchanged: 4 `catalogue_access` predicates, `enforce_watchlist_limit`,
+  `handle_new_user`, `record_search`, `trending_searches`.
+- Clients (`anon`/`authenticated`) have:
+  - 0 privileges on the 4 private tables;
+  - 0 grants on hidden version columns (including `telegram_media_id`) or hidden title columns;
+  - 0 EXECUTE on the 4 private helpers;
+  - no `USAGE` on `private` or `cron`.
+- `watchlist_items`: the 3 own-row policies are unchanged
+  (`(select auth.uid()) = user_id`, `authenticated` only). `authenticated` has
+  `SELECT, INSERT, DELETE`; `anon` has nothing.
+
+**No new client grant, and no security regression.**
+
+### Watchlist identity diagnostic (hosted, 20:12 UTC)
+
+`supabase/diagnostics/watchlist_identity.sql`, run with equivalent SQL: total 0,
+canonical movie 0, canonical series 0, legacy movie 0, legacy tv 0, legacy with a
+published match 0, legacy with a draft match 0, legacy created in the last 7 days 0,
+malformed 0.
+
+### Advisors
+
+| Finding | Level | Change vs the B-2 deployment |
+| --- | --- | --- |
+| `rls_enabled_no_policy` ×4 (`private` server-only tables) | INFO | None |
+| `anon`/`authenticated_security_definer_function_executable`: `record_search`, `trending_searches` | WARN ×4 | None (accepted in Phase 3) |
+| `unindexed_foreign_keys` ×2 (Telegram media composite FKs) | INFO | None (accepted at B-2) |
+| `unused_index` ×15 | INFO | None (same count; tables are empty) |
+
+Migration 8 introduced **no new advisor finding**. Nothing references
+`enforce_watchlist_limit`.
