@@ -26,18 +26,22 @@ insert into auth.users (id, email, raw_user_meta_data) values
   ('00000000-0000-0000-0000-0000000000a1', 'one@example.test', '{"display_name": "  One  "}'),
   ('00000000-0000-0000-0000-0000000000b2', 'two@example.test', '{}');
 
--- Published movie (TMDB 550), draft movie mapped to TMDB 551, published series (TMDB 1399).
+-- Published movies (TMDB 550, and 552 which is never saved), draft movie mapped
+-- to TMDB 551, published series (TMDB 1399).
 insert into public.vjs (slug, name, is_active) values ('vj', 'VJ', true);
 insert into private.telegram_media
   (bot_type, chat_id, message_id, file_id, file_unique_id, media_kind, telegram_date)
 values ('movie', -1, 1, 'f1', 'u1', 'video', now()),
-       ('series', -1, 2, 'f2', 'u2', 'video', now());
+       ('series', -1, 2, 'f2', 'u2', 'video', now()),
+       ('movie', -1, 3, 'f3', 'u3', 'video', now());
 insert into public.movies (slug, title, tmdb_id, publication_status, published_at) values
   ('published-movie', 'Published Movie', 550, 'published', now()),
-  ('draft-movie', 'Draft Movie', 551, 'draft', null);
+  ('draft-movie', 'Draft Movie', 551, 'draft', null),
+  ('second-movie', 'Second Movie', 552, 'published', now());
 insert into public.movie_versions (movie_id, vj_id, availability_status, rights_status, available_at, telegram_media_id)
 select m.id, v.id, 'ready', 'cleared', now(), t.id
-from public.movies m, public.vjs v, private.telegram_media t where m.slug = 'published-movie' and t.file_unique_id = 'u1';
+from public.movies m, public.vjs v, private.telegram_media t
+where (m.slug, t.file_unique_id) in (('published-movie', 'u1'), ('second-movie', 'u3'));
 insert into public.series (slug, title, tmdb_id, publication_status, published_at) values
   ('published-series', 'Published Series', 1399, 'published', now());
 insert into public.seasons (series_id, season_number) select id, 1 from public.series;
@@ -49,6 +53,7 @@ from public.episodes e, public.vjs v, private.telegram_media t where t.file_uniq
 create table tests.ids as
 select (select id from public.movies where slug = 'published-movie') as published_movie,
        (select id from public.movies where slug = 'draft-movie') as draft_movie,
+       (select id from public.movies where slug = 'second-movie') as second_movie,
        (select id from public.series where slug = 'published-series') as published_series;
 grant select on tests.ids to authenticated;
 
@@ -108,7 +113,7 @@ select is(
   '00000000-0000-0000-0000-0000000000a1'::uuid, 'user_id defaults to the caller');
 
 select throws_ok(
-  $q$insert into public.watchlist_items (movie_id, media_type) select draft_movie, 'tv' from tests.ids$q$,
+  $q$insert into public.watchlist_items (movie_id, media_type) select second_movie, 'tv' from tests.ids$q$,
   '23514', null, 'identity check rejects a movie_id stored as tv');
 select throws_ok(
   $q$insert into public.watchlist_items (media_type) values ('movie')$q$,
@@ -122,21 +127,20 @@ select throws_ok(
   '42501', null, 'watchlist rows are immutable (no UPDATE grant)');
 
 -- Catalogue security is not bypassed through the watchlist or its trigger.
--- The trigger is SECURITY DEFINER and resolves draft mappings, which is the
--- documented, accepted behaviour (docs/VELORA_UG_SCHEMA_BASELINE.md): the
--- caller learns only an internal id, never catalogue content.
+-- Since B4 (20260924195306) the SECURITY DEFINER trigger normalizes only onto
+-- public titles, so a draft-mapped TMDB save stays legacy and reveals no id.
 insert into public.watchlist_items (tmdb_id, media_type) values (551, 'movie');
 select is(
   (select movie_id from public.watchlist_items where tmdb_id = 551),
-  (select draft_movie from tests.ids),
-  'documented: legacy save of a draft-mapped TMDB id is normalized by the trigger');
+  null::bigint,
+  'legacy save of a draft-mapped TMDB id stays legacy (no draft id revealed)');
 select is(
   (select array_agg(m.slug order by m.slug) from public.watchlist_items w join public.movies m on m.id = w.movie_id),
   array['published-movie'],
   'joining the watchlist to movies still returns published movies only');
 select is(
   (select count(*)::int from public.movies where id = (select draft_movie from tests.ids)),
-  0, 'the draft movie stays unreadable after it is referenced');
+  0, 'the draft movie stays unreadable');
 select throws_ok(
   $q$select publication_status from public.movies$q$, '42501', null,
   'watchlist access grants no catalogue workflow columns');
