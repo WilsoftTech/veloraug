@@ -607,3 +607,188 @@ malformed 0.
 
 Migration 8 introduced **no new advisor finding**. Nothing references
 `enforce_watchlist_limit`.
+
+## B5 audit: TMDB uses before the cutover (2026-09-24, HEAD `d38c7a4`)
+
+Recorded before any B5 change. The classes are:
+
+1. Normal public catalogue read.
+2. Metadata enrichment tied to a Velora record.
+3. Ingestion or admin.
+4. Temporary legacy compatibility.
+5. Dead code, or a production-risk fallback.
+
+| Use | Where | Class |
+| --- | --- | --- |
+| `getTrending`, `getMovies`, `getShows` | `app/page.tsx` (home rows), `components/hero.tsx` (hero) | 1 |
+| `getMovies`, `getShows`, `getTrending` | `components/browse-page.tsx` → `/movies`, `/tv`, `/trending` | 1 |
+| `discoverMedia` + TMDB genre ids | `app/discover`, `lib/discover.ts`, `components/discover-filters.tsx`, `lib/tmdb/genres.ts` | 1 |
+| `searchMedia` (TMDB `/search/*`), `getTrending` (suggestions) | `app/search/page.tsx` | 1 |
+| `getMediaDetail` (arbitrary TMDB id, with cast, trailer and similar titles) | `app/[mediaType]/[id]/page.tsx` | 1 |
+| TMDB-identified save buttons (`mediaWatchlistItem`) | hero, `app/[mediaType]/[id]` | 1 (the source of new legacy watchlist rows) |
+| `getMediaSummaries` | `lib/watchlist-actions.ts` (describes legacy `tmdb_id` rows) | 4 |
+| Built-in sample catalogue | `lib/tmdb/sample.ts`, served by every `lib/tmdb/media.ts` read when TMDB credentials are missing, **including in production** | 5 (production risk) |
+| `tmdbFetch` / `tmdbFetchPage` | `lib/tmdb/client.ts` | Centralized server access. Retained for 3 (Phase C matching) and 4 |
+| Image CDN loader (`image.tmdb.org/t/p/w…`) | `lib/tmdb/image-loader.ts`, `next.config.ts` | 2 (artwork paths stored on catalogue records) |
+| TMDB attribution and logo | `components/site-footer.tsx` | Required by TMDB's terms while TMDB metadata or artwork is shown |
+
+No ingestion or admin TMDB code exists yet (class 3 arrives in Phase C).
+
+## B5 result: Supabase catalogue read cutover
+
+Date: 2026-09-24. Status: **implemented and validated locally.** B5 is an application
+change only: no migration, no schema change, no change to generated types.
+
+### Architecture
+
+- **Supabase is the catalogue authority.** Every public page reads the published
+  catalogue through `lib/catalogue.ts`: session-free, as `anon`, under the B-2
+  published-only policies. What a visitor can browse, search, open or save is exactly
+  what those policies expose.
+- **TMDB is not consulted in normal browsing.** The static import-graph test
+  (`lib/catalogue-boundary.test.ts`) allows exactly one path from any route into
+  `lib/tmdb/`: `lib/watchlist-actions.ts` → `lib/tmdb/legacy-watchlist.ts`.
+- **Internal identity is canonical.** Detail URLs use catalogue slugs
+  (`/movies/[slug]`, `/series/[slug]`), cards link by slug, and every save button
+  sends a catalogue ref (`titleWatchlistItem`), stored as `movie_id`/`series_id`.
+- **Freshness.** Supabase reads go through `fetch`, so every catalogue route sets
+  `revalidate = 300`. Without it a prerender would freeze the catalogue at build
+  time. Hosted catalogue changes appear within 5 minutes.
+
+### Routes
+
+| Route | Before (TMDB) | After (catalogue) |
+| --- | --- | --- |
+| `/` | TMDB trending/popular rows, and a TMDB trending hero | Hero: featured titles (else newest with a backdrop). Rows: Latest Movies, Latest Series, VJs. Empty catalogue: "The catalogue is coming soon" |
+| `/movies` | TMDB popular / top rated | Published movies, newest first, keyset paging, URL filters `genre` / `vj` |
+| `/series` (new) | `/tv`: TMDB popular / top rated | Published series, same contract |
+| `/movies/[slug]`, `/series/[slug]` (new) | `/[movie\|tv]/[id]`: any TMDB id, with cast, trailer and similar titles | Published title only. Series show available seasons and episodes, each with its VJs. Hidden and unknown slugs give the same not-found page |
+| `/vjs`, `/vjs/[slug]` (new) | — | Active VJs; a VJ's movies and series. Inactive or unknown VJs are not found |
+| `/search` | TMDB `/search/*`, TMDB trending suggestions | Published movies, series and (for "All") active VJs, by title/name (ILIKE, escaped). Suggestions come from Phase 3 `trending_searches`. No TMDB fallback |
+| `/[movie\|tv]/[id]` | TMDB detail | Legacy links only: a TMDB id matched to a public title redirects to its Velora page, otherwise not found. No TMDB request |
+| `/tv`, `/trending`, `/discover` | TMDB browse / discover | Permanent redirects to `/series`, `/`, `/movies` (or `/series`) (`next.config.ts`) |
+| `/my-list` | Tabs "Movies / TV Shows" | Tabs "Movies / Series" (`?tab=series`; `?tab=tv` still accepted) |
+
+Product copy says "Series" everywhere. The search URL uses `type=series`. The stored
+analytics/history scope stays `tv`, because a Phase 3 check constraint requires it
+and changing it would need a migration.
+
+Reused: `MovieCard`, `MovieGrid`, `MovieSection`, `MovieListItem`, `EmptyState`,
+skeletons, `HeroCarousel`, `TabLinks`, `SearchInput`, `SearchRecorder`,
+`RecentSearches` and `WatchlistButton`. The TMDB detail header became the shared
+`TitleHero`. `Pagination` became keyset-based ("First page" / "Next"). New:
+`CatalogueBrowse`, `CatalogueFilters` (the `DiscoverFilterForm` pattern, with slugs),
+`VjList`, `lib/browse.ts` (URL contract) and `lib/title-metadata.ts`.
+
+`lib/catalogue.ts` gained `listFeatured`, `searchCatalogue` and `trendingSearches`, using
+the same client, projections and mappers (no second abstraction). Each page is one
+parallel round trip; embedded selects avoid N+1.
+
+### Watchlist
+
+- Every save button sends a catalogue ref: hero, movie and series detail.
+- `addToWatchlist` uses `toInsert(..., "refuse")`: an unmatched TMDB ref is refused,
+  so **ordinary flows cannot create TMDB-only rows**.
+- The one remaining legacy write is importing a pre-B5 guest list (`"allow"`), so
+  guests' old saves are kept, not lost. `legacy_created_7d` in the diagnostic
+  measures it.
+- Legacy rows still read and remove as in B4. When there is no public catalogue
+  match, they are described by `lib/tmdb/legacy-watchlist.ts`, which is marked
+  TEMPORARY. They have no Velora link. If TMDB is not configured, they show as
+  "Unavailable title".
+
+### TMDB after B5 (every remaining use)
+
+| Use | Where | Why allowed |
+| --- | --- | --- |
+| Transport | `lib/tmdb/client.ts` (server-only) | Single adapter for enrichment, Phase C ingestion/admin matching, and the legacy lookup |
+| Legacy My List description | `lib/tmdb/legacy-watchlist.ts` ← `lib/watchlist-actions.ts` only | Temporary migration compatibility. It never decides what the catalogue offers. Remove it with the legacy columns |
+| Artwork CDN | `lib/tmdb/image-loader.ts` (`next.config.ts`), OG image URL in `lib/title-metadata.ts` | Serves poster and backdrop paths stored on approved catalogue records |
+| Raw types | `lib/tmdb/types.ts` | Used by the two modules above |
+| Attribution | `components/site-footer.tsx` | Required while TMDB metadata or artwork is shown |
+
+Removed as dead after the cutover: `lib/tmdb/media.ts` (trending, popular, discover,
+search, detail), `lib/tmdb/genres.ts`, `lib/discover.ts`, `components/browse-page.tsx`,
+`components/discover-filters.tsx`, `components/trailer-player.tsx`,
+`components/person-card.tsx` and the `/tv`, `/trending`, `/discover` pages.
+
+### Sample catalogue
+
+`lib/tmdb/sample.ts` is **deleted**. Before B5, every TMDB read served it whenever
+credentials were missing, including in production. Now an empty catalogue shows
+empty states. Development fixtures live in `supabase/seeds/dev-catalogue.sql`:
+
+- They load only on explicit request (`db reset --local --sql-paths ...`).
+- Seeding is disabled in `config.toml`, and `test:db` resets with `--no-seed`.
+- `db push` sends no seeds unless `--include-seed` is given.
+
+### Tests
+
+| Suite | Command | Result |
+| --- | --- | --- |
+| Database security regression (unchanged, no additions needed) | `npm run test:db` | **166/166 PASS** |
+| Unit, including the TMDB boundary | `npm test` | **30/30 PASS**: identity 12, URL/search helpers 9, browse contract 3, boundary 6 (graph walk from every route; allowlisted `lib/tmdb/` modules; API host only in the transport) |
+| Catalogue integration (local stack + dev fixtures) | `npm run test:catalogue` | **23/23 PASS**, listed below |
+| Schema lint | `npx supabase@2.117.0 db lint --local` | No schema errors |
+| `npm run lint` / `typecheck` / `build` | | PASS / PASS / PASS |
+
+The 23 catalogue integration tests cover:
+
+- Newest-first order with a tie.
+- Keyset paging across the tie: 3 pages, no duplicates, ends with a null cursor. A garbage cursor falls back to the first page.
+- Genre and VJ filters, a genre with no titles, and an unknown or inactive VJ slug.
+- A movie from two VJs, and a movie without artwork.
+- Hidden and unknown slugs return null.
+- Series: only available seasons and episodes, in order; a draft series is hidden.
+- Featured titles; active VJs only.
+- Search: prefix ranking, movie and series scopes, VJ search, no hidden titles, literal wildcards.
+- Trending searches.
+- TMDB-id resolution to public titles only.
+- An authenticated user saving a movie and a series by internal id: rows store `movie_id`/`series_id` with no `tmdb_id`. A hidden id is rejected with `23503`. An unmatched TMDB ref produces nothing to insert.
+- A fetch spy records **zero** TMDB requests.
+
+Mutation check: adding a TMDB import to `components/hero.tsx` fails 3 boundary tests.
+
+### Runtime evidence (production build, local stack, 2026-09-24)
+
+`next build` + `next start` ran against the local stack with a preloaded hook
+logging every outgoing `fetch`. A dummy `TMDB_ACCESS_TOKEN` was set, so any
+surviving TMDB path would have attempted a request.
+
+- **Empty catalogue:** home, Movies, Series, VJs and search showed their empty
+  states. Unknown titles and VJs, and legacy `/movie/550` and `/tv/1399`, gave the
+  not-found page (`noindex`). `/tv` and `/trending` returned 308.
+- **Seeded catalogue:** 28 route checks. They covered visible and hidden titles on
+  every page, the genre, VJ and cursor filters, season/episode hiding, VJ pages,
+  search scopes and misses, and legacy TMDB links.
+  - 24 passed on the first crawl.
+  - Home and `/vjs` passed once their ISR window expired.
+  - The 2 legacy-link checks expected HTTP 308 and instead got a client-side
+    redirect to the correct Velora page (see debt below).
+- **TMDB requests:** 0 in both runs (build and serve). Every server request went to
+  the local Supabase API.
+- The 5-minute ISR window was observed: home and `/vjs` switched from the cached
+  empty catalogue to the seeded one after revalidation.
+
+### Remaining debt
+
+- **HTTP status of not-found and legacy redirects.** The root `app/loading.tsx`
+  streams the shell before a page decides. So `notFound()` answers 200 with
+  `noindex`, and legacy-link redirects are client-side (meta refresh / RSC
+  redirect carrying 308). This predates B5 (see the old detail page's comment).
+  Fix with route-level loading boundaries in Phase D/G SEO work.
+- **Search.** Unindexed `ILIKE` on `title`/`name` only. Add a `pg_trgm` index (a
+  migration) and original-title or overview matching when the catalogue grows.
+- **Legacy My List.** Rows with no public match are still described by
+  `lib/tmdb/legacy-watchlist.ts`. A pre-B5 guest import can still create legacy
+  rows. Measure with `supabase/diagnostics/watchlist_identity.sql` (hosted:
+  0 rows), then backfill or retire, and remove the module and the legacy columns
+  in a later migration.
+- **Filters.** `listGenres` returns every genre, including genres with no titles,
+  which lead to the "No titles match" state.
+- **Supabase is required for browsing.** Without it, catalogue pages raise the
+  route error boundary (by design: no silent fallback).
+- **Phase D.** Poster VJ badges, genre rows, Continue Watching, and the 768–960 px
+  header fix.
+- **Hosted catalogue.** Hosted has no published titles yet, so production shows
+  the empty states until Phase C ingestion publishes content.

@@ -1,6 +1,6 @@
 # Velora UG
 
-Streaming platform for Ugandan VJ-translated movies and series (Next.js App Router, TypeScript, Tailwind, Supabase). Supabase is the catalogue authority. VJs are first-class catalogue entities, and movies and series (seasons → episodes) are separate roots. Telegram is the planned private media origin and ingestion path. TMDB only enriches metadata and is never the catalogue authority. The public UI is still the legacy TMDB discovery app until Phase D replaces it. Read these before working here:
+Streaming platform for Ugandan VJ-translated movies and series (Next.js App Router, TypeScript, Tailwind, Supabase). Supabase is the catalogue authority. VJs are first-class catalogue entities, and movies and series (seasons → episodes) are separate roots. Telegram is the planned private media origin and ingestion path. TMDB only enriches metadata and is never the catalogue authority. Since B5 the public UI reads only the Supabase catalogue (`lib/catalogue.ts`); `lib/catalogue-boundary.test.ts` keeps TMDB out of public routes. Read these before working here:
 
 @AGENTS.md
 @IMPLEMENTATION_ROADMAP.md
