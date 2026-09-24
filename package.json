@@ -9,7 +9,8 @@
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
-    "test:db": "npx supabase@2.117.0 db reset --local && npx supabase@2.117.0 test db --local"
+    "test:catalogue": "npx supabase@2.117.0 db reset --local --sql-paths ./seeds/dev-catalogue.sql && vitest run --config vitest.integration.config.mts",
+    "test:db": "npx supabase@2.117.0 db reset --local --no-seed && npx supabase@2.117.0 test db --local"
   },
   "dependencies": {
     "@supabase/ssr": "0.12.7",
