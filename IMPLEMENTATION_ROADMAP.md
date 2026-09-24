@@ -16,6 +16,14 @@ The architecture audit is in [`docs/VELORA_UG_MIGRATION_PLAN.md`](docs/VELORA_UG
 
 The first Velora UG task is reconciliation, not feature construction.
 
+### Status (2026-09-24 reconciliation checkpoint)
+
+- Phase 3 is in the Velora UG repository's `main` (`veloraug/main`). Phase A and retention reached it through PR #1 (`c91f07d`).
+- Search-event retention is scheduled (daily, 30 days), and the first hosted run succeeded on 2026-09-24.
+- Hosted Supabase has 7 migrations, identical to `supabase/migrations/`, including B-1/B-2. Source: `veloraug/phase-a-foundation` (`6632328`).
+- Phase A (A1–A5) is complete. Roadmap B1, B2 and B3 are delivered and B4 is partly delivered. Historical checkpoint labels are mapped in `docs/PHASE_B_CATALOGUE_DESIGN.md`.
+- Database regression suite: `npm run test:db` (local only).
+
 ## 2. Product and data rules
 
 - Supabase determines what Velora UG offers.

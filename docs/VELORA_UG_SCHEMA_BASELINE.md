@@ -3,6 +3,14 @@
 Date: 2026-09-22
 Status: Approved for the first Velora UG migration
 
+> **Status update (2026-09-24):** this record is historical as of 2026-09-22. Since
+> then, `20260922080911` and all later migrations up to B-2 `20260923210000` have been
+> applied to hosted (7 migrations, statement-identical to the repository). B-2 replaced
+> the catalogue's deny-all posture with published-only public reads. The "never applied
+> anywhere" and "deny-by-default" statements below describe the state on 2026-09-22.
+> Current evidence: `docs/HOSTED_BOOTSTRAP_AUDIT.md`, "Repository reconciliation
+> checkpoint"; label mapping: `docs/PHASE_B_CATALOGUE_DESIGN.md`.
+
 ## Purpose
 
 This record resolves the identity and relationship decisions required before

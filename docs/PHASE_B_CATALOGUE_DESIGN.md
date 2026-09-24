@@ -4,12 +4,45 @@ Date: 2026-09-23
 Status: **Approved 2026-09-23 (D1–D5 as recommended).**
 Baseline: `phase-a-foundation` at `a6c8885`. Hosted migrations 1–5 applied.
 
+**Status update (2026-09-24 reconciliation):** hosted now has all 7 migrations, including
+B-1 `20260923200000` and B-2 `20260923210000`. They are statement-identical to the
+repository. The first scheduled retention run succeeded. The source is on
+`veloraug/phase-a-foundation` (`6632328`). Evidence: `docs/HOSTED_BOOTSTRAP_AUDIT.md`,
+"Repository reconciliation checkpoint". Work is paused before any further roadmap B4/B5 work.
+
+## Checkpoint labels vs roadmap identifiers
+
+The roadmap identifiers (`A1`–`A5`, `B1`–`B5`, `C`–`G`) are canonical. The hyphenated
+labels below are historical commit and checkpoint names. They are kept as-is and
+**do not** match the roadmap numbers one-to-one: historical `B-3` is roadmap `B4`
+work, not `B3`.
+
+| Historical label | Commit(s) | Roadmap item(s) | State (2026-09-24) |
+| --- | --- | --- | --- |
+| Phase A foundation | `05aef93` | A1 (Phase 3 reconciled), A2 (schema baseline decisions + `20260922080911`), A3 (brand), A4 (theme) | Done. On `veloraug/main` via PR #1 |
+| Pre-B hardening | `a6c8885` | A1 (search-event retention scheduled), MCP read-only, privilege invariant | Deployed. First scheduled run verified 2026-09-24 |
+| A5 cleanup | 2026-09-24 reconciliation commits | A5 (`.env.example`, README, CLAUDE) | Done in this checkpoint |
+| B-1 | `525bdd1` | B2 (Telegram media, ingestion events, match review); B1 constraints/grants | Deployed and verified |
+| B-2 | `b40a99c` | B1 (published-only policies, column grants, adversarial RLS tests); B3 (server data layer) | Deployed and verified |
+| (deploy record) | `638a805` | B1 hosted verification | Documentation only |
+| B-3 | `6632328` | **B4, in part**: app-side dual-format watchlist, reads/removals of legacy rows, unresolved-row report | Implemented. App-only, no migration. On the remote branch |
+| B-4 (planned) | — | B5: TMDB out of ordinary reads, sample catalogue off in production | Not started |
+| DB regression suite | 2026-09-24 reconciliation commit | B1 "adversarial RLS tests" and the Phase 2/3 regressions, now repeatable (`npm run test:db`) | Done in this checkpoint |
+
+Still open in roadmap B4 after historical B-3:
+
+- Legacy writes are not stopped. Unmapped TMDB titles are still saved as `tmdb_id` rows.
+- No published-only guard on direct internal-id inserts (see B-3 follow-ups).
+- Legacy column removal stays deferred.
+
 ## Entry gate
 
 **Closed 2026-09-23.** The Pre-B retention migration `20260923180000` was verified on
 hosted over a read-only MCP connection (`supabase_read_only_user`, read-only
-transactions). See `docs/HOSTED_BOOTSTRAP_AUDIT.md` §7. One post-run check is still
-open: confirm that the first 00:17 UTC run on 2026-09-24 succeeded.
+transactions). See `docs/HOSTED_BOOTSTRAP_AUDIT.md` §7. One post-run check was still
+open then: confirm that the first 00:17 UTC run on 2026-09-24 succeeded. It succeeded
+(`succeeded` as `postgres` at 00:17:00 UTC). See the reconciliation checkpoint in the
+same audit.
 
 B-1 and B-2 were deployed to hosted on 2026-09-23 and verified there. See "Hosted deployment
 (B-1 + B-2)" below.

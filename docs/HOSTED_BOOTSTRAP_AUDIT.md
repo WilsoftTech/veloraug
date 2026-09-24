@@ -284,3 +284,94 @@ bootstrap audit.
 After 2026-09-24 00:17 UTC, run
 `select status, username, start_time, return_message from cron.job_run_details order by start_time desc limit 1`
 and confirm the result is `succeeded` as `postgres`.
+
+---
+
+# Repository reconciliation checkpoint (2026-09-24, 19:31 UTC)
+
+Scope: read-only reconciliation of hosted Supabase, Git and documentation. Nothing
+was applied, pushed, repaired or executed on hosted. No `db push`, no
+`migration repair`, and the cron job was not run manually.
+
+The earlier observations above stand as recorded at their time. §7 correctly saw
+5 migrations and an empty `cron.job_run_details` on 2026-09-23 at 19:57 UTC. B-1
+and B-2 were deployed later that day (see `docs/PHASE_B_CATALOGUE_DESIGN.md`,
+"Hosted deployment (B-1 + B-2)"). That record says the owner explicitly authorized
+the push and that it went through `db push --db-url` over the session pooler. This
+checkpoint independently confirms the hosted *result*. It holds no further evidence
+about who ran the push, or when.
+
+## 8.1 MCP posture
+
+| Property | Observed | Status |
+| --- | --- | --- |
+| Role | `current_user` = `supabase_read_only_user` | PASS |
+| Read-only | `transaction_read_only` = `on`, `default_transaction_read_only` = `on` | PASS |
+| Project | Tools scoped to `utxtqsfelovmhhcrknrz` (`.mcp.json`) | PASS |
+
+## 8.2 First scheduled retention run
+
+`cron.job` joined to `cron.job_run_details`:
+
+| Field | Observed |
+| --- | --- |
+| Job | `velora-purge-search-events` (jobid 1, `17 0 * * *`, owner `postgres`, active) |
+| Run | runid 1, the only run so far |
+| Status | `succeeded` |
+| Username | `postgres` |
+| Start / end | `2026-09-24 00:17:00.199148+00` / `2026-09-24 00:17:00.239315+00` |
+| Return message | `1 row` (the single result row of `select private.purge_search_events(...)`) |
+| Command | `select private.purge_search_events(interval '30 days', 5000)` |
+
+**PASS.** It was the scheduled run, not a manual one. This closes the §7 follow-up.
+
+## 8.3 Hosted migration history
+
+`list_migrations` and `supabase_migrations.schema_migrations` show exactly **7**:
+
+| Version | Name | Statements | MD5 of recorded statements |
+| --- | --- | --- | --- |
+| `20260919000000` | `profiles_and_watchlist` | 21 | `a52ddafd67f3e89b0daea33d0c76ebda` |
+| `20260920000000` | `watchlist_limit_lock` | 1 | `93e36670e6b77070d9aff5e82302c046` |
+| `20260920181819` | `search_analytics_and_history` | 22 | `e4a28d933c26407d8cfce26591972bf7` |
+| `20260922080911` | `velora_ug_catalogue_baseline` | 53 | `31928e2429785cf08c8f49a3fe15d14a` |
+| `20260923180000` | `search_events_retention` | 6 | `30415882ca7acfbfa4a256840e6188e7` |
+| `20260923200000` | `catalogue_ingestion_tables` (B-1) | 17 | `d467c2287abe83352bc0a7b49a99020f` |
+| `20260923210000` | `catalogue_public_read` (B-2) | 29 | `5b4b75b248c5400cf053e422f6d806f2` |
+
+Comparison method: the repository's `supabase/migrations/` was applied to a clean
+local Supabase stack (CLI 2.117.0, `supabase/postgres:17.6.1.166`). That stack records
+statements the same way. Every version has an identical statement count, joined
+length and MD5 on both sides. **Hosted history equals the repository exactly.**
+
+## 8.4 Hosted drift spot-check (catalog reads only)
+
+17 tables in `public`/`private`, 0 without RLS; 17 policies. `SECURITY DEFINER` set
+is exactly the 4 `catalogue_access` predicates plus `enforce_watchlist_limit`,
+`handle_new_user`, `record_search` and `trending_searches`. 0 application
+functions without `search_path=""`. `anon`/`authenticated` have no `USAGE` on `cron`
+or `private`, and `authenticated` cannot execute the purge function. 0 movies and 0
+watchlist rows. These are the invariants the new regression suite asserts locally
+(§8.6).
+
+## 8.5 Git durability
+
+| Ref | Commit | Contents |
+| --- | --- | --- |
+| `veloraug/phase-a-foundation` | `6632328` | All 7 migrations: Phase A (`05aef93`), retention (`a6c8885`), B-1 (`525bdd1`), B-2 (`b40a99c`), deploy record (`638a805`), B-3 app (`6632328`) |
+| `veloraug/main` | `c91f07d` | GitHub PR #1 merge (2026-09-23 21:30 +03:00) of `phase-a-foundation` at `a6c8885`: migrations 1–5 only |
+| `origin/*` (`WilsoftTech/velora`) | — | Legacy Velora repository: Phase 2 only; no Velora UG work |
+
+The source for every hosted migration was already on the remote before this
+checkpoint. The local branch was identical to `veloraug/phase-a-foundation`, so
+nothing needed pushing to make hosted reproducible.
+
+## 8.6 Repeatable regression tests
+
+`supabase/tests/database/*.test.sql` (pgTAP, 126 assertions) runs via
+`npm run test:db`, which rebuilds the **local** database from migrations, then runs
+`supabase test db --local`. Result on 2026-09-24: **126/126 PASS**. A mutation check
+(an injected leak policy, a hidden-column grant, and purge EXECUTE for
+`authenticated`) made 7 assertions fail, as intended. `supabase db lint --local`
+(`public`, `private`, `catalogue_access`): no schema errors. These tests never
+run against hosted.
