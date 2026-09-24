@@ -1,11 +1,11 @@
 import { useId } from "react";
 import { MovieCard } from "@/components/movie-card";
 import { SectionHeader } from "@/components/section-header";
-import type { MediaSummary } from "@/types/media";
+import type { TitleSummary } from "@/types/catalogue";
 
 interface MovieSectionProps {
   title: string;
-  items: MediaSummary[];
+  items: TitleSummary[];
   href?: string;
 }
 
@@ -19,7 +19,7 @@ export function MovieSection({ title, items, href }: MovieSectionProps) {
       <SectionHeader id={headingId} title={title} href={href} />
       <ul className="page-bleed no-scrollbar relative flex snap-x snap-proximity gap-4 overflow-x-auto pb-1 md:gap-6">
         {items.map((item) => (
-          <li key={`${item.mediaType}-${item.id}`} className="w-32 shrink-0 snap-start sm:w-40 lg:w-44">
+          <li key={`${item.kind}-${item.id}`} className="w-32 shrink-0 snap-start sm:w-40 lg:w-44">
             <MovieCard item={item} />
           </li>
         ))}

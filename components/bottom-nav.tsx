@@ -1,11 +1,11 @@
-import { Bookmark, Clapperboard, Compass, House, Tv } from "lucide-react";
+import { Bookmark, Clapperboard, House, Search, Tv } from "lucide-react";
 import { NavLink } from "@/components/nav-link";
 
 const TABS = [
   { href: "/", label: "Home", icon: House },
   { href: "/movies", label: "Movies", icon: Clapperboard },
-  { href: "/tv", label: "TV Shows", icon: Tv },
-  { href: "/discover", label: "Discover", icon: Compass },
+  { href: "/series", label: "Series", icon: Tv },
+  { href: "/search", label: "Search", icon: Search },
   { href: "/my-list", label: "My List", icon: Bookmark },
 ];
 

@@ -7,7 +7,9 @@ export const metadata: Metadata = { title: "My List" };
 
 export default async function MyListPage({ searchParams }: PageProps<"/my-list">) {
   const params = await searchParams;
-  const mediaType = parseMediaType(firstParam(params.tab) ?? "") ?? "movie";
+  const tab = firstParam(params.tab);
+  // "series" is the product name; "tv" is accepted from older links.
+  const mediaType = tab === "series" ? "tv" : (parseMediaType(tab ?? "") ?? "movie");
 
   return (
     <div className="page-container max-w-3xl py-6 sm:py-8">
@@ -17,7 +19,7 @@ export default async function MyListPage({ searchParams }: PageProps<"/my-list">
           label="My List sections"
           tabs={[
             { label: "Movies", href: "/my-list", active: mediaType === "movie" },
-            { label: "TV Shows", href: "/my-list?tab=tv", active: mediaType === "tv" },
+            { label: "Series", href: "/my-list?tab=series", active: mediaType === "tv" },
           ]}
         />
       </div>

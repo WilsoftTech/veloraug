@@ -5,13 +5,14 @@ import { HeroCarousel } from "@/components/hero-carousel";
 import { BackdropImage } from "@/components/media-image";
 import { Rating } from "@/components/rating";
 import { WatchlistButton } from "@/components/watchlist-button";
-import { getTrending } from "@/lib/tmdb/media";
-import { mediaHref, mediaWatchlistItem } from "@/lib/utils";
-import type { Media } from "@/types/media";
+import { listFeatured } from "@/lib/catalogue";
+import { titleHref, titleWatchlistItem } from "@/lib/utils";
+import type { FeaturedTitle } from "@/types/catalogue";
 
 const SLIDE_COUNT = 5;
 
-function HeroSlide({ item, first }: { item: Media; first: boolean }) {
+function HeroSlide({ item, first }: { item: FeaturedTitle; first: boolean }) {
+  const vjNames = item.vjs.map((vj) => vj.name);
   return (
     <div className="relative h-[26rem] sm:h-[30rem] lg:h-[36rem]">
       <BackdropImage path={item.backdropPath} sizes="100vw" preload={first} />
@@ -30,34 +31,37 @@ function HeroSlide({ item, first }: { item: Media; first: boolean }) {
         </h2>
         <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-body-md text-foreground/80">
           {item.releaseYear && <span>{item.releaseYear}</span>}
-          {item.genres.length > 0 && <span aria-hidden>·</span>}
-          {item.genres.length > 0 && <span>{item.genres.slice(0, 2).join(" · ")}</span>}
+          {item.releaseYear && <span aria-hidden>·</span>}
+          <span>{item.kind === "movie" ? "Movie" : "Series"}</span>
+          {vjNames.length > 0 && <span aria-hidden>·</span>}
+          {vjNames.length > 0 && <span>{vjNames.join(" · ")}</span>}
           {item.rating !== null && <span aria-hidden>·</span>}
           <Rating value={item.rating} />
         </p>
-        <p className="mt-3 line-clamp-3 max-w-xl text-body-md text-foreground/80 md:text-body-lg">{item.overview}</p>
+        {item.overview && (
+          <p className="mt-3 line-clamp-3 max-w-xl text-body-md text-foreground/80 md:text-body-lg">{item.overview}</p>
+        )}
         <div className="mt-5 flex flex-wrap gap-3">
-          <Link href={mediaHref(item)} className={buttonClass("primary")}>
+          <Link href={titleHref(item.kind, item.slug)} className={buttonClass("primary")}>
             <Play aria-hidden className="size-4 fill-current" />
             View Details
           </Link>
-          <WatchlistButton item={mediaWatchlistItem(item)} />
+          <WatchlistButton item={titleWatchlistItem(item)} />
         </div>
       </div>
     </div>
   );
 }
 
+/** Featured catalogue titles. Renders nothing when the catalogue has none. */
 export async function Hero() {
-  const { items } = await getTrending();
-  const withBackdrop = items.filter((item) => item.backdropPath);
-  const featured = (withBackdrop.length > 0 ? withBackdrop : items).slice(0, SLIDE_COUNT);
+  const featured = await listFeatured(SLIDE_COUNT);
   if (featured.length === 0) return null;
 
   return (
     <HeroCarousel label="Featured titles">
       {featured.map((item, index) => (
-        <HeroSlide key={`${item.mediaType}-${item.id}`} item={item} first={index === 0} />
+        <HeroSlide key={`${item.kind}-${item.id}`} item={item} first={index === 0} />
       ))}
     </HeroCarousel>
   );

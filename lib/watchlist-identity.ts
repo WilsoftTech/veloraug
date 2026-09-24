@@ -11,9 +11,11 @@ import type { WatchlistRef } from "@/types/watchlist";
  *   Canonical  movie_id / series_id: a Velora UG catalogue title. New saves of
  *              a public title always use it, even when the caller only knew
  *              the title by its TMDB id.
- *   External   tmdb_id: TMDB metadata identity. Stored as the identity only for
- *              the temporary pre-B5 compatibility path: a TMDB title with no
- *              public catalogue match. No catalogue row is ever fabricated.
+ *   External   tmdb_id: TMDB metadata identity. Since B5 no save button sends
+ *              it. It is stored as the identity only when a pre-B5 guest list
+ *              is imported ("allow"): a TMDB title with no public catalogue
+ *              match. Ordinary saves ("refuse") never create such a row, and
+ *              no catalogue row is ever fabricated.
  *
  * The database enforces the same contract independently
  * (20260924195306_watchlist_public_identity_guard.sql).
@@ -42,15 +44,18 @@ export function buildLookup(titles: TitleSummary[]): TitleLookup {
   return (ref) => byRef.get(watchlistRefKey(ref)) ?? null;
 }
 
+/** Whether a TMDB ref with no public catalogue match may still be stored as a legacy row. */
+export type LegacyPolicy = "refuse" | "allow";
+
 /**
- * The row a save writes: canonical when the ref resolves to a public title,
- * legacy TMDB when a TMDB ref has no public match (pre-B5 compatibility), and
- * null when unsavable (a catalogue id that is not public).
+ * The row a save writes: canonical when the ref resolves to a public title;
+ * a legacy TMDB row only for an unmatched TMDB ref under "allow" (pre-B5 guest
+ * import); otherwise null (unsavable).
  */
-export function toInsert(ref: WatchlistRef, lookup: TitleLookup): WatchlistInsert | null {
+export function toInsert(ref: WatchlistRef, lookup: TitleLookup, legacy: LegacyPolicy): WatchlistInsert | null {
   const title = lookup(ref);
   if (title) return title.kind === "movie" ? { movie_id: title.id, media_type: "movie" } : { series_id: title.id, media_type: "series" };
-  return ref.source === "tmdb" ? { tmdb_id: ref.id, media_type: ref.mediaType } : null;
+  return ref.source === "tmdb" && legacy === "allow" ? { tmdb_id: ref.id, media_type: ref.mediaType } : null;
 }
 
 /**

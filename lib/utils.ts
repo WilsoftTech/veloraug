@@ -1,18 +1,9 @@
 import type { CatalogueKind, TitleSummary } from "@/types/catalogue";
-import type { BrowseList, MediaSummary, MediaType, SearchScope } from "@/types/media";
+import type { MediaSummary, MediaType, SearchScope } from "@/types/media";
 import type { WatchlistItem, WatchlistRef } from "@/types/watchlist";
 
 export function cn(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
-}
-
-/** Narrows any media object to the fields safe to store or send to the client. */
-export function toSummary({ id, mediaType, title, posterPath, releaseYear, rating }: MediaSummary): MediaSummary {
-  return { id, mediaType, title, posterPath, releaseYear, rating };
-}
-
-export function mediaHref({ mediaType, id }: Pick<MediaSummary, "mediaType" | "id">) {
-  return `/${mediaType}/${id}`;
 }
 
 /** Detail page of a published catalogue title. */
@@ -21,7 +12,7 @@ export function titleHref(kind: CatalogueKind, slug: string) {
 }
 
 export function mediaTypeLabel(mediaType: MediaType) {
-  return mediaType === "movie" ? "Movie" : "TV Show";
+  return mediaType === "movie" ? "Movie" : "Series";
 }
 
 /** Stable string identity of a saved title; the id alone is ambiguous across id spaces. */
@@ -29,9 +20,12 @@ export function watchlistRefKey(ref: WatchlistRef) {
   return ref.source === "catalogue" ? `catalogue:${ref.kind}:${ref.id}` : `tmdb:${ref.mediaType}:${ref.id}`;
 }
 
-/** My List entry for a TMDB title (a legacy save until the title is in the catalogue). */
+/**
+ * My List entry for a legacy TMDB save (temporary migration compatibility, B5).
+ * Velora has no page for a TMDB-only title, so the row does not link anywhere.
+ */
 export function mediaWatchlistItem({ id, mediaType, title, posterPath, releaseYear, rating }: MediaSummary): WatchlistItem {
-  return { ref: { source: "tmdb", mediaType, id }, tmdbId: null, title, posterPath, releaseYear, rating, href: mediaHref({ mediaType, id }) };
+  return { ref: { source: "tmdb", mediaType, id }, tmdbId: null, title, posterPath, releaseYear, rating, href: null };
 }
 
 /** My List entry for a published catalogue title. */
@@ -60,21 +54,48 @@ export function firstParam(value: SearchParamValue) {
   return Array.isArray(value) ? value[0] : value;
 }
 
-// TMDB rejects pages above 500.
-const MAX_PAGE = 500;
-
-export function parsePage(value: SearchParamValue) {
-  const page = Number.parseInt(firstParam(value) ?? "", 10);
-  return Number.isInteger(page) && page >= 1 ? Math.min(page, MAX_PAGE) : 1;
-}
-
-export function parseBrowseList(value: SearchParamValue): BrowseList {
-  return firstParam(value) === "top_rated" ? "top_rated" : "popular";
-}
-
+/**
+ * Search scope in URLs. Product copy says "Series"; the stored analytics and
+ * history scope stays `tv` (a database check constraint). `?type=tv` from
+ * older links is still accepted.
+ */
 export function parseSearchScope(value: SearchParamValue): SearchScope {
   const scope = firstParam(value);
-  return scope === "movie" || scope === "tv" ? scope : "all";
+  if (scope === "series" || scope === "tv") return "tv";
+  return scope === "movie" ? "movie" : "all";
+}
+
+export function searchScopeParam(scope: SearchScope): string | null {
+  return scope === "all" ? null : scope === "tv" ? "series" : "movie";
+}
+
+/** A catalogue slug as the database allows it; anything else is ignored rather than queried. */
+export function parseSlug(value: SearchParamValue): string | null {
+  const slug = firstParam(value);
+  return slug && slug.length <= 100 && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) ? slug : null;
+}
+
+/**
+ * ILIKE "contains" pattern for a search query. LIKE wildcards in the query are
+ * escaped; PostgREST also treats `*` as a wildcard, so it becomes a
+ * one-character match (`M*A*S*H` still finds itself). Null for an empty query.
+ */
+export function containsPattern(query: string): string | null {
+  const clean = query.trim();
+  if (!clean) return null;
+  return `%${clean.replace(/[\\%_]/g, (char) => `\\${char}`).replaceAll("*", "_")}%`;
+}
+
+/** Stable sort: exact matches, then prefix matches, then the rest, each group in its given order. */
+export function rankByTitleMatch<T>(items: T[], query: string, titleOf: (item: T) => string): T[] {
+  const needle = query.trim().toLocaleLowerCase();
+  const rank = (item: T) => {
+    const title = titleOf(item).toLocaleLowerCase();
+    return title === needle ? 0 : title.startsWith(needle) ? 1 : 2;
+  };
+  return items.map((item, index) => ({ item, index, rank: rank(item) }))
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map(({ item }) => item);
 }
 
 export function parseMediaType(value: string): MediaType | null {
@@ -104,17 +125,17 @@ export function safeRedirectPath(value: string | null | undefined, fallback = "/
 
 /** The one place a search URL is built, so results, tabs and history links always agree. */
 export function searchHref(query: string, scope: SearchScope = "all") {
-  return `/search?q=${encodeURIComponent(query)}${scope === "all" ? "" : `&type=${scope}`}`;
+  const type = searchScopeParam(scope);
+  return `/search?q=${encodeURIComponent(query)}${type ? `&type=${type}` : ""}`;
 }
 
-export const SEARCH_SCOPE_LABELS: Record<SearchScope, string> = { all: "All", movie: "Movies", tv: "TV Shows" };
+export const SEARCH_SCOPE_LABELS: Record<SearchScope, string> = { all: "All", movie: "Movies", tv: "Series" };
 
-/** Longest search query that is forwarded to TMDB. */
+/** Longest search query the catalogue search accepts. */
 export const MAX_SEARCH_LENGTH = 100;
 
 /**
- * Ceiling of the result count public.record_search accepts (TMDB itself stops at
- * 500 pages x 20). Lives here, not in lib/schemas.ts, so the client recording
+ * Ceiling of the result count public.record_search accepts. Lives here, not in lib/schemas.ts, so the client recording
  * island can clamp without pulling Zod into the guest bundle.
  */
 export const MAX_SEARCH_RESULT_COUNT = 10_000;

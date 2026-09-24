@@ -3,9 +3,12 @@ import { createClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { requireSupabaseConfig } from "@/lib/supabase/config";
 import type { Database } from "@/lib/supabase/database.types";
+import { containsPattern, rankByTitleMatch } from "@/lib/utils";
 import type {
   CatalogueKind,
   CataloguePage,
+  CatalogueSearchResult,
+  FeaturedTitle,
   Genre,
   MovieDetail,
   Season,
@@ -15,6 +18,7 @@ import type {
   Vj,
   VjSummary,
 } from "@/types/catalogue";
+import type { SearchScope } from "@/types/media";
 
 /**
  * Server-side reads of the published Velora UG catalogue.
@@ -245,6 +249,54 @@ export async function listSeries(options: TitleListOptions = {}): Promise<Catalo
   };
 }
 
+// ---------------------------------------------------------------------------
+// Featured (home hero)
+// ---------------------------------------------------------------------------
+type Showcase = { overview: string | null; backdrop_path: string | null };
+
+/**
+ * Titles for the home hero: featured movies and series, newest first. With
+ * nothing featured it falls back to the newest titles that have a backdrop, so
+ * the hero still shows real catalogue content, and never anything else.
+ */
+export async function listFeatured(limit = 5): Promise<FeaturedTitle[]> {
+  const client = catalogueClient();
+  const load = async (featured: boolean) => {
+    let movies = client.from("movies").select(`${MOVIE_SUMMARY}, overview, backdrop_path`);
+    let series = client.from("series").select(`${SERIES_SUMMARY}, overview, backdrop_path`);
+    if (featured) {
+      movies = movies.eq("is_featured", true);
+      series = series.eq("is_featured", true);
+    } else {
+      movies = movies.not("backdrop_path", "is", null);
+      series = series.not("backdrop_path", "is", null);
+    }
+    const [movieResult, seriesResult] = await Promise.all([
+      movies.order("published_at", { ascending: false }).order("id", { ascending: false }).limit(limit)
+        .overrideTypes<(MovieSummaryRow & Showcase)[], { merge: false }>(),
+      series.order("published_at", { ascending: false }).order("id", { ascending: false }).limit(limit)
+        .overrideTypes<(SeriesSummaryRow & Showcase)[], { merge: false }>(),
+    ]);
+    if (movieResult.error) fail("featured movies", movieResult.error);
+    if (seriesResult.error) fail("featured series", seriesResult.error);
+
+    const showcase = (row: Showcase & { published_at: string }, summary: TitleSummary) => ({
+      title: { ...summary, overview: row.overview, backdropPath: row.backdrop_path },
+      publishedAt: row.published_at,
+    });
+    return [
+      ...movieResult.data.map((row) => showcase(row, toMovieSummary(row))),
+      ...seriesResult.data.map((row) => showcase(row, toSeriesSummary(row))),
+    ]
+      .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt))
+      .slice(0, limit)
+      .map(({ title }) => title);
+  };
+
+  const featured = await load(true);
+  return featured.length > 0 ? featured : load(false);
+}
+
 /**
  * Published titles of one kind, looked up by internal id or by the TMDB id they
  * were matched to (My List). Ids that are unknown or not public are simply
@@ -456,4 +508,53 @@ export async function listGenres(): Promise<Genre[]> {
   const { data, error } = await catalogueClient().from("genres").select("id, slug, name").order("name");
   if (error) fail("genres", error);
   return data;
+}
+
+// ---------------------------------------------------------------------------
+// Search (public catalogue only; there is no TMDB fallback)
+// ---------------------------------------------------------------------------
+const SEARCH_LIMIT = 30;
+
+/**
+ * Published movies and series whose title contains the query, plus matching
+ * active VJs for the "all" scope. Titles that start with the query rank first.
+ * Unindexed ILIKE is fine at the current catalogue size; a trigram index is
+ * recorded as debt in docs/PHASE_B_CATALOGUE_DESIGN.md.
+ */
+export async function searchCatalogue(query: string, scope: SearchScope): Promise<CatalogueSearchResult> {
+  const pattern = containsPattern(query);
+  if (!pattern) return { titles: [], vjs: [] };
+  const client = catalogueClient();
+
+  const [movies, series, vjs] = await Promise.all([
+    scope === "tv"
+      ? null
+      : client.from("movies").select(MOVIE_SUMMARY).ilike("title", pattern)
+          .order("published_at", { ascending: false }).order("id", { ascending: false }).limit(SEARCH_LIMIT)
+          .overrideTypes<MovieSummaryRow[], { merge: false }>(),
+    scope === "movie"
+      ? null
+      : client.from("series").select(SERIES_SUMMARY).ilike("title", pattern)
+          .order("published_at", { ascending: false }).order("id", { ascending: false }).limit(SEARCH_LIMIT)
+          .overrideTypes<SeriesSummaryRow[], { merge: false }>(),
+    scope === "all"
+      ? client.from("vjs").select(`${VJ}, description, avatar_url`).ilike("name", pattern).order("sort_order").order("id").limit(SEARCH_LIMIT)
+      : null,
+  ]);
+  if (movies?.error) fail("movie search", movies.error);
+  if (series?.error) fail("series search", series.error);
+  if (vjs?.error) fail("vj search", vjs.error);
+
+  const titles = [...(movies?.data ?? []).map(toMovieSummary), ...(series?.data ?? []).map(toSeriesSummary)];
+  return {
+    titles: rankByTitleMatch(titles, query, (title) => title.title),
+    vjs: rankByTitleMatch((vjs?.data ?? []).map(toVj), query, (vj) => vj.name),
+  };
+}
+
+/** Popular recent searches (Phase 3 analytics, public.trending_searches). Suggestions only. */
+export async function trendingSearches(limit = 6): Promise<string[]> {
+  const { data, error } = await catalogueClient().rpc("trending_searches", { p_limit: limit });
+  if (error) fail("trending searches", error);
+  return data.map((row) => row.query);
 }

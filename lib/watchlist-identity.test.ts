@@ -11,31 +11,40 @@ const lookup = buildLookup([title("movie", 7, 550), title("series", 7, 1399), ti
 
 describe("toInsert: which identity a save stores", () => {
   it("stores the internal id when the internal id is given", () => {
-    expect(toInsert({ source: "catalogue", kind: "movie", id: 7 }, lookup)).toEqual({ movie_id: 7, media_type: "movie" });
-    expect(toInsert({ source: "catalogue", kind: "series", id: 7 }, lookup)).toEqual({ series_id: 7, media_type: "series" });
-    expect(toInsert({ source: "catalogue", kind: "movie", id: 8 }, lookup)).toEqual({ movie_id: 8, media_type: "movie" });
+    expect(toInsert({ source: "catalogue", kind: "movie", id: 7 }, lookup, "refuse")).toEqual({ movie_id: 7, media_type: "movie" });
+    expect(toInsert({ source: "catalogue", kind: "series", id: 7 }, lookup, "refuse")).toEqual({ series_id: 7, media_type: "series" });
+    expect(toInsert({ source: "catalogue", kind: "movie", id: 8 }, lookup, "refuse")).toEqual({ movie_id: 8, media_type: "movie" });
   });
 
   it("stores the internal id, never the TMDB id, when a TMDB ref maps to a public title", () => {
-    expect(toInsert({ source: "tmdb", mediaType: "movie", id: 550 }, lookup)).toEqual({ movie_id: 7, media_type: "movie" });
-    expect(toInsert({ source: "tmdb", mediaType: "tv", id: 1399 }, lookup)).toEqual({ series_id: 7, media_type: "series" });
+    expect(toInsert({ source: "tmdb", mediaType: "movie", id: 550 }, lookup, "refuse")).toEqual({ movie_id: 7, media_type: "movie" });
+    expect(toInsert({ source: "tmdb", mediaType: "tv", id: 1399 }, lookup, "refuse")).toEqual({ series_id: 7, media_type: "series" });
   });
 
-  it("keeps the pre-B5 legacy path only for a TMDB title with no public match", () => {
-    expect(toInsert({ source: "tmdb", mediaType: "movie", id: 999 }, lookup)).toEqual({ tmdb_id: 999, media_type: "movie" });
-    expect(toInsert({ source: "tmdb", mediaType: "tv", id: 999 }, lookup)).toEqual({ tmdb_id: 999, media_type: "tv" });
+  it("never creates a TMDB-only row from an ordinary save (B5)", () => {
+    expect(toInsert({ source: "tmdb", mediaType: "movie", id: 999 }, lookup, "refuse")).toBeNull();
+    expect(toInsert({ source: "tmdb", mediaType: "tv", id: 999 }, lookup, "refuse")).toBeNull();
+  });
+
+  it("keeps an unmatched TMDB title as a legacy row only when importing a pre-B5 guest list", () => {
+    expect(toInsert({ source: "tmdb", mediaType: "movie", id: 999 }, lookup, "allow")).toEqual({ tmdb_id: 999, media_type: "movie" });
+    expect(toInsert({ source: "tmdb", mediaType: "tv", id: 999 }, lookup, "allow")).toEqual({ tmdb_id: 999, media_type: "tv" });
+  });
+
+  it("stores a matched TMDB ref canonically under either policy", () => {
+    expect(toInsert({ source: "tmdb", mediaType: "movie", id: 550 }, lookup, "allow")).toEqual({ movie_id: 7, media_type: "movie" });
   });
 
   it("refuses an internal id that is not public, and never falls back to TMDB for it", () => {
-    expect(toInsert({ source: "catalogue", kind: "movie", id: 99 }, lookup)).toBeNull();
-    expect(toInsert({ source: "catalogue", kind: "series", id: 99 }, lookup)).toBeNull();
+    expect(toInsert({ source: "catalogue", kind: "movie", id: 99 }, lookup, "refuse")).toBeNull();
+    expect(toInsert({ source: "catalogue", kind: "series", id: 99 }, lookup, "allow")).toBeNull();
   });
 
   it("keeps movie, series and TMDB id spaces apart", () => {
     // Series 7 exists; movie 1399 does not, even though a series has TMDB id 1399.
-    expect(toInsert({ source: "catalogue", kind: "movie", id: 1399 }, lookup)).toBeNull();
+    expect(toInsert({ source: "catalogue", kind: "movie", id: 1399 }, lookup, "refuse")).toBeNull();
     // TMDB movie 1399 is not the TMDB tv title 1399.
-    expect(toInsert({ source: "tmdb", mediaType: "movie", id: 1399 }, lookup)).toEqual({ tmdb_id: 1399, media_type: "movie" });
+    expect(toInsert({ source: "tmdb", mediaType: "movie", id: 1399 }, lookup, "allow")).toEqual({ tmdb_id: 1399, media_type: "movie" });
   });
 });
 

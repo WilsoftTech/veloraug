@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
 import Link from "next/link";
-import { SearchX, SlidersHorizontal, TriangleAlert, TrendingUp } from "lucide-react";
+import { Mic, SearchX, TriangleAlert, TrendingUp } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
 import { MovieList, MovieListItem } from "@/components/movie-list-item";
 import { RecentSearches } from "@/components/recent-searches";
@@ -10,9 +10,9 @@ import { SearchInput } from "@/components/search-input";
 import { SearchRecorder } from "@/components/search-recorder";
 import { ListSkeleton } from "@/components/skeletons";
 import { TabLinks } from "@/components/tab-links";
-import { discoverHref } from "@/lib/discover";
-import { getTrending, searchMedia } from "@/lib/tmdb/media";
-import { SEARCH_SCOPE_LABELS, firstParam, mediaHref, mediaTypeLabel, normalizeSearchQuery, parseSearchScope, searchHref } from "@/lib/utils";
+import { searchCatalogue, trendingSearches } from "@/lib/catalogue";
+import { SEARCH_SCOPE_LABELS, firstParam, normalizeSearchQuery, parseSearchScope, searchHref, titleHref } from "@/lib/utils";
+import type { CatalogueSearchResult } from "@/types/catalogue";
 import type { SearchScope } from "@/types/media";
 
 export const metadata: Metadata = { title: "Search" };
@@ -21,10 +21,11 @@ const SCOPES: SearchScope[] = ["all", "movie", "tv"];
 
 const TRENDING_SEARCH_COUNT = 6;
 
+/** Searches the published catalogue only. There is no TMDB fallback: no match is a real "no results". */
 async function SearchResults({ query, scope }: { query: string; scope: SearchScope }) {
-  let items;
+  let result: CatalogueSearchResult;
   try {
-    ({ items } = await searchMedia(query, scope));
+    result = await searchCatalogue(query, scope);
   } catch (error) {
     // Handled here rather than by the route error boundary so the input stays usable.
     console.error(`Search failed for "${query}"`, error);
@@ -39,18 +40,18 @@ async function SearchResults({ query, scope }: { query: string; scope: SearchSco
     );
   }
 
-  // Reached only when TMDB answered, so a failed search is never recorded. The
-  // count is what this page rendered: a hint for analytics, not a total.
-  const recorder = <SearchRecorder query={query} scope={scope} resultCount={items.length} />;
+  const { titles, vjs } = result;
+  // Reached only when the search succeeded, so a failed search is never recorded.
+  const recorder = <SearchRecorder query={query} scope={scope} resultCount={titles.length + vjs.length} />;
 
-  if (items.length === 0) {
+  if (titles.length === 0 && vjs.length === 0) {
     return (
       <>
         {recorder}
         <EmptyState
           icon={<SearchX className="size-6" />}
           title={`No results for “${query}”`}
-          description="Check the spelling or try a different title."
+          description="Check the spelling or try a different title or VJ."
         />
       </>
     );
@@ -59,24 +60,54 @@ async function SearchResults({ query, scope }: { query: string; scope: SearchSco
   return (
     <>
       {recorder}
-      <MovieList>
-        {items.map((item) => (
-          <MovieListItem key={`${item.mediaType}-${item.id}`} item={item} href={mediaHref(item)} typeLabel={mediaTypeLabel(item.mediaType)} />
-        ))}
-      </MovieList>
+      {vjs.length > 0 && (
+        <section aria-labelledby="vj-results" className="mb-6">
+          <h2 id="vj-results" className="mb-2 text-label-md uppercase text-muted">
+            VJs
+          </h2>
+          <ul className="flex flex-wrap gap-2">
+            {vjs.map((vj) => (
+              <li key={vj.id}>
+                <Link
+                  href={`/vjs/${vj.slug}`}
+                  className="inline-flex min-h-11 items-center gap-2 rounded-full border border-border bg-surface px-4 text-label-lg transition-colors hover:border-highlight/40 hover:text-highlight"
+                >
+                  <Mic aria-hidden className="size-4 text-muted" />
+                  {vj.name}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+      {titles.length > 0 && (
+        <section aria-label="Titles">
+          <MovieList>
+            {titles.map((title) => (
+              <MovieListItem
+                key={`${title.kind}-${title.id}`}
+                item={title}
+                href={titleHref(title.kind, title.slug)}
+                typeLabel={title.kind === "movie" ? "Movie" : "Series"}
+              />
+            ))}
+          </MovieList>
+        </section>
+      )}
     </>
   );
 }
 
+/** Popular recent Velora searches (Phase 3 analytics). Optional: search works without them. */
 async function TrendingSearches() {
-  let titles: string[];
+  let queries: string[];
   try {
-    titles = (await getTrending()).items.slice(0, TRENDING_SEARCH_COUNT).map((item) => item.title);
+    queries = await trendingSearches(TRENDING_SEARCH_COUNT);
   } catch (error) {
-    // Suggestions are optional; search itself should stay usable without them.
     console.error("Could not load trending searches", error);
     return null;
   }
+  if (queries.length === 0) return null;
 
   return (
     <section aria-labelledby="trending-searches">
@@ -84,15 +115,15 @@ async function TrendingSearches() {
         Trending searches
       </h2>
       <ul>
-        {titles.map((title) => (
-          <li key={title}>
+        {queries.map((query) => (
+          <li key={query}>
             <Link
-              href={`/search?q=${encodeURIComponent(title)}`}
+              href={searchHref(query)}
               replace
               className="flex min-h-12 items-center gap-3 border-b border-border text-body-md transition-colors hover:text-highlight"
             >
               <TrendingUp aria-hidden className="size-4 text-muted" />
-              {title}
+              {query}
             </Link>
           </li>
         ))}
@@ -131,11 +162,11 @@ export default async function SearchPage({ searchParams }: PageProps<"/search">)
         ) : (
           <>
             <Link
-              href={discoverHref()}
+              href="/vjs"
               className="mb-2 inline-flex min-h-11 items-center gap-2 text-label-lg text-highlight transition-colors hover:text-foreground"
             >
-              <SlidersHorizontal aria-hidden className="size-4" />
-              Browse by genre
+              <Mic aria-hidden className="size-4" />
+              Browse by VJ
             </Link>
             <Suspense>
               <TrendingSearches />

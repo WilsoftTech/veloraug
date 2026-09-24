@@ -94,3 +94,15 @@ export interface CataloguePage<T> {
   items: T[];
   nextCursor: string | null;
 }
+
+/** A title shown in the home hero: a summary plus the artwork and copy the hero needs. */
+export interface FeaturedTitle extends TitleSummary {
+  overview: string | null;
+  backdropPath: string | null;
+}
+
+/** Public catalogue search: matching titles (movies and series) and, for the "all" scope, VJs. */
+export interface CatalogueSearchResult {
+  titles: TitleSummary[];
+  vjs: Vj[];
+}

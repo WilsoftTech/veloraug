@@ -10,8 +10,19 @@ if (
 }
 
 const nextConfig: NextConfig = {
+  // Pre-B5 TMDB browse routes. The catalogue now lives at /movies and /series.
+  // Legacy /movie/:id and /tv/:id detail links resolve in app/[mediaType]/[id].
+  async redirects() {
+    return [
+      { source: "/tv", destination: "/series", permanent: true },
+      { source: "/trending", destination: "/", permanent: true },
+      { source: "/discover", has: [{ type: "query", key: "type", value: "tv" }], destination: "/series", permanent: true },
+      { source: "/discover", destination: "/movies", permanent: true },
+    ];
+  },
   images: {
-    // TMDB already serves pre-sized images from its CDN, so a custom loader
+    // Catalogue records store TMDB artwork paths (metadata of an approved Velora
+    // record, not a catalogue decision). TMDB serves pre-sized images, so a custom loader
     // maps the requested width to the nearest TMDB size instead of paying for
     // a second round of optimization.
     loader: "custom",

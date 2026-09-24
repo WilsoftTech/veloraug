@@ -14,10 +14,10 @@ import type { WatchlistItem } from "@/types/watchlist";
 
 const COPY: Record<MediaType, { empty: string; explore: string; href: string }> = {
   movie: { empty: "No movies saved yet", explore: "Explore Movies", href: "/movies" },
-  tv: { empty: "No shows saved yet", explore: "Explore TV Shows", href: "/tv" },
+  tv: { empty: "No series saved yet", explore: "Explore Series", href: "/series" },
 };
 
-/** The tabs still follow the TMDB split: a catalogue series belongs under TV Shows. */
+/** Two tabs: movies, and series (catalogue series plus legacy TMDB "tv" saves). */
 function tabOf({ ref }: WatchlistItem): MediaType {
   if (ref.source === "tmdb") return ref.mediaType;
   return ref.kind === "movie" ? "movie" : "tv";

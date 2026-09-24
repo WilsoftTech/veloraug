@@ -8,8 +8,8 @@ import { NavLink } from "@/components/nav-link";
 const NAV_ITEMS = [
   { href: "/", label: "Home" },
   { href: "/movies", label: "Movies" },
-  { href: "/tv", label: "TV Shows" },
-  { href: "/trending", label: "Trending" },
+  { href: "/series", label: "Series" },
+  { href: "/vjs", label: "VJs" },
   { href: "/my-list", label: "My List" },
 ];
 

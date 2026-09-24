@@ -3,7 +3,7 @@
 import { getAuthedClient } from "@/lib/auth";
 import { findTitles } from "@/lib/catalogue";
 import { watchlistRefListSchema, watchlistRefSchema } from "@/lib/schemas";
-import { getMediaSummaries } from "@/lib/tmdb/media";
+import { getLegacyTitleSummaries } from "@/lib/tmdb/legacy-watchlist";
 import { mediaWatchlistItem, titleWatchlistItem, watchlistRefKey } from "@/lib/utils";
 import { buildLookup, rowRef, rowsOf, toInsert, type TitleLookup, type WatchlistRow } from "@/lib/watchlist-identity";
 import type { WatchlistItem, WatchlistRef } from "@/types/watchlist";
@@ -14,10 +14,11 @@ import type { WatchlistItem, WatchlistRef } from "@/types/watchlist";
  * Security in Postgres is the second, independent guard on every query.
  *
  * Identity (lib/watchlist-identity.ts): saves are stored by internal catalogue
- * id. A TMDB ref is first resolved to the public catalogue title matched to it,
- * and is stored as a legacy TMDB row only when there is none, so pre-B5 pages
- * that still identify titles by TMDB id keep working. Reads show a legacy row as
- * its catalogue title once one is public; otherwise TMDB describes it. A row
+ * id. Since B5 every save button sends a catalogue ref; a TMDB ref (from a
+ * pre-B5 guest list) is resolved to its public catalogue title. Only importing
+ * a pre-B5 guest list may still store an unmatched TMDB title as a legacy row.
+ * Reads show a legacy row as its catalogue title once one is public; otherwise
+ * the temporary legacy lookup (lib/tmdb/legacy-watchlist.ts) describes it. A row
  * neither can describe is still listed, so it can always be removed.
  */
 export type WatchlistError = "signed-out" | "invalid" | "full" | "unavailable";
@@ -69,12 +70,12 @@ async function toItems(rows: WatchlistRow[]): Promise<WatchlistItem[]> {
   });
   const lookup = await lookupTitles(saved.map(({ ref }) => ref));
 
-  // Rows without a published catalogue title fall back to TMDB when their TMDB id is known.
+  // Legacy rows without a public catalogue title: temporary TMDB description (migration compatibility).
   const tmdbRefs = saved.flatMap(({ row, ref }) =>
     lookup(ref) || row.tmdb_id === null ? [] : [{ id: row.tmdb_id, mediaType: row.media_type === "movie" ? ("movie" as const) : ("tv" as const) }],
   );
   const described = new Map(
-    (await getMediaSummaries(tmdbRefs)).map((summary) => [
+    (await getLegacyTitleSummaries(tmdbRefs)).map((summary) => [
       watchlistRefKey({ source: "tmdb", mediaType: summary.mediaType, id: summary.id }),
       summary,
     ]),
@@ -141,7 +142,8 @@ export async function addToWatchlist(input: WatchlistRef): Promise<WatchlistResu
 
   const lookup = await lookupOrFail([ref.data]);
   if (!lookup) return { ok: false, error: "unavailable" };
-  const row = toInsert(ref.data, lookup);
+  // Ordinary saves never create a TMDB-only row: an unmatched TMDB ref is refused.
+  const row = toInsert(ref.data, lookup, "refuse");
   if (!row) return { ok: false, error: "invalid" };
 
   // Saving twice is a no-op, not an error: the insert trigger skips a title
@@ -169,7 +171,9 @@ export async function removeFromWatchlist(input: WatchlistRef): Promise<Watchlis
  * Merge, never replace: titles already saved are untouched, duplicates are
  * skipped, and running it twice with the same input changes nothing. A guest
  * save of a catalogue title that is no longer published has nothing to save
- * and is dropped. The caller clears its local copy only after this returns ok.
+ * and is dropped. A pre-B5 guest save of an unmatched TMDB title is kept as a
+ * legacy row rather than lost (migration compatibility). The caller clears its
+ * local copy only after this returns ok.
  */
 export async function importWatchlist(input: WatchlistRef[]): Promise<WatchlistListResult> {
   const refs = watchlistRefListSchema.safeParse(input);
@@ -179,7 +183,7 @@ export async function importWatchlist(input: WatchlistRef[]): Promise<WatchlistL
 
   const lookup = await lookupOrFail(refs.data);
   if (!lookup) return { ok: false, error: "unavailable" };
-  const rows = [...new Map(refs.data.flatMap((ref) => toInsert(ref, lookup) ?? []).map((row) => [JSON.stringify(row), row])).values()];
+  const rows = [...new Map(refs.data.flatMap((ref) => toInsert(ref, lookup, "allow") ?? []).map((row) => [JSON.stringify(row), row])).values()];
 
   if (rows.length > 0) {
     let { error } = await session.supabase.from("watchlist_items").insert(rows);

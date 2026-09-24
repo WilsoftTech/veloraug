@@ -1,8 +1,16 @@
-import type { TmdbPaged } from "./types";
+import "server-only";
 
 const API_BASE = "https://api.themoviedb.org/3";
 const ONE_HOUR = 60 * 60;
 
+/**
+ * The one server-side TMDB transport. Since B5, TMDB never decides what the
+ * catalogue offers: Supabase does. Allowed callers are metadata enrichment of
+ * catalogue records, Phase C ingestion/admin matching, and the temporary legacy
+ * My List lookup (legacy-watchlist.ts). Public catalogue routes must not import
+ * anything under lib/tmdb/ except the image loader; lib/catalogue-boundary.test.ts
+ * enforces that.
+ */
 export function isTmdbConfigured() {
   return Boolean(process.env.TMDB_ACCESS_TOKEN || process.env.TMDB_API_KEY);
 }
@@ -10,9 +18,8 @@ export function isTmdbConfigured() {
 type Params = Record<string, string | number>;
 
 /**
- * Server-side TMDB request. Credentials come from non-public env vars and
- * never reach the browser. Resolves to null on 404; any other failure throws so
- * the route's error boundary can offer a retry.
+ * Credentials come from non-public env vars and never reach the browser.
+ * Resolves to null on 404; any other failure throws.
  */
 export async function tmdbFetch<T>(path: string, params: Params = {}): Promise<T | null> {
   const url = new URL(`${API_BASE}${path}`);
@@ -33,10 +40,4 @@ export async function tmdbFetch<T>(path: string, params: Params = {}): Promise<T
     throw new Error("Could not load content from TMDB.");
   }
   return (await response.json()) as T;
-}
-
-export async function tmdbFetchPage<T>(path: string, params: Params = {}): Promise<TmdbPaged<T>> {
-  const data = await tmdbFetch<TmdbPaged<T>>(path, params);
-  if (!data) throw new Error(`TMDB returned no data for ${path}`);
-  return data;
 }

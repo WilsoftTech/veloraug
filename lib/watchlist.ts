@@ -103,7 +103,8 @@ function fromStorage(value: unknown): WatchlistItem | null {
   if (isRef(ref) && (tmdbId === null || isId(tmdbId)) && isLocalPath(href)) {
     const clean: WatchlistRef =
       ref.source === "catalogue" ? { source: "catalogue", kind: ref.kind, id: ref.id } : { source: "tmdb", mediaType: ref.mediaType, id: ref.id };
-    return { ref: clean, tmdbId, title, posterPath, releaseYear, rating, href };
+    // A legacy TMDB entry has no Velora page since B5 (its old /movie/:id link is dropped).
+    return { ref: clean, tmdbId, title, posterPath, releaseYear, rating, href: clean.source === "tmdb" ? null : href };
   }
   if (isId(value.id) && (value.mediaType === "movie" || value.mediaType === "tv")) {
     return mediaWatchlistItem(value as unknown as MediaSummary);

@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import { PosterImage } from "@/components/media-image";
 import { Rating } from "@/components/rating";
-import type { MediaSummary } from "@/types/media";
+import type { TitleSummary } from "@/types/catalogue";
 
 /** Glass panel (DESIGN.md → Glass Cards) holding compact rows. */
 export function MovieList({ children }: { children: ReactNode }) {
@@ -10,10 +10,10 @@ export function MovieList({ children }: { children: ReactNode }) {
 }
 
 interface MovieListItemProps {
-  item: Pick<MediaSummary, "title" | "posterPath" | "releaseYear" | "rating">;
+  item: Pick<TitleSummary, "title" | "posterPath" | "releaseYear" | "rating">;
   /** Where the row opens; null renders it as plain text (a title that is no longer available). */
   href: string | null;
-  /** What kind of title this is: "Movie", "TV Show", "Series". */
+  /** What kind of title this is: "Movie" or "Series". */
   typeLabel: string;
   /** Trailing control (e.g. remove). Rendered outside the link so it stays a valid, separate target. */
   action?: ReactNode;
