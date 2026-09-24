@@ -90,6 +90,9 @@ Establish a trustworthy repository/database baseline, migrate product identity, 
 - Remove duplicate `.env.example` entries and add only variables consumed by Phase A.
 - Update README/CLAUDE after behavior/branding land.
 - Preserve server-only naming and production checks.
+- Implemented 2026-09-24: `.env.example` reduced to the variables the app reads, plus
+  the migration-tooling `DATABASE_URL`. README and CLAUDE describe Velora UG's
+  current and planned architecture.
 
 ## Acceptance criteria
 
