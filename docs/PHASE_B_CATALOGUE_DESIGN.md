@@ -26,14 +26,18 @@ work, not `B3`.
 | B-2 | `b40a99c` | B1 (published-only policies, column grants, adversarial RLS tests); B3 (server data layer) | Deployed and verified |
 | (deploy record) | `638a805` | B1 hosted verification | Documentation only |
 | B-3 | `6632328` | **B4, in part**: app-side dual-format watchlist, reads/removals of legacy rows, unresolved-row report | Implemented. App-only, no migration. On the remote branch |
+| B4 (roadmap label used from here on) | 2026-09-24 B4 commits | **B4, completed**: public-only identity guard (`20260924195306`), identity module and unit tests, diagnostic, DB tests | Implemented locally. Migration **not pushed** (dry-run proposes only it) |
 | B-4 (planned) | — | B5: TMDB out of ordinary reads, sample catalogue off in production | Not started |
 | DB regression suite | 2026-09-24 reconciliation commit | B1 "adversarial RLS tests" and the Phase 2/3 regressions, now repeatable (`npm run test:db`) | Done in this checkpoint |
 
-Still open in roadmap B4 after historical B-3:
+Still open in roadmap B4 after historical B-3 (as recorded at reconciliation):
 
 - Legacy writes are not stopped. Unmapped TMDB titles are still saved as `tmdb_id` rows.
 - No published-only guard on direct internal-id inserts (see B-3 follow-ups).
 - Legacy column removal stays deferred.
+
+"B4 result" at the end of this document resolves the guard, sets the legacy-write
+transition rule (legacy writes end with B5), and keeps column removal deferred.
 
 ## Entry gate
 
@@ -414,3 +418,113 @@ from public.watchlist_items w;
   internal id exists, and could store a reference that reads back as unavailable.
   Consider a trigger guard (published titles only for new internal saves) in a later
   migration.
+
+## B4 result: canonical watchlist identity
+
+Date: 2026-09-24. Status: **implemented and validated locally. Migration
+`20260924195306` is not deployed.** The hosted dry-run proposes only this migration.
+
+### Identity model (final for B4)
+
+| Identity | Columns | Role |
+| --- | --- | --- |
+| **Canonical** | `movie_id` / `series_id` (internal `bigint` identity, not UUID) | The watchlist identity of every catalogue-backed save |
+| **External** | `tmdb_id` + `media_type` `movie`/`tv` | TMDB metadata id. Used as the identity only on legacy rows |
+
+- `watchlist_items_identity_check` (from `20260922080911`, reused unchanged) allows
+  exactly three shapes: movie (`movie_id`, `media_type='movie'`), series
+  (`series_id`, `'series'`), or legacy (TMDB id only, `'movie'`/`'tv'`). A row can
+  never point at both a movie and a series. No new constraint was needed.
+- Reads (`rowRef`): internal identity wins whenever present, including on
+  normalized historical rows that also keep their `tmdb_id`.
+- Application rules live in `lib/watchlist-identity.ts`. It is framework-free, so
+  a future Expo client can reuse it, and the unit tests import it directly.
+  `lib/watchlist-actions.ts` keeps the session, the Supabase calls and the TMDB
+  descriptions.
+
+### Save policy (decision)
+
+**New saves may reference only a title that is public at save time**, which is
+option B of the checkpoint brief. It is not a new policy. B-3 already refused
+unpublished catalogue ids in the app, and its follow-up called for the same guard in
+the database. The migration makes the database enforce it for clients that bypass the
+app:
+
+- Any `movie_id`/`series_id` on a new row must pass
+  `catalogue_access.movie_is_public` / `series_is_public` (the B-2 predicates,
+  reused). Unknown ids, draft ids, rights-blocked and unready titles, and a movie id
+  sent as a series id (or the reverse) all fail the same way: `23503` "Title is not
+  available", raised before the FK check. The error does not reveal whether a hidden
+  title exists. The app maps it to `invalid` ("That title can't be saved.").
+- A legacy TMDB save is normalized **only onto a public title**. Before B4 it was also
+  normalized onto draft titles, which revealed the draft's internal id. The 002 test
+  that recorded that behaviour now asserts the stricter rule.
+- **Insert time only.** Existing rows are never removed or rejected when a title's
+  availability changes later. They stay listed and removable. This matches the B-3
+  read design ("Unavailable title").
+- Unchanged: duplicate suppression across forms, the per-user advisory lock and the
+  500-row cap, own-row RLS, no UPDATE grant, and every catalogue, column and Telegram
+  restriction. No grant changed. The trigger remains the only definer path, and the
+  predicates run as its owner.
+
+### Temporary legacy compatibility (until B5)
+
+Every save button in the current UI (the TMDB detail page and hero) sends a TMDB ref,
+because those pages are still TMDB-backed. So:
+
+1. A TMDB ref that matches a public catalogue title is stored canonically (internal
+   id only; the app sends no `tmdb_id`).
+2. A TMDB ref with no public match is stored as a legacy `tmdb_id` row. No catalogue
+   row is fabricated and nothing is imported from TMDB.
+3. Legacy rows are read by late catalogue match first, then TMDB, then "Unavailable
+   title". They stay removable in either form.
+
+Legacy writes stop when B5 removes the TMDB-identified save paths. That is B5's exit
+condition, not B4's. `legacy_created_7d` in the diagnostic shows whether this debt
+is still growing.
+
+### Unresolved-row measurement
+
+`supabase/diagnostics/watchlist_identity.sql` is aggregate-only and read-only, with
+no API. It reports canonical movie/series rows, legacy movie/tv rows, legacy rows
+matching a published or a draft title, legacy rows created in the last 7 days, and
+malformed rows.
+
+Hosted, 2026-09-24 20:00 UTC, read-only MCP (`supabase_read_only_user`): **every
+count is 0** (0 watchlist rows in total). Backfilling `legacy_published_match` rows
+is deferred until that count is non-zero. Reads already resolve them.
+
+### Validation
+
+| Gate | Result |
+| --- | --- |
+| `npm run test:db` (clean local chain, migrations 1–8) | **166/166 PASS** (001: 64, 002: 32, 003: 30, 004: 40) |
+| Mutation check: pre-B4 trigger body reinstalled locally | 14 assertions fail, as intended; reset afterwards |
+| `npm test` (Vitest, `lib/watchlist-identity.test.ts`) | 10/10 PASS |
+| `supabase db lint --local` (`public`, `private`, `catalogue_access`) | No schema errors |
+| `npm run lint` / `typecheck` / `build` | PASS / PASS / PASS |
+| Hosted dry-run (`db push --dry-run` via the session pooler; the CLI token lacks `database_write`) | Proposes only `20260924195306_watchlist_public_identity_guard.sql`. **Not pushed** |
+
+004 covers internal movie and series saves and their idempotency across forms;
+nonexistent, draft, blocked, no-longer-public and cross-kind ids; conflicting and
+mismatched identity; legacy movie and tv normalization; draft-mapped and unmapped
+legacy rows; existing rows surviving unpublication and staying removable; no
+malformed rows; hidden and Telegram columns still denied; and user and anon isolation.
+The 500 cap and the 501st rejection stay in 002. The two-connection race at the cap
+remains covered only by the earlier manual validation (`VELORA_UG_SCHEMA_BASELINE.md`).
+pgTAP runs in a single session.
+
+Database types: unchanged (no column change). New dev dependency: `vitest@4.1.11`,
+the unit-test tool AGENTS.md names. Pinned to 4.x because 5.x requires
+`@types/node` ≥ 22 and the project pins 20.
+
+### Remaining for B5 (not started)
+
+- Replace TMDB-identified pages and save buttons (`/[movie|tv]/[id]`, hero, TMDB
+  lists, search) with catalogue pages that save by internal id. This stops new
+  legacy writes.
+- Render legacy watchlist rows without TMDB, or retire them once measured and
+  backfilled. Today, rows without a public catalogue match are described through TMDB.
+- Remove TMDB from home, browse, detail and watchlist reads, and disable the sample
+  catalogue in production. Keep TMDB server-side for admin matching.
+- Later migration, after measurement: legacy column removal (still deferred).

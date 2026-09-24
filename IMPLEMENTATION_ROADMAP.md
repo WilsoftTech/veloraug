@@ -22,6 +22,7 @@ The first Velora UG task is reconciliation, not feature construction.
 - Search-event retention is scheduled (daily, 30 days), and the first hosted run succeeded on 2026-09-24.
 - Hosted Supabase has 7 migrations, identical to `supabase/migrations/`, including B-1/B-2. Source: `veloraug/phase-a-foundation` (`6632328`).
 - Phase A (A1–A5) is complete. Roadmap B1, B2 and B3 are delivered and B4 is partly delivered. Historical checkpoint labels are mapped in `docs/PHASE_B_CATALOGUE_DESIGN.md`.
+- B4 update (2026-09-24, later): B4 is implemented and validated locally. Internal ids are canonical, new internal-id saves are limited to public titles (`20260924195306`, **not yet deployed**), legacy TMDB rows remain readable and removable, and unresolved rows are measured by `supabase/diagnostics/watchlist_identity.sql`. Legacy TMDB writes continue for unmapped titles until B5. B5 has not started.
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules
