@@ -57,8 +57,9 @@ npm run dev
 | --- | --- |
 | `npm run dev` / `npm run build` | Develop / production build |
 | `npm run lint` / `npm run typecheck` | Static checks |
+| `npm test` | Vitest unit tests for framework-free modules (`lib/**/*.test.ts`) |
 | `npm run test:db` | Rebuilds the **local** Supabase database from `supabase/migrations/`, then runs the pgTAP suite. Needs Docker and a running local stack (`npx supabase@2.117.0 start`). It never touches hosted |
 
-Release gate from a fresh clone: `npm ci` → `npm run lint` → `npm run typecheck` → `npm run build` → `npm run test:db`.
+Release gate from a fresh clone: `npm ci` → `npm run lint` → `npm run typecheck` → `npm run build` → `npm test` → `npm run test:db`.
 
 Attribution: this product uses TMDB and the TMDB APIs but is not endorsed or certified by TMDB. The footer carries TMDB's required notice and logo; keep both wherever TMDB metadata or artwork is shown.
