@@ -19,6 +19,7 @@ const ALLOWED_TMDB_MODULES = {
   "lib/tmdb/types.ts": "raw response shapes",
   "lib/tmdb/legacy-watchlist.ts": "TEMPORARY: describes legacy tmdb_id My List rows",
   "lib/tmdb/image-loader.ts": "image CDN for artwork paths stored on catalogue records (next.config.ts)",
+  "lib/tmdb/ingestion-search.ts": "Phase C ingestion-only title search for the uploader CLI; never a catalogue search",
 };
 /** The one edge from app code into TMDB code. */
 const ALLOWED_EDGE = { from: "lib/watchlist-actions.ts", to: "lib/tmdb/legacy-watchlist.ts" };
@@ -100,6 +101,11 @@ describe("TMDB boundary (B5)", () => {
     for (const file of ["lib/catalogue.ts", "lib/browse.ts", "components/catalogue-browse.tsx", "components/hero.tsx", "components/movie-card.tsx"]) {
       expect(graph.get(file)?.filter((target) => target.startsWith("lib/tmdb/"))).toEqual([]);
     }
+  });
+
+  it("the ingestion TMDB search is used by no app, component or library module (uploader CLI only)", () => {
+    const importers = [...graph].filter(([, targets]) => targets.includes("lib/tmdb/ingestion-search.ts")).map(([file]) => file);
+    expect(importers).toEqual([]);
   });
 
   it("the TMDB API host appears only in the TMDB transport", () => {
