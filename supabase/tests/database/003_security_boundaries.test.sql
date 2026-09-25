@@ -16,7 +16,7 @@ select plan(30);
 select is(
   (select count(*)::int from pg_class c join pg_namespace n on n.oid = c.relnamespace
    where n.nspname in ('public', 'private') and c.relkind = 'r'),
-  17, '17 application tables in public/private');
+  18, '18 application tables in public/private (C2A.1 adds private.telegram_channels)');
 select is(
   (select array_agg(n.nspname || '.' || c.relname) from pg_class c
    join pg_namespace n on n.oid = c.relnamespace
@@ -36,7 +36,7 @@ select is(
 -- ---------------------------------------------------------------------------
 select is(
   (select array_agg(format('%s %s %s', r, p, t))
-   from unnest(array['private.search_events', 'private.telegram_media',
+   from unnest(array['private.search_events', 'private.telegram_media', 'private.telegram_channels',
                      'private.ingestion_events', 'private.metadata_match_candidates']) t,
         unnest(array['anon', 'authenticated']) r,
         unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) p
@@ -53,7 +53,7 @@ select is(
 select is(
   (select array_agg(format('%s %s', p, t))
    from unnest(array['private.telegram_media', 'private.ingestion_events',
-                     'private.metadata_match_candidates']) t,
+                     'private.metadata_match_candidates', 'private.telegram_channels']) t,
         unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) p
    where has_table_privilege('service_role', t, p)),
   null, 'service_role holds no privilege on ingestion/review tables');
@@ -121,6 +121,8 @@ select is(
   array['catalogue_access.episode_is_public', 'catalogue_access.movie_is_public',
         'catalogue_access.season_is_public', 'catalogue_access.series_is_public',
         'private.enforce_watchlist_limit', 'private.handle_new_user',
+        'public.ingest_upload_fail', 'public.ingest_upload_record',
+        'public.ingest_upload_start', 'public.ingest_upload_status',
         'public.record_search', 'public.trending_searches'],
   'SECURITY DEFINER functions are exactly the reviewed set');
 select is(
