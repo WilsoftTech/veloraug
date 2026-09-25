@@ -204,6 +204,20 @@ describe("local-path upload: the file never passes through Node", () => {
     expect(toServerFileUri("D:\\Other\\A.mkv", map)).toBeNull();
     expect(toServerFileUri("/home/op/Media/A.mkv", null)).toBe("file:///home/op/Media/A.mkv");
   });
+
+  it("never translates a path that could resolve outside the mapped root", () => {
+    const map = { local: "G:\\Movies", server: "/media/movies" };
+    expect(toServerFileUri("G:\\Movies\\A (2020).mkv", map)).toBe("file:///media/movies/A%20(2020).mkv");
+    expect(toServerFileUri("G:/Movies/Sub/A.mkv", map)).toBe("file:///media/movies/Sub/A.mkv");
+    expect(toServerFileUri("G:\\Movies\\..\\..\\var\\lib\\telegram-bot-api\\x.mkv", map)).toBeNull();
+    expect(toServerFileUri("G:\\Movies\\Sub\\..\\..\\x.mkv", map)).toBeNull();
+    expect(toServerFileUri("G:/Movies/../x.mkv", map)).toBeNull();
+    expect(toServerFileUri("G:\\Movies\\.\\A.mkv", map)).toBeNull();
+    expect(toServerFileUri("G:\\MoviesX\\A.mkv", map)).toBeNull();
+    expect(toServerFileUri("G:\\Movies", map)).toBeNull();
+    expect(toServerFileUri("/media/movies/../x.mkv", null)).toBeNull();
+    expect(toServerFileUri("G:\\Movies\\A..B.mkv", map)).toBe("file:///media/movies/A..B.mkv");
+  });
 });
 
 describe("sendDocument reply handling", () => {

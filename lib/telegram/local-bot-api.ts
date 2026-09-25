@@ -161,6 +161,9 @@ const reject = (code: string, permanent = false): PreflightResult => ({ ok: fals
 
 /** The path the Bot API server must open, as a file URI (`--local` mode). */
 export function toServerFileUri(absolutePath: string, pathMap: LocalBotApiConfig["pathMap"]): string | null {
+  // A dot segment passes the prefix check, then the file URL resolves it outside
+  // the mapped root (for example into the server's own --dir), so refuse it.
+  if (absolutePath.split(/[\\/]/).some((segment) => segment === "." || segment === "..")) return null;
   let path = absolutePath;
   if (pathMap) {
     const normalize = (value: string) => value.split("\\").join("/").replace(/\/+$/, "");
