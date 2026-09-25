@@ -415,7 +415,7 @@ export function createLocalBotApiClient(config: LocalBotApiConfig, deps: Transpo
       if (reply.kind !== "ok") return recoveryFailure(reply, "marker");
       const sent = sentText.safeParse(reply.result);
       if (!sent.success || sent.data.chat.id !== target.channelId || sent.data.text !== text) return { status: "blocked", code: "marker_unexpected_reply" };
-      return { status: "posted", messageId: sent.data.message_id };
+      return { status: "posted", chatId: sent.data.chat.id, messageId: sent.data.message_id };
     },
 
     /**

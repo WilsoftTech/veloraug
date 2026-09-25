@@ -5,12 +5,18 @@
 //   inspect <file> --kind movie|series [--vjs vjs.json] [--match] [--full-hash]
 //   upload [--limit n] [--execute]
 //   resume [--server] [--execute]
+//   checkpoint --kind movie|series --message-id <n> [--execute]
 //   status
 //
-// Dry run is the default. `--execute` needs the code-level authorization
-// (REAL_TELEGRAM_UPLOADS_AUTHORIZED, false until C2B), the local Bot API
-// configuration and the Supabase worker store (service-role key). `resume
-// --server` reads upload status through the worker RPC; it never writes.
+// Dry run is the default. `upload`/`resume --execute` need the code-level
+// authorization (REAL_TELEGRAM_UPLOADS_AUTHORIZED, false until C2B), the local
+// Bot API configuration and the Supabase worker store (service-role key).
+// `resume --server` reads upload status through the worker RPC; it never
+// writes. It checks every journal entry, because after a lost journal only
+// the server knows which uploads are unresolved. `checkpoint --execute`
+// reports a message id the operator observed in the channel to the server,
+// which advances the recovery checkpoint only if that is safe; it makes no
+// Telegram call.
 // Tokens are never printed. Paths are shown only in this terminal.
 import { readFile, stat } from "node:fs/promises";
 import { basename, extname, resolve } from "node:path";
@@ -48,6 +54,7 @@ const { positionals, values } = parseArgs({
     execute: { type: "boolean", default: false },
     limit: { type: "string" },
     server: { type: "boolean", default: false },
+    "message-id": { type: "string" },
   },
 });
 const [command, target] = positionals;
@@ -252,25 +259,51 @@ async function upload() {
   }
 }
 
+/** Nothing to settle: a fresh or definitely failed source, or one already recorded on both sides. */
+const settled = (action: { action: string }) => action.action === "upload_allowed" || action.action === "none";
+
 async function resume() {
   const store = await journal();
-  const entries = (await store.list()).filter((entry) => entry.state.upload === "uploading" || (entry.telegram !== null && entry.dbAcknowledgedAt === null));
+  const all = await store.list();
+  const locallyPending = (entry: JournalEntry) => entry.state.upload === "uploading" || (entry.telegram !== null && entry.dbAcknowledgedAt === null);
   if (!values.execute) {
-    // Offline unless --server: then only the read-only status RPC is called.
+    // Offline unless --server: then only the read-only status RPC is called,
+    // for every entry, since the server may know of uploads the journal lost.
     const server = values.server ? workerStore() : offlineStore;
-    for (const entry of entries) {
-      console.log(`${entry.relativePath}: ${JSON.stringify(await planResume(entry, server))}`);
+    let count = 0;
+    for (const entry of values.server ? all : all.filter(locallyPending)) {
+      const action = await planResume(entry, server);
+      if (values.server && settled(action)) continue;
+      count += 1;
+      console.log(`${entry.relativePath}: ${JSON.stringify(action)}`);
     }
-    console.log(`\ndry run: ${entries.length} entr${entries.length === 1 ? "y" : "ies"} to settle. Nothing was sent.`);
+    console.log(`\ndry run: ${count} entr${count === 1 ? "y" : "ies"} to settle. Nothing was sent.`);
     return;
   }
   const deps = executionDeps(store);
   const release = await store.lock();
   try {
-    for (const entry of entries) console.log(`${entry.relativePath}: ${JSON.stringify(await resumeEntry(entry, deps))}`);
+    for (const entry of all) {
+      if (settled(await planResume(entry, deps.store))) continue;
+      console.log(`${entry.relativePath}: ${JSON.stringify(await resumeEntry(entry, deps))}`);
+    }
   } finally {
     await release();
   }
+}
+
+async function checkpoint() {
+  const kind = kindOption();
+  const messageId = Number(values["message-id"]);
+  if (!Number.isSafeInteger(messageId) || messageId < 1) fail("--message-id must be a positive message id observed in that channel");
+  const channelId = telegramConfig()?.bots[kind].channelId;
+  if (channelId === undefined) fail("the Telegram configuration (channel ids) is required to name the channel");
+  if (!values.execute) {
+    console.log(`dry run: would report message ${messageId} observed in the ${kind} channel. Nothing was sent.`);
+    return;
+  }
+  // The server decides: never backwards, never past an unresolved upload.
+  console.log(`${kind} channel checkpoint: ${await workerStore().advanceCheckpoint(kind, channelId, messageId)}`);
 }
 
 async function status() {
@@ -289,7 +322,7 @@ async function status() {
   console.log(`stops:   ${[...reasons].map(([name, count]) => `${name}: ${count}`).join("  ") || "none"}`);
 }
 
-const commands: Record<string, () => Promise<void>> = { scan, inspect, upload, resume, status };
+const commands: Record<string, () => Promise<void>> = { scan, inspect, upload, resume, checkpoint, status };
 const run = command ? commands[command] : undefined;
 if (!run) fail(`usage: ingest <${Object.keys(commands).join("|")}> …`);
 await run();

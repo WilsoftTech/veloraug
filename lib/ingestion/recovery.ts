@@ -6,6 +6,7 @@ import type {
   RecoveryMarker,
   RecoveryTransport,
   ResumeAction,
+  ServerAttempt,
   ServerUploadStatus,
   SourceFingerprint,
   TelegramMediaRecord,
@@ -27,8 +28,9 @@ import type {
  * method, and deleted messages leave gaps of any length, so the end of the
  * channel can never be inferred from missing ids. Instead:
  *
- * 1. floor: the highest message id known to exist before the attempt started.
- *    Unknown means `incomplete`: the scan never starts blindly at id 1.
+ * 1. floor: a message id known to precede the attempt. Since migration 10 the
+ *    server fixes it when the attempt starts (resolveRecoveryFloor). Unknown
+ *    means `incomplete`: the scan never starts blindly at id 1.
  * 2. upper bound: post a short text marker to the same channel with the same
  *    bot. Channel ids increase, so every message posted before the marker has
  *    a smaller id.
@@ -112,7 +114,7 @@ export async function reconcileUpload(options: ReconcileOptions): Promise<Reconc
   const postedAt = options.now();
   const posted = await options.transport.postMarker(buildRecoveryMarker(options.fingerprint, options.attemptNumber, postedAt));
   if (posted.status !== "posted") return fromCallFailure(posted);
-  const marker: RecoveryMarker = { messageId: posted.messageId, postedAt: postedAt.toISOString() };
+  const marker: RecoveryMarker = { chatId: posted.chatId, messageId: posted.messageId, postedAt: postedAt.toISOString() };
   // The floor is wrong if the marker lands at or below it: never guess.
   if (marker.messageId <= floor) return { status: "incomplete", reason: "floor_not_below_marker", messageIds: [] };
   if (marker.messageId - floor - 1 > pacing.maxIntervalIds) return { status: "incomplete", reason: "interval_too_large", messageIds: [] };
@@ -164,6 +166,33 @@ export async function reconcileUpload(options: ReconcileOptions): Promise<Reconc
   }
 
   return matches.length === 1 ? { status: "found", record: matches[0], marker } : { status: "not_found_confirmed", floorMessageId: floor, marker };
+}
+
+export type RecoveryFloor =
+  | { ok: true; floorMessageId: number; attemptStartedAt: Date }
+  | { ok: false; reason: "floor_unknown" | "floor_conflict" };
+
+/**
+ * The scan floor and attempt start for an unresolved upload (migration 10).
+ * The server's floor is authoritative: it was computed and persisted in the
+ * transaction that started the attempt, so it survives a lost journal and
+ * works on a fresh machine. The journal only corroborates: a journal floor
+ * that differs from the server's, in either direction, is a conflict and
+ * nothing is scanned (choosing either could skip the file). Without a server
+ * floor (a row from before migration 10) the floor is unknown; the journal's
+ * own high-water is never used instead.
+ *
+ * The start time is the server's: its age, read at `statusReadAt` on the
+ * database clock, placed on the uploader's clock. Any marker is posted after
+ * the status read, so the grace period measured from here is never shortened
+ * by clock skew between the two machines.
+ */
+export function resolveRecoveryFloor(server: ServerAttempt | null, journalFloorMessageId: number | null, statusReadAt: Date): RecoveryFloor {
+  if (server === null || server.floorMessageId === null || !Number.isSafeInteger(server.floorMessageId) || server.floorMessageId <= 0) {
+    return { ok: false, reason: "floor_unknown" };
+  }
+  if (journalFloorMessageId !== null && journalFloorMessageId !== server.floorMessageId) return { ok: false, reason: "floor_conflict" };
+  return { ok: true, floorMessageId: server.floorMessageId, attemptStartedAt: new Date(statusReadAt.getTime() - server.ageSeconds * 1000) };
 }
 
 /** The journal facts resume needs. */

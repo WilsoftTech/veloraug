@@ -6,8 +6,8 @@ import type { CatalogueKind } from "@/types/catalogue";
 import type { ServerUploadStatus, SourceFingerprint, SourceIdentity, TelegramMediaRecord, UploadFailureOutcome } from "@/types/ingestion";
 
 /**
- * The uploader's view of the Supabase ingestion write boundary: the four worker
- * commands of migration 20260925004059, and nothing else. There is no table
+ * The uploader's view of the Supabase ingestion write boundary: the worker
+ * commands of migrations 20260925004059 and 20260925194322, and nothing else. There is no table
  * access and no SQL here: every call is a PostgREST `rpc/` call that only
  * service_role may execute. None of the commands approves or publishes.
  */
@@ -19,8 +19,9 @@ export interface IngestionStore {
    * Registers the source (idempotent by fingerprint) and starts an attempt
    * towards `channelId`, which must be the allow-listed channel for `kind`
    * (ingest_upload_start). Refused while uploading, uncertain, uploaded or blocked.
+   * Returns the attempt's recovery floor, which the server computed and persisted.
    */
-  markUploadStarted(input: { source: SourceIdentity; kind: CatalogueKind; channelId: number }): Promise<{ attempt: number }>;
+  markUploadStarted(input: { source: SourceIdentity; kind: CatalogueKind; channelId: number }): Promise<{ attempt: number; floorMessageId: number }>;
   /**
    * Records the Telegram message (ingest_upload_record). An exact replay is
    * `already_recorded`; different or foreign evidence is `conflict` (review),
@@ -29,6 +30,12 @@ export interface IngestionStore {
   recordUploadSucceeded(fingerprint: SourceFingerprint, record: TelegramMediaRecord): Promise<"recorded" | "already_recorded" | "conflict">;
   /** Records a failed or unresolved attempt (ingest_upload_fail). */
   recordUploadFailed(fingerprint: SourceFingerprint, kind: CatalogueKind, failure: { outcome: UploadFailureOutcome; code: string }): Promise<void>;
+  /**
+   * Reports a message id observed in the channel (a recovery marker). The
+   * server advances the channel checkpoint only if that is safe, and returns
+   * the checkpoint after the call (ingest_channel_checkpoint).
+   */
+  advanceCheckpoint(kind: CatalogueKind, channelId: number, messageId: number): Promise<number>;
 }
 
 /**
@@ -60,13 +67,16 @@ export const offlineStore: IngestionStore = {
   recordUploadFailed: async () => {
     throw new IngestStoreError("store_not_configured");
   },
+  advanceCheckpoint: async () => {
+    throw new IngestStoreError("store_not_configured");
+  },
 };
 
 // ---------------------------------------------------------------------------
 // RPC transport
 // ---------------------------------------------------------------------------
 
-export type WorkerRpc = "ingest_upload_status" | "ingest_upload_start" | "ingest_upload_record" | "ingest_upload_fail";
+export type WorkerRpc = "ingest_upload_status" | "ingest_upload_start" | "ingest_upload_record" | "ingest_upload_fail" | "ingest_channel_checkpoint";
 
 export type RpcTransport = (
   fn: WorkerRpc,
@@ -107,8 +117,21 @@ const statusRow = z.object({
   width: z.number().int().positive().nullable(),
   height: z.number().int().positive().nullable(),
   telegram_date: z.string().nullable(),
+  upload_started_at: z.string().nullable(),
+  upload_age_seconds: z.number().int().nullable(),
+  upload_floor_message_id: z.number().int().positive().nullable(),
 });
-const startRow = z.object({ upload_state: z.literal("uploading"), upload_attempt_count: z.number().int().positive() });
+const startRow = z.object({
+  upload_state: z.literal("uploading"),
+  upload_attempt_count: z.number().int().positive(),
+  upload_floor_message_id: z.number().int().positive(),
+});
+
+/** The current attempt, for an uploading or uncertain source. A reply without a start time is malformed. */
+function attempt(row: z.infer<typeof statusRow>) {
+  if (row.upload_started_at === null || row.upload_age_seconds === null) throw new IngestStoreError("store_bad_reply");
+  return { floorMessageId: row.upload_floor_message_id, startedAt: new Date(row.upload_started_at).toISOString(), ageSeconds: Math.max(0, row.upload_age_seconds) };
+}
 
 function single<T>(schema: z.ZodType<T>, data: unknown): T {
   const rows = z.array(schema).length(1).safeParse(data);
@@ -121,9 +144,9 @@ function toStatus(kind: CatalogueKind, row: z.infer<typeof statusRow>): ServerUp
     case "new":
       return { status: "absent" };
     case "uploading":
-      return { status: "uploading" };
+      return { status: "uploading", attempt: attempt(row) };
     case "uncertain":
-      return { status: "uncertain" };
+      return { status: "uncertain", attempt: attempt(row) };
     case "upload_failed":
       return { status: "failed" };
     case "blocked":
@@ -179,7 +202,8 @@ export function createRpcIngestionStore(rpc: RpcTransport): IngestionStore {
         p_chat_id: channelId,
         p_source_size_bytes: source.sizeBytes,
       });
-      return { attempt: single(startRow, data).upload_attempt_count };
+      const row = single(startRow, data);
+      return { attempt: row.upload_attempt_count, floorMessageId: row.upload_floor_message_id };
     },
 
     async recordUploadSucceeded(fingerprint, record) {
@@ -213,6 +237,13 @@ export function createRpcIngestionStore(rpc: RpcTransport): IngestionStore {
         p_failure_code: failure.code,
       });
       if (!z.enum(["upload_failed", "uncertain", "blocked"]).safeParse(data).success) throw new IngestStoreError("store_bad_reply");
+    },
+
+    async advanceCheckpoint(kind, channelId, messageId) {
+      const data = await call(rpc, "ingest_channel_checkpoint", { p_bot_type: kind, p_chat_id: channelId, p_message_id: messageId });
+      const checkpoint = z.number().int().nonnegative().safeParse(data);
+      if (!checkpoint.success) throw new IngestStoreError("store_bad_reply");
+      return checkpoint.data;
     },
   };
 }

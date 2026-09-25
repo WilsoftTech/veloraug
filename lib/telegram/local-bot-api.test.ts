@@ -375,7 +375,7 @@ describe("recovery marker post", () => {
   it("posts the movie marker with the movie bot to the Movies channel, and the series marker with the series bot to the Series channel", async () => {
     for (const [kind, token, channel] of [["movie", MOVIE_TOKEN, MOVIES], ["series", SERIES_TOKEN, SERIES]] as const) {
       const { fetch, api } = client(async () => sent(channel));
-      expect(await api.postRecoveryMarker(kind, MARKER_TEXT)).toEqual({ status: "posted", messageId: 77 });
+      expect(await api.postRecoveryMarker(kind, MARKER_TEXT)).toEqual({ status: "posted", chatId: channel, messageId: 77 });
       expect(fetch).toHaveBeenCalledOnce();
       expect(fetch.mock.calls[0][0]).toBe(`http://127.0.0.1:8081/bot${token}/sendMessage`);
       expect(JSON.parse(String(fetch.mock.calls[0][1].body)).chat_id).toBe(channel);

@@ -29,8 +29,14 @@ export const IN_REPO_JOURNAL_DIR = ".velora-ingest";
 export interface UploadAttempt {
   number: number;
   startedAt: string;
-  /** Highest message id known in the target channel when the attempt started. */
+  /** Highest message id the journal knew in the target channel when the attempt started. Informational. */
   channelHighWater: number;
+  /**
+   * The recovery floor the server fixed for this attempt (migration 10), once
+   * ingest_upload_start returned it. It only corroborates the server's floor;
+   * null when the start never succeeded, or for entries older than C2B.1B.
+   */
+  recoveryFloorMessageId: number | null;
   outcome: "pending" | "succeeded" | "failed" | "uncertain" | "confirmed" | "abandoned";
   code: string | null;
   finishedAt: string | null;
@@ -100,6 +106,7 @@ const entrySchema = z.object({
     number: z.number().int().positive(),
     startedAt: z.string(),
     channelHighWater: z.number().int().nonnegative(),
+    recoveryFloorMessageId: z.number().int().positive().nullable().default(null),
     outcome: z.enum(["pending", "succeeded", "failed", "uncertain", "confirmed", "abandoned"]),
     code: z.string().nullable(),
     finishedAt: z.string().nullable(),

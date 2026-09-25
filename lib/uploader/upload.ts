@@ -1,11 +1,11 @@
 import "server-only";
-import { decideAfterReconcile, decideResume, reconcileUpload, type RecoveryPacing } from "@/lib/ingestion/recovery";
+import { decideAfterReconcile, decideResume, reconcileUpload, resolveRecoveryFloor, type RecoveryPacing } from "@/lib/ingestion/recovery";
 import { MAX_UPLOAD_ATTEMPTS, transition } from "@/lib/ingestion/state";
 import type { LocalBotApiClient } from "@/lib/telegram/local-bot-api";
 import type { Journal, JournalEntry, UploadAttempt } from "@/lib/uploader/journal";
 import type { IngestionStore } from "@/lib/uploader/store";
 import type { CatalogueKind } from "@/types/catalogue";
-import type { IngestionEvent, ReconcileDecision, ResumeAction, ServerUploadStatus, TelegramMediaRecord, UploadFailureOutcome } from "@/types/ingestion";
+import type { IngestionEvent, ReconcileDecision, ReconciliationResult, ResumeAction, ServerUploadStatus, TelegramMediaRecord, UploadFailureOutcome } from "@/types/ingestion";
 
 /**
  * Upload and resume for one journal entry (C2). Order of evidence for an
@@ -106,15 +106,17 @@ function resumeDecision(entry: JournalEntry, server: ServerUploadStatus): Resume
   });
 }
 
+async function readServerStatus(entry: JournalEntry, store: IngestionStore): Promise<ServerUploadStatus> {
+  try {
+    return await store.getUploadStatus(entry.fingerprint, entry.kind);
+  } catch {
+    return { status: "unknown" };
+  }
+}
+
 /** What `resume` would do for one entry. Reads server status only; no Telegram call. */
 export async function planResume(entry: JournalEntry, store: IngestionStore): Promise<ResumeAction> {
-  let server: ServerUploadStatus;
-  try {
-    server = await store.getUploadStatus(entry.fingerprint, entry.kind);
-  } catch {
-    server = { status: "unknown" };
-  }
-  return resumeDecision(entry, server);
+  return resumeDecision(entry, await readServerStatus(entry, store));
 }
 
 export async function uploadEntry(entry: JournalEntry, caption: string, deps: UploaderDeps): Promise<StepResult> {
@@ -147,13 +149,14 @@ export async function uploadEntry(entry: JournalEntry, caption: string, deps: Up
   let current = apply(entry, { type: "upload_started" });
   current = {
     ...current,
-    attempts: [...current.attempts, { number: current.state.uploadAttempts, startedAt: startedAt.toISOString(), channelHighWater: await deps.channelHighWater(entry.kind), outcome: "pending", code: null, finishedAt: null }],
+    attempts: [...current.attempts, { number: current.state.uploadAttempts, startedAt: startedAt.toISOString(), channelHighWater: await deps.channelHighWater(entry.kind), recoveryFloorMessageId: null, outcome: "pending", code: null, finishedAt: null }],
     updatedAt: startedAt.toISOString(),
   };
   await deps.journal.put(current);
 
+  let started: Awaited<ReturnType<IngestionStore["markUploadStarted"]>>;
   try {
-    await deps.store.markUploadStarted({ source: { fingerprint: entry.fingerprint, sizeBytes: entry.sizeBytes, fileName: entry.fileName }, kind: entry.kind, channelId: entry.intendedChannelId });
+    started = await deps.store.markUploadStarted({ source: { fingerprint: entry.fingerprint, sizeBytes: entry.sizeBytes, fileName: entry.fileName }, kind: entry.kind, channelId: entry.intendedChannelId });
   } catch (error) {
     // Nothing was sent: this attempt definitely failed. The server refused
     // or never answered, so it holds no attempt to record the failure on.
@@ -163,6 +166,9 @@ export async function uploadEntry(entry: JournalEntry, caption: string, deps: Up
     await deps.journal.put(current);
     return { result: "failed", code: reason, retryable: true };
   }
+  // The server fixed and persisted this attempt's recovery floor; the journal keeps a copy to corroborate it.
+  current = { ...current, attempts: current.attempts.map((attempt, index) => (index === current.attempts.length - 1 ? { ...attempt, recoveryFloorMessageId: started.floorMessageId } : attempt)) };
+  await deps.journal.put(current);
 
   const outcome = await deps.telegram.sendDocument(request);
   const now = deps.now();
@@ -192,7 +198,10 @@ export async function uploadEntry(entry: JournalEntry, caption: string, deps: Up
 /** Settles one entry without uploading: it never sends a file. */
 export async function resumeEntry(entry: JournalEntry, deps: UploaderDeps): Promise<StepResult> {
   if (!deps.telegramEnabled) return { result: "refused", code: "telegram_uploads_not_authorized" };
-  const decision = await planResume(entry, deps.store);
+  const server = await readServerStatus(entry, deps.store);
+  // Read after the reply: a later instant makes the derived attempt start later, never earlier.
+  const statusReadAt = deps.now();
+  const decision = resumeDecision(entry, server);
 
   switch (decision.action) {
     case "record_in_db": {
@@ -212,32 +221,48 @@ export async function resumeEntry(entry: JournalEntry, deps: UploaderDeps): Prom
         ? { result: "resume", action: { action: "upload_allowed" } }
         : { result: "resume", action: { action: "retry_later", code: "server_unavailable", retryAfterSeconds: null } };
     case "reconcile":
-      return reconcileEntry(entry, deps);
+      return reconcileEntry(entry, deps, server, statusReadAt);
     default:
       return { result: "resume", action: decision };
   }
 }
 
 /**
- * The scan floor: the attempt's `channelHighWater`, recorded before it
- * started. Only the journal knows it today, and 0 means the journal knew no
- * message in that channel, which is not proof of an empty channel. Without
- * a floor, recovery holds instead of scanning from id 1. A server-side floor
- * that survives a lost journal needs migration 10 (not yet authorized).
+ * Once the server has recorded the resolution, the marker is a message id
+ * observed in that channel: offer it as the channel checkpoint. Optional by
+ * design, so a refusal or an outage is deliberately not an error here: the
+ * server refuses while any other upload there is unresolved, and a missed
+ * advance only leaves later floors lower (a longer scan, never a skipped id).
  */
-function attemptFloor(attempt: UploadAttempt | undefined): number | null {
-  return attempt && attempt.channelHighWater > 0 ? attempt.channelHighWater : null;
+async function offerCheckpoint(deps: UploaderDeps, kind: CatalogueKind, result: ReconciliationResult): Promise<void> {
+  if (result.status !== "found" && result.status !== "not_found_confirmed") return;
+  try {
+    await deps.store.advanceCheckpoint(kind, result.marker.chatId, result.marker.messageId);
+  } catch {
+    // See above: advancing is an optimisation, never required for safety.
+  }
 }
 
-async function reconcileEntry(entry: JournalEntry, deps: UploaderDeps): Promise<StepResult> {
+async function reconcileEntry(entry: JournalEntry, deps: UploaderDeps, server: ServerUploadStatus, statusReadAt: Date): Promise<StepResult> {
   const last = entry.state.upload === "uploading" ? entry.attempts.at(-1) : undefined;
+  // The server's floor is authoritative; the journal can only corroborate it.
+  const floor = resolveRecoveryFloor(
+    server.status === "uploading" || server.status === "uncertain" ? server.attempt : null,
+    last?.recoveryFloorMessageId ?? null,
+    statusReadAt,
+  );
+  if (!floor.ok) {
+    const hold: ReconcileDecision = { action: "hold", reason: `reconcile_${floor.reason}` };
+    await tellServer(deps, entry, "uncertain", hold.reason);
+    return { result: "resume", action: hold };
+  }
   // Bound to the entry's kind: the movie bot and Movies channel, or the series bot and Series channel.
   const kind = entry.kind;
   const result = await reconcileUpload({
     fingerprint: entry.fingerprint,
     sizeBytes: entry.sizeBytes,
     attemptNumber: last?.number ?? null,
-    floorMessageId: attemptFloor(last),
+    floorMessageId: floor.floorMessageId,
     transport: {
       checkAccess: () => deps.telegram.checkRecoveryAccess(kind),
       postMarker: (text) => deps.telegram.postRecoveryMarker(kind, text),
@@ -247,7 +272,7 @@ async function reconcileEntry(entry: JournalEntry, deps: UploaderDeps): Promise<
     now: deps.now,
     pacing: deps.recoveryPacing,
   });
-  const decision = decideAfterReconcile(result, last ? new Date(last.startedAt) : null, deps.graceMs);
+  const decision = decideAfterReconcile(result, floor.attemptStartedAt, deps.graceMs);
 
   if (decision.action === "record_confirmed") {
     const { record } = decision;
@@ -255,12 +280,13 @@ async function reconcileEntry(entry: JournalEntry, deps: UploaderDeps): Promise<
       ? apply(entry, { type: "upload_confirmed", chatId: record.chatId, messageId: record.messageId })
       : { ...entry, state: { ...entry.state, upload: "uploaded" as const, telegram: { chatId: record.chatId, messageId: record.messageId } } };
     const acked = await acknowledge({ ...finishAttempt(base, "confirmed", null, deps.now()), telegram: record }, record, deps);
+    if (acked.acknowledged) await offerCheckpoint(deps, kind, result);
     return acked.conflict ? { result: "resume", action: { action: "review", reason: "telegram_identity_conflict" } } : { result: "uploaded", acknowledged: acked.acknowledged };
   }
   if (decision.action === "abandon") {
     const abandoned = entry.state.upload === "uploading" ? apply(entry, { type: "upload_abandoned" }) : entry;
     await deps.journal.put(finishAttempt(abandoned, "abandoned", "verified_absent", deps.now()));
-    await tellServer(deps, entry, "abandoned", "verified_absent");
+    if (await tellServer(deps, entry, "abandoned", "verified_absent")) await offerCheckpoint(deps, kind, result);
     return { result: "resume", action: decision };
   }
   if (decision.action === "review") {

@@ -17,6 +17,11 @@ const EMPTY_MEDIA = {
   chat_id: null, message_id: null, file_id: null, file_unique_id: null, media_kind: null, file_name: null, mime_type: null,
   caption: null, file_size_bytes: null, duration_seconds: null, width: null, height: null, telegram_date: null,
 };
+/** Migration 10 attempt columns: no attempt (a new source). */
+const NO_ATTEMPT = { upload_started_at: null, upload_age_seconds: null, upload_floor_message_id: null };
+/** An attempt that started 90 s ago with floor 320. */
+const ATTEMPT_ROW = { upload_started_at: "2026-09-25T12:58:30+03:00", upload_age_seconds: 90, upload_floor_message_id: 320 };
+const ATTEMPT = { floorMessageId: 320, startedAt: "2026-09-25T09:58:30.000Z", ageSeconds: 90 };
 
 function transport(reply: Awaited<ReturnType<RpcTransport>>) {
   return vi.fn<RpcTransport>(async () => reply);
@@ -24,16 +29,18 @@ function transport(reply: Awaited<ReturnType<RpcTransport>>) {
 
 describe("RPC ingestion store: command selection and payloads", () => {
   it("status calls ingest_upload_status with fingerprint and kind only", async () => {
-    const rpc = transport({ data: [{ upload_state: "new", upload_attempt_count: 0, upload_failure_code: null, needs_review: false, ...EMPTY_MEDIA }], error: null });
+    const rpc = transport({ data: [{ upload_state: "new", upload_attempt_count: 0, upload_failure_code: null, needs_review: false, ...EMPTY_MEDIA, ...NO_ATTEMPT }], error: null });
     expect(await createRpcIngestionStore(rpc).getUploadStatus(FP, "movie")).toEqual({ status: "absent" });
     expect(rpc).toHaveBeenCalledWith("ingest_upload_status", { p_source_fingerprint: FP, p_bot_type: "movie" });
   });
 
   it("maps every server upload state", async () => {
-    const row = (upload_state: string, extra = {}) => ({ upload_state, upload_attempt_count: 1, upload_failure_code: null, needs_review: false, ...EMPTY_MEDIA, ...extra });
+    const row = (upload_state: string, extra = {}) => ({ upload_state, upload_attempt_count: 1, upload_failure_code: null, needs_review: false, ...EMPTY_MEDIA, ...ATTEMPT_ROW, ...extra });
     const cases: [object, object][] = [
-      [row("uploading"), { status: "uploading" }],
-      [row("uncertain"), { status: "uncertain" }],
+      [row("uploading"), { status: "uploading", attempt: ATTEMPT }],
+      [row("uncertain"), { status: "uncertain", attempt: ATTEMPT }],
+      // A row from before migration 10: the attempt has no floor, and the worker will hold.
+      [row("uncertain", { upload_floor_message_id: null }), { status: "uncertain", attempt: { ...ATTEMPT, floorMessageId: null } }],
       [row("upload_failed"), { status: "failed" }],
       [row("blocked", { upload_failure_code: "reconcile_multiple_matches", needs_review: true }), { status: "blocked", code: "reconcile_multiple_matches" }],
     ];
@@ -47,15 +54,15 @@ describe("RPC ingestion store: command selection and payloads", () => {
       upload_state: "uploaded", upload_attempt_count: 1, upload_failure_code: null, needs_review: false,
       chat_id: MOVIES, message_id: 42, file_id: "file-42", file_unique_id: "uniq-42", media_kind: "document",
       file_name: "John.Wick.2014.VJ.Junior.mkv", mime_type: "video/x-matroska", caption: CAPTION, file_size_bytes: 1000,
-      duration_seconds: null, width: null, height: null, telegram_date: "2026-09-25T13:00:00+03:00",
+      duration_seconds: null, width: null, height: null, telegram_date: "2026-09-25T13:00:00+03:00", ...ATTEMPT_ROW,
     }];
     expect(await createRpcIngestionStore(transport({ data, error: null })).getUploadStatus(FP, "movie")).toEqual({ status: "uploaded", record: RECORD });
   });
 
   it("start sends fingerprint, kind, channel and size: no path, file name, token or journal data", async () => {
-    const rpc = transport({ data: [{ upload_state: "uploading", upload_attempt_count: 2 }], error: null });
+    const rpc = transport({ data: [{ upload_state: "uploading", upload_attempt_count: 2, upload_floor_message_id: 320 }], error: null });
     const source = { fingerprint: FP, sizeBytes: 1000, fileName: "John.Wick.2014.VJ.Junior.mkv" };
-    expect(await createRpcIngestionStore(rpc).markUploadStarted({ source, kind: "movie", channelId: MOVIES })).toEqual({ attempt: 2 });
+    expect(await createRpcIngestionStore(rpc).markUploadStarted({ source, kind: "movie", channelId: MOVIES })).toEqual({ attempt: 2, floorMessageId: 320 });
     expect(rpc).toHaveBeenCalledWith("ingest_upload_start", { p_source_fingerprint: FP, p_bot_type: "movie", p_chat_id: MOVIES, p_source_size_bytes: 1000 });
   });
 
@@ -77,9 +84,25 @@ describe("RPC ingestion store: command selection and payloads", () => {
     expect(rpc).toHaveBeenCalledWith("ingest_upload_fail", { p_source_fingerprint: FP, p_bot_type: "series", p_outcome: "uncertain", p_failure_code: "timeout" });
   });
 
-  it("only ever calls the four worker commands", () => {
+  it("a start reply without a floor, or an unresolved status without a start time, is rejected", async () => {
+    const source = { fingerprint: FP, sizeBytes: 1000, fileName: "x" };
+    await expect(createRpcIngestionStore(transport({ data: [{ upload_state: "uploading", upload_attempt_count: 1, upload_floor_message_id: null }], error: null }))
+      .markUploadStarted({ source, kind: "movie", channelId: MOVIES })).rejects.toMatchObject({ code: "store_bad_reply" });
+    await expect(createRpcIngestionStore(transport({ data: [{ upload_state: "uncertain", upload_attempt_count: 1, upload_failure_code: null, needs_review: false, ...EMPTY_MEDIA, ...NO_ATTEMPT }], error: null }))
+      .getUploadStatus(FP, "movie")).rejects.toMatchObject({ code: "store_bad_reply" });
+  });
+
+  it("checkpoint sends kind, channel and the observed id, and returns the server's checkpoint", async () => {
+    const rpc = transport({ data: 300, error: null });
+    expect(await createRpcIngestionStore(rpc).advanceCheckpoint("movie", MOVIES, 400)).toBe(300);
+    expect(rpc).toHaveBeenCalledWith("ingest_channel_checkpoint", { p_bot_type: "movie", p_chat_id: MOVIES, p_message_id: 400 });
+    const refused = createRpcIngestionStore(transport({ data: null, error: { message: "ingest_recovery_unresolved", code: "P0001" } }));
+    await expect(refused.advanceCheckpoint("movie", MOVIES, 400)).rejects.toMatchObject({ code: "ingest_recovery_unresolved" });
+  });
+
+  it("only ever calls the five worker commands", () => {
     const source = readFileSync(join(__dirname, "store.ts"), "utf8");
-    expect([...new Set(source.match(/"ingest_[a-z_]+"/g))].sort()).toEqual(['"ingest_upload_fail"', '"ingest_upload_record"', '"ingest_upload_start"', '"ingest_upload_status"']);
+    expect([...new Set(source.match(/"ingest_[a-z_]+"/g))].sort()).toEqual(['"ingest_channel_checkpoint"', '"ingest_upload_fail"', '"ingest_upload_record"', '"ingest_upload_start"', '"ingest_upload_status"']);
     expect(source).not.toMatch(/\.from\(|\.schema\(|private\./);
   });
 });
@@ -114,7 +137,7 @@ describe("RPC ingestion store: errors are normalized", () => {
     expect(unavailable).toBe("store_unavailable");
     expect(await code(createRpcIngestionStore(transport({ data: [], error: null })).getUploadStatus(FP, "movie"))).toBe("store_bad_reply");
     expect(await code(createRpcIngestionStore(transport({ data: "published", error: null })).recordUploadSucceeded(FP, RECORD))).toBe("store_bad_reply");
-    expect(await code(createRpcIngestionStore(transport({ data: [{ upload_state: "uploaded", upload_attempt_count: 1, upload_failure_code: null, needs_review: false, ...EMPTY_MEDIA }], error: null })).getUploadStatus(FP, "movie"))).toBe("store_bad_reply");
+    expect(await code(createRpcIngestionStore(transport({ data: [{ upload_state: "uploaded", upload_attempt_count: 1, upload_failure_code: null, needs_review: false, ...EMPTY_MEDIA, ...NO_ATTEMPT }], error: null })).getUploadStatus(FP, "movie"))).toBe("store_bad_reply");
   });
 
   it("error messages carry the code only", async () => {

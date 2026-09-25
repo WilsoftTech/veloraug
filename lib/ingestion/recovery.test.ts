@@ -6,6 +6,7 @@ import {
   DEFAULT_RECOVERY_PACING,
   isRecoveryMarker,
   reconcileUpload,
+  resolveRecoveryFloor,
   type ReconcileOptions,
 } from "@/lib/ingestion/recovery";
 import { fingerprintFromCaption } from "@/lib/ingestion/telegram";
@@ -43,7 +44,7 @@ function fake(options: {
   const script = Object.fromEntries(Object.entries(options.script ?? {}).map(([id, results]) => [id, results.slice()]));
   const transport = {
     checkAccess: vi.fn(async (): Promise<RecoveryAccessResult> => options.access ?? { status: "ok" }),
-    postMarker: vi.fn<(text: string) => Promise<MarkerPostResult>>(async () => options.markerResult ?? { status: "posted", messageId: options.marker ?? 50 }),
+    postMarker: vi.fn<(text: string) => Promise<MarkerPostResult>>(async () => options.markerResult ?? { status: "posted", chatId: MOVIES, messageId: options.marker ?? 50 }),
     probe: vi.fn(async (messageId: number): Promise<ChannelProbeResult> => script[messageId]?.shift() ?? options.messages?.[messageId] ?? { status: "missing" }),
   };
   const sleep = vi.fn<(ms: number) => Promise<void>>(async () => {});
@@ -54,7 +55,7 @@ function fake(options: {
 }
 
 const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, index) => from + index);
-const MARKER = { messageId: 50, postedAt: T0.toISOString() };
+const MARKER = { chatId: MOVIES, messageId: 50, postedAt: T0.toISOString() };
 
 describe("reconcileUpload: bounded marker protocol", () => {
   it("finds the target immediately before the marker, inspecting every id in the interval and nothing outside it", async () => {
@@ -84,7 +85,7 @@ describe("reconcileUpload: bounded marker protocol", () => {
 
   it("a long run of deleted ids never ends the scan early: absence is confirmed only at the marker", async () => {
     const { run, probed } = fake({ marker: 400 });
-    expect(await run()).toEqual({ status: "not_found_confirmed", floorMessageId: FLOOR, marker: { messageId: 400, postedAt: T0.toISOString() } });
+    expect(await run()).toEqual({ status: "not_found_confirmed", floorMessageId: FLOOR, marker: { chatId: MOVIES, messageId: 400, postedAt: T0.toISOString() } });
     expect(probed()).toEqual(range(11, 399));
   });
 
@@ -281,5 +282,40 @@ describe("decideAfterReconcile", () => {
     for (const reason of ["reconcile_incomplete_uninspectable_message", "reconcile_blocked_channel_content_protected", "reconcile_incomplete_interval_too_large"]) {
       expect(reason).toMatch(/^[a-z0-9_]{1,100}$/);
     }
+  });
+});
+
+describe("resolveRecoveryFloor (migration 10: the server floor is authoritative)", () => {
+  const readAt = new Date("2026-09-25T12:00:00Z");
+  const server = { floorMessageId: 320, startedAt: "2026-09-25T09:00:00.000Z", ageSeconds: 3_600 };
+
+  it("uses the server floor and places the server-measured start on the local clock", () => {
+    expect(resolveRecoveryFloor(server, null, readAt)).toEqual({ ok: true, floorMessageId: 320, attemptStartedAt: new Date("2026-09-25T11:00:00Z") });
+  });
+
+  it("a journal floor that agrees only corroborates", () => {
+    expect(resolveRecoveryFloor(server, 320, readAt)).toMatchObject({ ok: true, floorMessageId: 320 });
+  });
+
+  it("a journal floor lower or higher than the server's is a conflict, never a choice", () => {
+    expect(resolveRecoveryFloor(server, 319, readAt)).toEqual({ ok: false, reason: "floor_conflict" });
+    expect(resolveRecoveryFloor(server, 321, readAt)).toEqual({ ok: false, reason: "floor_conflict" });
+  });
+
+  it("without a server floor the floor is unknown, whatever the journal says", () => {
+    expect(resolveRecoveryFloor(null, 320, readAt)).toEqual({ ok: false, reason: "floor_unknown" });
+    expect(resolveRecoveryFloor({ ...server, floorMessageId: null }, 320, readAt)).toEqual({ ok: false, reason: "floor_unknown" });
+    expect(resolveRecoveryFloor({ ...server, floorMessageId: 0 }, null, readAt)).toEqual({ ok: false, reason: "floor_unknown" });
+  });
+
+  it("the grace period follows the database clock: a skewed uploader clock cannot shorten it", () => {
+    // Uploader clock 2 h fast: the journal would claim a 5 h old attempt; the server says 1 h.
+    const floor = resolveRecoveryFloor(server, null, readAt);
+    if (!floor.ok) throw new Error("expected a floor");
+    const absent: ReconciliationResult = { status: "not_found_confirmed", floorMessageId: 320, marker: { chatId: MOVIES, messageId: 400, postedAt: readAt.toISOString() } };
+    expect(decideAfterReconcile(absent, floor.attemptStartedAt)).toEqual({ action: "wait", reason: "within_upload_grace_period" });
+    const old = resolveRecoveryFloor({ ...server, ageSeconds: 3 * 3_600 }, null, readAt);
+    if (!old.ok) throw new Error("expected a floor");
+    expect(decideAfterReconcile(absent, old.attemptStartedAt)).toEqual({ action: "abandon" });
   });
 });

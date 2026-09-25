@@ -37,4 +37,12 @@ describe("ingest CLI on plain Node", () => {
       expect(run.stderr).toContain("real Telegram uploads are disabled in code until C2B");
     }
   });
+
+  it("checkpoint validates its input and needs the channel configuration; it never calls Telegram", () => {
+    expect(cli("checkpoint", "--kind", "movie", "--message-id", "0").stderr).toContain("--message-id must be a positive message id");
+    expect(cli("checkpoint", "--message-id", "5").stderr).toContain("--kind movie|series is required");
+    const unconfigured = cli("checkpoint", "--kind", "movie", "--message-id", "5", "--execute");
+    expect(unconfigured.status).toBe(1);
+    expect(unconfigured.stderr).toContain("the Telegram configuration (channel ids) is required");
+  });
 });

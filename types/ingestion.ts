@@ -242,7 +242,8 @@ export type ChannelProbeResult =
 export type RecoveryAccessResult = { status: "ok" } | RecoveryCallFailure;
 
 /** Posting a recovery marker (a short text message, never media). */
-export type MarkerPostResult = { status: "posted"; messageId: number } | RecoveryCallFailure;
+/** `chatId` is the channel the reply came from (validated to be the bound channel). */
+export type MarkerPostResult = { status: "posted"; chatId: number; messageId: number } | RecoveryCallFailure;
 
 /** The Telegram operations recovery uses, already bound to one bot and channel. */
 export interface RecoveryTransport {
@@ -253,6 +254,7 @@ export interface RecoveryTransport {
 
 /** The marker that bounded a scan from above, and when it was posted (local clock). */
 export interface RecoveryMarker {
+  chatId: number;
   messageId: number;
   postedAt: string;
 }
@@ -274,12 +276,24 @@ export type ReconciliationResult =
  * Mirrors ingestion_events.upload_state; `absent` is "no ingestion yet" and
  * `unknown` means the server could not be asked.
  */
+/**
+ * The server's record of the current attempt (migration 10). `floorMessageId`
+ * is the recovery floor the server fixed when the attempt started; null only
+ * for rows that predate migration 10 (recovery then holds). `ageSeconds` is
+ * measured on the database clock when the status was read.
+ */
+export interface ServerAttempt {
+  floorMessageId: number | null;
+  startedAt: string;
+  ageSeconds: number;
+}
+
 export type ServerUploadStatus =
   | { status: "unknown" }
   | { status: "absent" }
-  | { status: "uploading" }
+  | { status: "uploading"; attempt: ServerAttempt }
   /** May have been posted: reconcile before anything else. */
-  | { status: "uncertain" }
+  | { status: "uncertain"; attempt: ServerAttempt }
   | { status: "uploaded"; record: TelegramMediaRecord }
   | { status: "failed" }
   /** Permanently blocked, waiting for a reviewer. */
