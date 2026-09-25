@@ -1,0 +1,56 @@
+# Local Telegram Bot API server for the ingestion uploader (C2B.2A).
+# Runbook: docs/PHASE_C_INGESTION_DESIGN.md, "C2B.2A".
+#
+# Run from the repository root, so only the two variables named below are read
+# from .env.local and passed to the container:
+#
+#   docker compose --env-file .env.local -f infra/telegram-bot-api/compose.yaml up -d --build
+#
+# Add -f infra/telegram-bot-api/compose.media.yaml once G:\Movies is mounted.
+# Never run `docker compose config` without --no-interpolate: it prints the API hash.
+name: velora-telegram-bot-api
+
+services:
+  telegram-bot-api:
+    build:
+      context: .
+    image: velora/telegram-bot-api:10.3-2efabc722e94
+    container_name: velora-telegram-bot-api
+    restart: unless-stopped
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:?TELEGRAM_API_ID is required (pass --env-file .env.local)}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:?TELEGRAM_API_HASH is required (pass --env-file .env.local)}
+    # --local: file:// uploads from the server's disk and the 2000 MB limit.
+    # Inside the container the server listens on all interfaces so Docker can
+    # forward to it; the host side is loopback only (ports below).
+    command:
+      - --local
+      - --dir=/var/lib/telegram-bot-api
+      - --temp-dir=/tmp/telegram-bot-api
+      - --http-port=8081
+    ports:
+      - name: bot-api
+        target: 8081
+        host_ip: 127.0.0.1
+        published: "8081"
+        protocol: tcp
+    volumes:
+      # Bot sessions and server state: a host directory outside the repository.
+      # It must already exist; Docker never creates it.
+      - type: bind
+        source: ${VELORA_BOT_API_STATE_DIR:-C:/velora-ops/telegram-bot-api}
+        target: /var/lib/telegram-bot-api
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp/telegram-bot-api:size=256m,mode=1777
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"

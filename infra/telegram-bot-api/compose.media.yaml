@@ -1,0 +1,14 @@
+# Movie library mount for the local Bot API server. Use only while the drive is
+# present; Docker never creates the source, so a missing drive fails this
+# override instead of inventing an empty library.
+#
+# Pairs with TELEGRAM_BOT_API_PATH_MAP=G:\Movies=>/media/movies in .env.local.
+services:
+  telegram-bot-api:
+    volumes:
+      - type: bind
+        source: ${VELORA_MEDIA_MOVIES_DIR:-G:/Movies}
+        target: /media/movies
+        read_only: true
+        bind:
+          create_host_path: false

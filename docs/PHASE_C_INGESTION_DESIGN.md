@@ -1094,7 +1094,7 @@ maximum is safe. The server attempt start replaces the journal's, so a fresh mac
 can reconcile from the server alone. The code keeps the floor in one function
 (`attemptFloor`, `lib/uploader/upload.ts`), where the server value would be added.
 
-## Docker topology for the local Bot API server (planned, not started)
+## Docker topology for the local Bot API server (implemented in C2B.2A)
 
 ```
 Windows Node uploader (npm run ingest)
@@ -1114,9 +1114,8 @@ Windows Node uploader (npm run ingest)
   `/media/movies`, with `TELEGRAM_BOT_API_PATH_MAP=G:\Movies=>/media/movies`. Do not
   assume `G:` is shared with Docker Desktop until it is checked. No media validation
   against it yet.
-- Image: no official image exists. Choose one, pin it by digest, and record it
-  before first start. A widely used community build is `aiogram/telegram-bot-api`.
-  It needs separate approval, because this is a supply-chain decision.
+- Image: no official image exists. C2B.2A builds Telegram's own source instead of
+  using a community image (see "C2B.2A").
 - A container restart drops in-flight uploads. They surface as `uncertain` and go
   through the marker protocol above.
 
@@ -1455,3 +1454,181 @@ No channel row, no checkpoint seeded, no Telegram call, no upload.
   channel.
 - The Telegram bot migration (`logOut`, the local Bot API server) has **not**
   begun. `REAL_TELEGRAM_UPLOADS_AUTHORIZED` is still `false`.
+
+# C2B.2A — Local Telegram Bot API infrastructure
+
+Date: 2026-09-26. Branch: `phase-a-foundation` (from `49e9121`, not pushed). Status:
+**C2B.2A LOCAL BOT API INFRASTRUCTURE: PASS.** The server is built, running and
+restart-tested. Both bots are **still on the cloud Bot API**: no `logOut`, no Telegram
+write, no upload, no marker, no hosted configuration.
+
+## Source provenance
+
+| Item | Value |
+| --- | --- |
+| Upstream | `https://github.com/tdlib/telegram-bot-api` (owner `tdlib`, not a fork, BSL-1.0). No third-party image |
+| Release | Bot API **10.3**. Upstream publishes no tags or GitHub releases; each release is its "Update version to X." commit, and `CMakeLists.txt` at that commit declares `VERSION 10.3` |
+| Pinned commit | `2efabc722e9493b9cac450233198d09e5cea0573` (levlam, 2026-08-24, "Update version to 10.3."). `master` was one commit ahead (`e3e9dd8`, "Fix RichBlockDocument."), which is not a release and is not used |
+| td submodule | `bc9c263e2bfee06aaab41e82db51a103376030bc`, from `https://github.com/tdlib/td.git`, the gitlink recorded by the pinned commit |
+| Base image | `debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a` (multi-arch index), for both stages |
+| Build date | 2026-09-26 (image created 2026-09-25T21:56:49Z) |
+| Local image | `velora/telegram-bot-api:10.3-2efabc722e94`, id `sha256:1c55f8266c6dd50c46926bed438be6a08818433ebb22929f6a6c752179179c1d`, 44.7 MB; `--version` prints `Bot API 10.3` |
+
+Supply-chain checks:
+
+- Repository metadata, the commit list and `CMakeLists.txt` were read before building.
+  The command-line options were confirmed in the pinned `telegram-bot-api.cpp`, not
+  taken from memory. The server reads `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` from its
+  environment, so no secret goes into argv.
+- The Dockerfile fetches exactly the two pinned commits (`fetch --depth 1 <sha>`). It
+  fails the build unless `HEAD` equals the pin, and unless the superproject's td
+  gitlink equals the td pin. No script is downloaded or piped into a shell.
+- Build dependencies are the official Debian list from the upstream `build.html`
+  (`make git zlib1g-dev libssl-dev gperf cmake g++`) plus `ca-certificates`. Apt
+  packages come from Debian's signed repositories and are not version-pinned.
+  Rebuilding later can pick up Debian security updates, but never a different Bot
+  API source.
+- The pins change only by a reviewed edit to `infra/telegram-bot-api/Dockerfile`.
+  Update them deliberately, never silently.
+
+## Files
+
+| File | Purpose |
+| --- | --- |
+| `infra/telegram-bot-api/Dockerfile` | Two stages. The build stage has only the official build dependencies; the runtime stage has `ca-certificates`, `libssl3t64`, `zlib1g` and the stripped binary. Non-root user 10001; TCP health check; no credential, token, channel id or path baked in |
+| `infra/telegram-bot-api/compose.yaml` | `--local --dir=/var/lib/telegram-bot-api --temp-dir=/tmp/telegram-bot-api --http-port=8081`. Publishes `127.0.0.1:8081` only. Also sets a read-only root filesystem, `cap_drop: ALL`, `no-new-privileges`, a 256 MB tmpfs temp dir, bounded local logs and `restart: unless-stopped` |
+| `infra/telegram-bot-api/compose.media.yaml` | Optional override: `G:\Movies` → `/media/movies`, read-only, `create_host_path: false` |
+
+## Runbook
+
+From the repository root:
+
+```
+docker compose --env-file .env.local -f infra/telegram-bot-api/compose.yaml up -d --build
+docker compose --env-file .env.local -f infra/telegram-bot-api/compose.yaml ps
+docker compose --env-file .env.local -f infra/telegram-bot-api/compose.yaml restart
+docker compose --env-file .env.local -f infra/telegram-bot-api/compose.yaml down
+```
+
+- `--env-file .env.local` only supplies interpolation. The container receives
+  exactly `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`, never tokens, Supabase keys or
+  channel ids. Without it, compose refuses to start (`TELEGRAM_API_ID is required`).
+- The state directory defaults to `C:\velora-ops\telegram-bot-api`
+  (`VELORA_BOT_API_STATE_DIR` overrides it). It must exist beforehand, because Docker
+  never creates it. After `logOut` it will hold the bots' sessions, so treat it as a
+  secret: never commit it, copy it or share it.
+- Once `G:\Movies` is mounted, add `-f infra/telegram-bot-api/compose.media.yaml`
+  (`VELORA_MEDIA_MOVIES_DIR` overrides the source). While the drive is absent, leave
+  the override out: the base server runs without it, and Docker cannot invent an
+  empty library.
+- **Secret exposure rules:** `docker inspect velora-telegram-bot-api` shows the
+  container's environment (API id and hash), because they are supplied at runtime,
+  and `docker compose config` prints them after interpolation. Use
+  `docker compose config --quiet` or `--no-interpolate`, and never paste `inspect`
+  output. The server log, `compose ps`, the image history and the image metadata
+  contain no secret (verified below).
+
+## Uploader configuration (`.env.local`, not committed)
+
+| Variable | State |
+| --- | --- |
+| `TELEGRAM_BOT_API_URL` | `http://127.0.0.1:8081` (loopback, accepted by `parseBotApiBaseUrl`) |
+| `TELEGRAM_RECONCILE_CHAT_ID` | Set to the verified recovery supergroup (value kept out of Git) |
+| `TELEGRAM_BOT_API_PATH_MAP` | `G:\Movies=>/media/movies` (single-quoted, so the backslash is literal) |
+| `TELEGRAM_MOVIES_CHANNEL_ID` / `TELEGRAM_SERIES_CHANNEL_ID` | The leading `-` was missing again and is restored. The signed `-100…` form was confirmed with `getChat` for each bot before the edit |
+
+`loadLocalBotApiConfig` accepts the whole configuration from `.env.local`. The
+recovery chat differs from both catalogue channels.
+
+## Path translation
+
+- The uploader sends `file://<server path>`. In the pinned source,
+  `Client::get_local_file_path` strips `file:/` and one more `/`, then URL-decodes.
+  So `G:\Movies\Sample (2020)\x.mkv` becomes `/media/movies/Sample (2020)/x.mkv`
+  inside the container, which is the mounted path.
+- **Defect found and fixed.** `toServerFileUri` checked the prefix before
+  normalizing. `G:\Movies\..\..\var\lib\telegram-bot-api\x.mkv` passed and became
+  `file:///var/lib/telegram-bot-api/x.mkv`: the server's own `--dir`, where the bot
+  sessions will live. Any path containing a `.` or `..` segment is now refused,
+  mapped or not (`path_outside_server_map` at preflight). Names such as `A..B.mkv`
+  are unaffected.
+- Only the configured root is translated; `G:\MoviesX\…`, another drive or the root
+  itself return null. Matching on a drive-letter map is case-insensitive.
+- A new test in `lib/telegram/local-bot-api.test.ts` covers this. Mutation check:
+  disabling the guard fails the new test, and restoring it passes (52 of 52).
+
+## Recovery group
+
+- **Discovery.** Read-only `getUpdates` with no offset, so nothing was acknowledged.
+  Both bots observed "Velora Ingestion Recovery". It was created as a basic group
+  and migrated to a **supergroup** (`migrate_to_chat_id`/`migrate_from_chat_id`); the
+  supergroup id is the one stored. The basic-group id is dead and must not be used.
+- **Commands observed.** The two operator messages each contained
+  `/start@velora_movies_bot /start@velora_series_bot`. The movies username in them
+  is misspelled (the bot is `@veloramovies_bot`). The movies bot saw the messages
+  anyway because it is an administrator. Identity rests on `getChat` and
+  `getChatMember` below, not on the command text. The two `/start` messages were not
+  deleted.
+- **Verification** (`getChat`, `getChatMember`, `getChatAdministrators`,
+  `getChatMemberCount`, all read-only):
+  - both bots resolve the same id: type `supergroup`, the expected title, private, no
+    content protection;
+  - 3 members: the operator (creator) and the two bots, so no third bot is present;
+  - both catalogue channels have content protection off, so forwarding works.
+- **Permissions the protocol needs.** In the group: send messages including
+  forwarded media, and delete the bot's own forwarded copy (best effort; not needed
+  for correctness). The group's default member permissions already allow sending
+  messages, documents and videos, and a bot can delete its own messages without
+  admin rights. In each catalogue channel: post (the text marker), which each bot
+  has as that channel's administrator; `forwardMessage` from it also works.
+- **Least privilege (operator action, not a blocker).** Both bots are currently
+  **administrators** of the recovery group with broad rights (manage chat, restrict
+  members, invite, change info). The protocol does not need any of them. Demote both
+  to ordinary members before the bot migration.
+
+## Runtime verification
+
+| Check | Result |
+| --- | --- |
+| Engine | Docker 28.4.0, Linux containers (linux/amd64), 6 CPUs, 16 GB; 91.7 GB free on C: |
+| Container | `Up (healthy)`; user 10001; `ReadonlyRootfs=true`; `CapDrop=[ALL]`; `no-new-privileges` |
+| Binding | Port binding `127.0.0.1:8081` only. The Windows listener is `127.0.0.1:8081` (`com.docker.backend`). Loopback connects and `GET /` returns 404 from the server. Every non-loopback IPv4 (Ethernet LAN, WSL vEthernet, link-local) refuses |
+| Local mode | `--local` in the container command; the source confirms 2000 MB uploads and `file:` input under it |
+| State | The server created `tqueue.binlog` and `webhooks_db.binlog` in the host state directory |
+| Restart | A sentinel written by the container survived `compose restart` (same container) and `down` + `up` (new container), with the server binlogs; removed afterwards |
+| Read-only | Writes to the image filesystem and to `/media/movies` fail (`Read-only file system`) |
+| Media | `G:` is not mounted. No fake `G:\Movies` was created; the override is prepared, not used |
+| Secret scan | The values of the API hash, both bot tokens, the service-role key, database URLs and the TMDB/Resend/Supabase tokens, plus the API id and the three chat ids, were searched for in the server log, image history, image metadata, `compose ps`, the build log and every repository change: none found. As expected, only `docker inspect` of the container shows the API id and hash (see the exposure rules) |
+
+## Cloud/local boundary
+
+Both bots are still logged in to `api.telegram.org`, and the local server has no bot
+session. Using a bot through the local server needs `logOut` against the cloud first.
+That is the bot migration, which needs its own authorization. After it, a bot
+cannot return to the cloud for 10 minutes, and its session lives in the state
+directory. Nothing in this checkpoint used a bot token against the local server.
+
+## Unchanged
+
+- Hosted: 10 migrations (ending `20260925194322`); `private.telegram_channels` 0 rows,
+  `ingestion_events` 0, `telegram_media` 0 (read-only query). No checkpoint is seeded.
+- `REAL_TELEGRAM_UPLOADS_AUTHORIZED = false` (`lib/uploader/upload.ts`), so
+  `upload --execute` and `resume --execute` remain impossible.
+- Telegram calls made: read-only only (`getMe`, `getWebhookInfo`, `getChat`,
+  `getChatMember`, `getChatAdministrators`, `getChatMemberCount`, and `getUpdates`
+  without an offset). No `logOut`, `sendMessage`, `sendDocument`, `forwardMessage` or
+  `deleteMessage`.
+
+## Tests
+
+`npm test` 264, `npm run test:db` 339 pgTAP, `npm run test:catalogue` 30, `lint`,
+`typecheck` and `build`: all pass.
+
+## Next (not authorized here)
+
+1. Demote both bots to ordinary members of the recovery group.
+2. Bot migration: `logOut` each bot once against the cloud, then `getMe` through
+   `127.0.0.1:8081`.
+3. Configure the hosted `private.telegram_channels` rows and seed each checkpoint
+   from a message actually observed in that channel.
+4. Mount `G:\Movies`, then run the trial in "C2B prerequisites" step 7.
