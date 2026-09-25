@@ -97,6 +97,8 @@ insert into private.telegram_channels values ('movie', -1001111111111);
 select throws_ok($q$insert into private.telegram_channels values ('series', -1001111111111)$q$, '23505', null,
   'allow-list: Movies and Series must be different channels');
 insert into private.telegram_channels values ('series', -1002222222222);
+-- Since migration 10 an attempt needs a recovery floor: give both channels a checkpoint.
+update private.telegram_channels set checkpoint_message_id = 10;
 
 -- ---------------------------------------------------------------------------
 -- Privileges
@@ -106,12 +108,13 @@ insert into worker_functions values
   ('public.ingest_upload_status(text, text)'),
   ('public.ingest_upload_start(text, text, bigint, bigint)'),
   ('public.ingest_upload_record(text, text, bigint, bigint, text, text, text, text, text, text, bigint, integer, integer, integer, timestamptz)'),
-  ('public.ingest_upload_fail(text, text, text, text)');
+  ('public.ingest_upload_fail(text, text, text, text)'),
+  ('public.ingest_channel_checkpoint(text, bigint, bigint)');
 
 select is((select array_agg(p.proname::text order by p.proname) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
            where n.nspname = 'public' and p.proname like 'ingest\_%'),
-  array['ingest_upload_fail', 'ingest_upload_record', 'ingest_upload_start', 'ingest_upload_status'],
-  'exactly four worker commands (no CRUD, no evaluation or publication command)');
+  array['ingest_channel_checkpoint', 'ingest_upload_fail', 'ingest_upload_record', 'ingest_upload_start', 'ingest_upload_status'],
+  'exactly five worker commands (migration 10 adds the checkpoint) (no CRUD, no evaluation or publication command)');
 select is((select array_agg(format('%s %s', r, f)) from worker_functions, unnest(array['anon', 'authenticated']) r
            where has_function_privilege(r, f, 'EXECUTE')),
   null, 'anon/authenticated cannot execute any worker command');
@@ -182,7 +185,7 @@ select throws_ok($q$select * from public.ingest_upload_start(tests.fp('a'), 'ser
 -- Registration and idempotency
 select results_eq($q$select upload_state, upload_attempt_count from public.ingest_upload_status(tests.fp('a'), 'movie')$q$,
   $q$values ('new'::text, 0)$q$, 'status: an unknown fingerprint is new');
-select results_eq($q$select * from public.ingest_upload_start(tests.fp('a'), 'movie', -1001111111111, 1000)$q$,
+select results_eq($q$select upload_state, upload_attempt_count from public.ingest_upload_start(tests.fp('a'), 'movie', -1001111111111, 1000)$q$,
   $q$values ('uploading'::text, 1)$q$, 'start: first registration starts attempt 1');
 select throws_ok($q$select * from public.ingest_upload_start(tests.fp('a'), 'movie', -1001111111111, 1000)$q$, 'P0001', 'ingest_illegal_transition',
   'start: a second start while uploading is refused (reconcile first)');
@@ -236,13 +239,13 @@ select is(tests.record(tests.fp('c'), 50, 'uniq-50'), 'recorded', 'record: recon
 select * from public.ingest_upload_start(tests.fp('d'), 'movie', -1001111111111, 1000);
 select public.ingest_upload_fail(tests.fp('d'), 'movie', 'uncertain', 'timeout');
 select is(public.ingest_upload_fail(tests.fp('d'), 'movie', 'abandoned', 'verified_absent'), 'upload_failed', 'fail: verified absence abandons the attempt');
-select results_eq($q$select * from public.ingest_upload_start(tests.fp('d'), 'movie', -1001111111111, 1000)$q$,
+select results_eq($q$select upload_state, upload_attempt_count from public.ingest_upload_start(tests.fp('d'), 'movie', -1001111111111, 1000)$q$,
   $q$values ('uploading'::text, 2)$q$, 'start: an abandoned attempt may be retried (attempt 2)');
 
 select * from public.ingest_upload_start(tests.fp('e'), 'series', -1002222222222, 1000);
 select is(public.ingest_upload_fail(tests.fp('e'), 'series', 'retryable', 'telegram_forbidden'), 'upload_failed', 'fail: a definite failure is retryable');
 select is(public.ingest_upload_fail(tests.fp('e'), 'series', 'retryable', 'telegram_forbidden'), 'upload_failed', 'fail: replaying it is safe');
-select results_eq($q$select * from public.ingest_upload_start(tests.fp('e'), 'series', -1002222222222, 1000)$q$,
+select results_eq($q$select upload_state, upload_attempt_count from public.ingest_upload_start(tests.fp('e'), 'series', -1002222222222, 1000)$q$,
   $q$values ('uploading'::text, 2)$q$, 'start: a definite failure is retried');
 select public.ingest_upload_fail(tests.fp('e'), 'series', 'retryable', 'x');
 select * from public.ingest_upload_start(tests.fp('e'), 'series', -1002222222222, 1000);

@@ -121,7 +121,7 @@ select is(
   array['catalogue_access.episode_is_public', 'catalogue_access.movie_is_public',
         'catalogue_access.season_is_public', 'catalogue_access.series_is_public',
         'private.enforce_watchlist_limit', 'private.handle_new_user',
-        'public.ingest_upload_fail', 'public.ingest_upload_record',
+        'public.ingest_channel_checkpoint', 'public.ingest_upload_fail', 'public.ingest_upload_record',
         'public.ingest_upload_start', 'public.ingest_upload_status',
         'public.record_search', 'public.trending_searches'],
   'SECURITY DEFINER functions are exactly the reviewed set');
