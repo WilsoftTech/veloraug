@@ -24,6 +24,49 @@ export function sourceCaptionToken(fingerprint: SourceFingerprint): string {
   return `${TOKEN_PREFIX}${fingerprint}`;
 }
 
+/**
+ * Bot API caption limit for media (characters after entity parsing). Captions
+ * are sent as plain text, with no parse_mode, so this is a character count.
+ */
+export const TELEGRAM_CAPTION_MAX = 1024;
+const CAPTION_LINE_MAX = 200;
+
+export interface UploadCaptionInput {
+  kind: CatalogueKind;
+  title: string | null;
+  year: number | null;
+  /** Display name of the resolved VJ, else the parsed VJ text. */
+  vjName: string | null;
+  season: number | null;
+  episode: number | null;
+  fingerprint: SourceFingerprint;
+}
+
+const captionLine = (text: string) =>
+  text.replace(/[\p{Cc}\p{Cf}]/gu, " ").replace(/\s+/g, " ").trim().slice(0, CAPTION_LINE_MAX).trim();
+const pad2 = (value: number) => String(value).padStart(2, "0");
+
+/**
+ * The deterministic caption for an uploaded file: human-readable title, VJ
+ * and movie/episode identity, then the machine-readable source token as the
+ * last line. It never contains the local path or file name (Telegram keeps
+ * the file name anyway), a token or any other secret. The token is always
+ * present and intact; human lines are bounded so the whole caption fits.
+ */
+export function buildUploadCaption(input: UploadCaptionInput): string {
+  const title = captionLine(input.title ?? "") || "Untitled";
+  const lines = [input.year === null ? title : `${title} (${input.year})`];
+  const vj = captionLine(input.vjName ?? "");
+  if (vj) lines.push(/^vj\b/i.test(vj) ? vj : `VJ ${vj}`);
+  lines.push(
+    input.kind === "movie"
+      ? "Movie"
+      : `Series ${input.season === null ? "S??" : `S${pad2(input.season)}`}${input.episode === null ? "E??" : `E${pad2(input.episode)}`}`,
+  );
+  lines.push(sourceCaptionToken(input.fingerprint));
+  return lines.join("\n");
+}
+
 /** The fingerprint in a caption, or null when there is none or more than one. */
 export function fingerprintFromCaption(caption: string | null | undefined): SourceFingerprint | null {
   const found = [...(caption ?? "").matchAll(TOKEN)].map((match) => match[1]);

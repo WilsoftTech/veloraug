@@ -196,6 +196,69 @@ export interface TelegramMediaRecord {
 }
 
 // ---------------------------------------------------------------------------
+// Upload outcome and crash recovery (C2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Result of one sendDocument call. `failed` means Telegram definitely did not
+ * post the file (the request was refused or never reached the server), so a
+ * retry cannot duplicate it. `uncertain` means it may have been posted
+ * (timeout, dropped connection, server error, unreadable reply): a retry must
+ * reconcile against the channel first.
+ */
+export type UploadOutcome =
+  | { status: "succeeded"; record: TelegramMediaRecord }
+  | { status: "failed"; code: string; retryable: boolean; retryAfterSeconds: number | null }
+  | { status: "uncertain"; code: string };
+
+/** One channel message looked up during reconciliation. */
+export type ChannelProbeResult =
+  | { status: "found"; record: TelegramMediaRecord }
+  /** A message exists at that id but carries no video or document. */
+  | { status: "not_media" }
+  | { status: "missing" }
+  | { status: "error"; code: string };
+
+export type ChannelProbe = (messageId: number) => Promise<ChannelProbeResult>;
+
+export type ReconciliationResult =
+  | { status: "confirmed"; record: TelegramMediaRecord }
+  | { status: "not_found"; scannedThrough: number }
+  | { status: "ambiguous"; reason: "multiple_matches" | "size_mismatch" | "scan_incomplete"; messageIds: number[] }
+  | { status: "unavailable"; code: string };
+
+/** What the server (Supabase, through the worker boundary) knows about a source. */
+export type ServerUploadStatus =
+  | { status: "unknown" }
+  | { status: "absent" }
+  | { status: "uploading" }
+  | { status: "uploaded"; record: TelegramMediaRecord }
+  | { status: "failed" };
+
+export type ResumeAction =
+  /** Journal and server agree the upload is recorded. */
+  | { action: "none" }
+  /** Telegram accepted the file and the journal has its identity; the server was never told. */
+  | { action: "record_in_db"; record: TelegramMediaRecord }
+  /** The server recorded the upload; only the local journal is behind. */
+  | { action: "adopt_server"; record: TelegramMediaRecord }
+  /** An upload may have been posted: look in the channel before anything else. */
+  | { action: "reconcile" }
+  /** Nothing was posted; a new upload is allowed when the operator asks for it. */
+  | { action: "upload_allowed" }
+  | { action: "review"; reason: string }
+  | { action: "stop"; reason: string };
+
+export type ReconcileDecision =
+  | { action: "record_confirmed"; record: TelegramMediaRecord }
+  /** Verified absent after the grace period: the attempt is abandoned. */
+  | { action: "abandon" }
+  /** Not found yet, but the server may still be uploading: check again later. */
+  | { action: "wait"; reason: string }
+  | { action: "review"; reason: string }
+  | { action: "retry_later"; code: string };
+
+// ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
 

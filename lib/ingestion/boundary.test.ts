@@ -23,7 +23,7 @@ function filesUnder(dir: string): string[] {
 
 describe("ingestion boundary (C1)", () => {
   it("has the expected pure modules", () => {
-    expect(MODULES.sort()).toEqual(["duplicates.ts", "fingerprint.ts", "match.ts", "normalize.ts", "parser.ts", "plan.ts", "state.ts", "telegram.ts", "vj.ts"]);
+    expect(MODULES.sort()).toEqual(["duplicates.ts", "fingerprint.ts", "match.ts", "normalize.ts", "parser.ts", "plan.ts", "recovery.ts", "state.ts", "telegram.ts", "vj.ts"]);
   });
 
   it("imports only other ingestion modules, domain types, zod and node:crypto", () => {
@@ -39,9 +39,9 @@ describe("ingestion boundary (C1)", () => {
     }
   });
 
-  it("is not imported by app code, components or the public data layer", () => {
+  it("is not imported by app code, components or the public data layer (nor are the C2 Telegram and uploader modules)", () => {
     const importers = ["app", "components"].flatMap(filesUnder).concat(["lib/catalogue.ts", "lib/browse.ts", "lib/utils.ts"])
-      .filter((file) => specifiers(readFileSync(join(ROOT, file), "utf8")).some((specifier) => specifier.includes("ingestion")));
+      .filter((file) => specifiers(readFileSync(join(ROOT, file), "utf8")).some((specifier) => /ingestion|lib\/telegram|lib\/uploader/.test(specifier)));
     expect(importers).toEqual([]);
   });
 });
