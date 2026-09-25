@@ -2,7 +2,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { decideAfterReconcile, decideResume, DEFAULT_RECONCILE_GRACE_MS, reconcileUpload } from "@/lib/ingestion/recovery";
+import { decideResume, DEFAULT_RECONCILE_GRACE_MS } from "@/lib/ingestion/recovery";
 import { buildUploadCaption } from "@/lib/ingestion/telegram";
 import type { LocalBotApiClient } from "@/lib/telegram/local-bot-api";
 import { newJournalEntry, openJournal, resolveJournalDir, type Journal, type JournalEntry } from "@/lib/uploader/journal";
@@ -31,49 +31,10 @@ function channel(messages: Record<number, ChannelProbeResult>) {
 }
 
 // ---------------------------------------------------------------------------
-// Pure recovery rules
+// Pure resume rules (the bounded scan is tested in lib/ingestion/recovery.test.ts)
 // ---------------------------------------------------------------------------
 
-describe("reconcileUpload: bounded channel scan", () => {
-  it("confirms the single message carrying the fingerprint", async () => {
-    const probe = channel({ 11: { status: "found", record: media(11, OTHER) }, 12: { status: "not_media" }, 13: { status: "found", record: media(13) } });
-    const result = await reconcileUpload({ fingerprint: FP, sizeBytes: SIZE, afterMessageId: 10, probe, missingStreak: 3 });
-    expect(result).toEqual({ status: "confirmed", record: media(13) });
-    // Starts above the high-water mark and stops after the missing streak.
-    expect(probe.mock.calls.map(([id]) => id)).toEqual([11, 12, 13, 14, 15, 16]);
-  });
-
-  it("steps over deleted-message gaps shorter than the streak", async () => {
-    const probe = channel({ 15: { status: "found", record: media(15) } });
-    expect(await reconcileUpload({ fingerprint: FP, sizeBytes: SIZE, afterMessageId: 10, probe, missingStreak: 5 })).toMatchObject({ status: "confirmed" });
-  });
-
-  it("reports not_found only after reaching the end of the channel", async () => {
-    expect(await reconcileUpload({ fingerprint: FP, sizeBytes: SIZE, afterMessageId: 10, probe: channel({}), missingStreak: 4 })).toEqual({ status: "not_found", scannedThrough: 14 });
-  });
-
-  it("two messages with the fingerprint are ambiguous", async () => {
-    const probe = channel({ 11: { status: "found", record: media(11) }, 12: { status: "found", record: media(12) } });
-    expect(await reconcileUpload({ fingerprint: FP, sizeBytes: SIZE, afterMessageId: 10, probe, missingStreak: 2 })).toEqual({ status: "ambiguous", reason: "multiple_matches", messageIds: [11, 12] });
-  });
-
-  it("a same-token message with another size is never adopted", async () => {
-    const probe = channel({ 11: { status: "found", record: media(11, FP, { fileSizeBytes: SIZE - 5 }) } });
-    expect(await reconcileUpload({ fingerprint: FP, sizeBytes: SIZE, afterMessageId: 10, probe, missingStreak: 2 })).toMatchObject({ status: "ambiguous", reason: "size_mismatch" });
-  });
-
-  it("hitting the probe bound without the end is incomplete, not absent", async () => {
-    const busy = vi.fn(async (): Promise<ChannelProbeResult> => ({ status: "not_media" }));
-    expect(await reconcileUpload({ fingerprint: FP, sizeBytes: SIZE, afterMessageId: 0, probe: busy, maxProbes: 10 })).toEqual({ status: "ambiguous", reason: "scan_incomplete", messageIds: [] });
-  });
-
-  it("Telegram unavailable stops the scan", async () => {
-    const probe = vi.fn(async (): Promise<ChannelProbeResult> => ({ status: "error", code: "telegram_rate_limited" }));
-    expect(await reconcileUpload({ fingerprint: FP, sizeBytes: SIZE, afterMessageId: 0, probe })).toEqual({ status: "unavailable", code: "telegram_rate_limited" });
-  });
-});
-
-describe("decideResume / decideAfterReconcile", () => {
+describe("decideResume", () => {
   const base = { upload: "not_uploaded" as const, telegram: null, dbAcknowledged: false, rejected: false, attemptsExhausted: false, lastFailureCode: null, server: { status: "absent" } as ServerUploadStatus };
 
   it("prefers evidence in hand over asking Telegram", () => {
@@ -107,15 +68,6 @@ describe("decideResume / decideAfterReconcile", () => {
     expect(decideResume({ ...base, upload: "upload_failed", lastFailureCode: "telegram_forbidden", server: { status: "uploading" } })).toEqual({ action: "sync_failure", code: "telegram_forbidden" });
     expect(decideResume({ ...base, upload: "upload_failed", attemptsExhausted: true })).toEqual({ action: "stop", reason: "upload_attempts_exhausted" });
     expect(decideResume({ ...base, rejected: true })).toEqual({ action: "stop", reason: "rejected" });
-  });
-
-  it("absence is trusted only after the grace period, and never without an attempt time", () => {
-    const notFound = { status: "not_found" as const, scannedThrough: 30 };
-    expect(decideAfterReconcile(notFound, 60_000)).toEqual({ action: "wait", reason: "within_upload_grace_period" });
-    expect(decideAfterReconcile(notFound, DEFAULT_RECONCILE_GRACE_MS)).toEqual({ action: "abandon" });
-    expect(decideAfterReconcile(notFound, null)).toEqual({ action: "review", reason: "reconcile_attempt_time_unknown" });
-    expect(decideAfterReconcile({ status: "ambiguous", reason: "multiple_matches", messageIds: [1, 2] }, 1e12)).toEqual({ action: "review", reason: "reconcile_multiple_matches" });
-    expect(decideAfterReconcile({ status: "unavailable", code: "timeout" }, 1e12)).toEqual({ action: "retry_later", code: "timeout" });
   });
 });
 
@@ -231,16 +183,21 @@ class FakeStore implements IngestionStore {
   }
 }
 
-function telegram(send: () => Promise<UploadOutcome>, probe = channel({})) {
+/** The recovery marker lands here unless a test says otherwise; the journal's floor is 40. */
+const MARKER_ID = 60;
+
+function telegram(send: () => Promise<UploadOutcome>, probe = channel({}), markerId = MARKER_ID) {
   return {
     preflight: vi.fn<LocalBotApiClient["preflight"]>(async () => ({ ok: true, channelId: MOVIES })),
     sendDocument: vi.fn<LocalBotApiClient["sendDocument"]>(send),
+    checkRecoveryAccess: vi.fn<LocalBotApiClient["checkRecoveryAccess"]>(async () => ({ status: "ok" })),
+    postRecoveryMarker: vi.fn<LocalBotApiClient["postRecoveryMarker"]>(async () => ({ status: "posted", messageId: markerId })),
     probeChannelMessage: vi.fn<LocalBotApiClient["probeChannelMessage"]>(async (_kind, id) => probe(id)),
   };
 }
 
 function deps(store: IngestionStore, api: ReturnType<typeof telegram>, now = T0): UploaderDeps {
-  return { journal, store, telegram: api, telegramEnabled: true, channelHighWater: async () => 40, now: () => now };
+  return { journal, store, telegram: api, telegramEnabled: true, channelHighWater: async () => 40, now: () => now, sleep: async () => {} };
 }
 
 describe("crash and recovery", () => {
@@ -393,6 +350,8 @@ describe("crash and recovery", () => {
     expect(store.calls).toEqual([]);
     expect(api.preflight).not.toHaveBeenCalled();
     expect(api.sendDocument).not.toHaveBeenCalled();
+    expect(api.checkRecoveryAccess).not.toHaveBeenCalled();
+    expect(api.postRecoveryMarker).not.toHaveBeenCalled();
     expect(api.probeChannelMessage).not.toHaveBeenCalled();
   });
 
@@ -432,5 +391,105 @@ describe("crash and recovery", () => {
     expect(await uploadEntry(entry({ plan: { action: "hold", stopReasons: ["duplicate_same_title_same_vj"] } }), CAPTION, deps(new FakeStore(), api))).toEqual({ result: "refused", code: "plan_hold" });
     expect(await uploadEntry(entry({ intendedChannelId: null }), CAPTION, deps(new FakeStore(), api))).toEqual({ result: "refused", code: "channel_not_planned" });
     expect(api.sendDocument).not.toHaveBeenCalled();
+  });
+});
+
+describe("bounded marker recovery, end to end (C2B.1A)", () => {
+  /** An attempt left `uploading` by a timeout, with the journal's floor of 40. */
+  async function uncertainUpload(api: ReturnType<typeof telegram>, store: FakeStore) {
+    await uploadEntry(entry(), CAPTION, deps(store, api));
+    return (await journal.get(FP))!;
+  }
+
+  it("finds the file after a deleted gap far longer than 20 ids, and records it without a reupload", async () => {
+    const store = new FakeStore();
+    const api = telegram(async () => ({ status: "uncertain", code: "timeout" }), channel({ 95: { status: "found", record: media(95) } }), 100);
+    const pending = await uncertainUpload(api, store);
+    expect(await resumeEntry(pending, deps(store, api))).toEqual({ result: "uploaded", acknowledged: true });
+    expect(api.probeChannelMessage.mock.calls.map(([, id]) => id)).toEqual(Array.from({ length: 59 }, (_, index) => 41 + index));
+    expect(store.status).toEqual({ status: "uploaded", record: media(95) });
+    expect(api.sendDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("a lost journal on a fresh machine: the server's uncertain state holds, no scan from id 1, no marker, no upload", async () => {
+    const store = new FakeStore();
+    const api = telegram(async () => ({ status: "uncertain", code: "timeout" }), channel({ 1: { status: "found", record: media(1) } }));
+    await uncertainUpload(api, store);
+    // A fresh journal: the entry exists again after a rescan, with no attempts.
+    const fresh = entry();
+    await journal.put(fresh);
+    expect(await uploadEntry(fresh, CAPTION, deps(store, api))).toEqual({ result: "resume", action: { action: "reconcile" } });
+    const later = new Date(T0.getTime() + 2 * DEFAULT_RECONCILE_GRACE_MS);
+    expect(await resumeEntry(fresh, deps(store, api, later))).toEqual({ result: "resume", action: { action: "hold", reason: "reconcile_incomplete_floor_unknown" } });
+    expect(api.checkRecoveryAccess).not.toHaveBeenCalled();
+    expect(api.postRecoveryMarker).not.toHaveBeenCalled();
+    expect(api.probeChannelMessage).not.toHaveBeenCalled();
+    expect(store.status).toEqual({ status: "uncertain" });
+    expect(await uploadEntry(fresh, CAPTION, deps(store, api, later))).toEqual({ result: "resume", action: { action: "reconcile" } });
+    expect(api.sendDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("a journal that knew no earlier message (floor 0) is not trusted as a floor either", async () => {
+    const store = new FakeStore();
+    const api = telegram(async () => ({ status: "uncertain", code: "timeout" }));
+    await uploadEntry(entry(), CAPTION, { ...deps(store, api), channelHighWater: async () => 0 });
+    const pending = (await journal.get(FP))!;
+    expect(pending.attempts.at(-1)?.channelHighWater).toBe(0);
+    expect(await resumeEntry(pending, deps(store, api, new Date(T0.getTime() + DEFAULT_RECONCILE_GRACE_MS)))).toEqual({ result: "resume", action: { action: "hold", reason: "reconcile_incomplete_floor_unknown" } });
+    expect(api.postRecoveryMarker).not.toHaveBeenCalled();
+    expect(api.probeChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it("an uninspectable message holds the source as uncertain: never abandoned, never reuploaded", async () => {
+    const store = new FakeStore();
+    const api = telegram(async () => ({ status: "uncertain", code: "timeout" }), channel({ 45: { status: "uninspectable", code: "telegram_rejected_400" } }));
+    const pending = await uncertainUpload(api, store);
+    const later = new Date(T0.getTime() + DEFAULT_RECONCILE_GRACE_MS);
+    expect(await resumeEntry(pending, deps(store, api, later))).toEqual({ result: "resume", action: { action: "hold", reason: "reconcile_incomplete_uninspectable_message" } });
+    expect(store.calls.at(-1)).toBe("recordUploadFailed:uncertain");
+    expect(store.status).toEqual({ status: "uncertain" });
+    expect((await journal.get(FP))!.state.upload).toBe("uploading");
+    expect(await uploadEntry((await journal.get(FP))!, CAPTION, deps(store, api, later))).toEqual({ result: "resume", action: { action: "reconcile" } });
+    expect(api.sendDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("a rate limit or permission failure during recovery changes nothing and uploads nothing", async () => {
+    const store = new FakeStore();
+    const limited = vi.fn(async (): Promise<ChannelProbeResult> => ({ status: "rate_limited", retryAfterSeconds: 900 }));
+    const api = telegram(async () => ({ status: "uncertain", code: "timeout" }), limited);
+    const pending = await uncertainUpload(api, store);
+    const later = new Date(T0.getTime() + DEFAULT_RECONCILE_GRACE_MS);
+    expect(await resumeEntry(pending, deps(store, api, later))).toEqual({ result: "resume", action: { action: "retry_later", code: "telegram_rate_limited", retryAfterSeconds: 900 } });
+    expect(store.status).toEqual({ status: "uncertain" });
+
+    api.checkRecoveryAccess.mockImplementation(async () => ({ status: "blocked", code: "channel_content_protected" }));
+    expect(await resumeEntry(pending, deps(store, api, later))).toEqual({ result: "resume", action: { action: "hold", reason: "reconcile_blocked_channel_content_protected" } });
+    expect(store.status).toEqual({ status: "uncertain" });
+    expect((await journal.get(FP))!.state.upload).toBe("uploading");
+    expect(api.sendDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("marker deletion is never needed: recovery completes with no delete capability at all", async () => {
+    const store = new FakeStore();
+    const api = telegram(async () => ({ status: "uncertain", code: "timeout" }));
+    const pending = await uncertainUpload(api, store);
+    expect(Object.keys(api)).not.toContain("deleteMessage");
+    expect(await resumeEntry(pending, deps(store, api, new Date(T0.getTime() + DEFAULT_RECONCILE_GRACE_MS)))).toEqual({ result: "resume", action: { action: "abandon" } });
+  });
+
+  it("recovery uses the entry's own bot and channel: movie -> movie, series -> series", async () => {
+    for (const kind of ["movie", "series"] as const) {
+      const store = new FakeStore();
+      const api = telegram(async () => ({ status: "uncertain", code: "timeout" }));
+      await journal.put(entry({ kind }));
+      const pending = { ...entry({ kind }), state: { ...entry().state, upload: "uploading" as const, uploadAttempts: 1 }, attempts: [{ number: 1, startedAt: T0.toISOString(), channelHighWater: 40, outcome: "uncertain" as const, code: "timeout", finishedAt: null }] };
+      store.status = { status: "uncertain" };
+      await resumeEntry(pending, deps(store, api));
+      expect(api.checkRecoveryAccess.mock.calls).toEqual([[kind]]);
+      expect(api.postRecoveryMarker.mock.calls.map(([markerKind]) => markerKind)).toEqual([kind]);
+      expect(new Set(api.probeChannelMessage.mock.calls.map(([probeKind]) => probeKind))).toEqual(new Set([kind]));
+      // The marker operation is text only: nothing was uploaded.
+      expect(api.sendDocument).not.toHaveBeenCalled();
+    }
   });
 });

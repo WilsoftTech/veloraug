@@ -1,5 +1,5 @@
 import "server-only";
-import { decideAfterReconcile, decideResume, reconcileUpload } from "@/lib/ingestion/recovery";
+import { decideAfterReconcile, decideResume, reconcileUpload, type RecoveryPacing } from "@/lib/ingestion/recovery";
 import { MAX_UPLOAD_ATTEMPTS, transition } from "@/lib/ingestion/state";
 import type { LocalBotApiClient } from "@/lib/telegram/local-bot-api";
 import type { Journal, JournalEntry, UploadAttempt } from "@/lib/uploader/journal";
@@ -28,13 +28,16 @@ export const REAL_TELEGRAM_UPLOADS_AUTHORIZED = false;
 export interface UploaderDeps {
   journal: Journal;
   store: IngestionStore;
-  telegram: Pick<LocalBotApiClient, "preflight" | "sendDocument" | "probeChannelMessage">;
+  telegram: Pick<LocalBotApiClient, "preflight" | "sendDocument" | "checkRecoveryAccess" | "postRecoveryMarker" | "probeChannelMessage">;
   /** Must be true for any Telegram call; see REAL_TELEGRAM_UPLOADS_AUTHORIZED. */
   telegramEnabled: boolean;
-  /** Highest message id the journal knows in this kind's channel. */
+  /** Highest message id the journal knows in this kind's channel; 0 when none. */
   channelHighWater(kind: CatalogueKind): Promise<number>;
   now(): Date;
+  /** Recovery pacing and backoff; tests inject a fake. */
+  sleep(ms: number): Promise<void>;
   graceMs?: number;
+  recoveryPacing?: Partial<RecoveryPacing>;
 }
 
 export type StepResult =
@@ -194,7 +197,7 @@ export async function resumeEntry(entry: JournalEntry, deps: UploaderDeps): Prom
   switch (decision.action) {
     case "record_in_db": {
       const acked = await acknowledge(entry, decision.record, deps);
-      return acked.acknowledged ? { result: "uploaded", acknowledged: true } : { result: "resume", action: acked.conflict ? { action: "review", reason: "telegram_identity_conflict" } : { action: "retry_later", code: "server_unavailable" } };
+      return acked.acknowledged ? { result: "uploaded", acknowledged: true } : { result: "resume", action: acked.conflict ? { action: "review", reason: "telegram_identity_conflict" } : { action: "retry_later", code: "server_unavailable", retryAfterSeconds: null } };
     }
     case "adopt_server": {
       const now = deps.now().toISOString();
@@ -207,7 +210,7 @@ export async function resumeEntry(entry: JournalEntry, deps: UploaderDeps): Prom
     case "sync_failure":
       return (await tellServer(deps, entry, "retryable", decision.code))
         ? { result: "resume", action: { action: "upload_allowed" } }
-        : { result: "resume", action: { action: "retry_later", code: "server_unavailable" } };
+        : { result: "resume", action: { action: "retry_later", code: "server_unavailable", retryAfterSeconds: null } };
     case "reconcile":
       return reconcileEntry(entry, deps);
     default:
@@ -215,16 +218,36 @@ export async function resumeEntry(entry: JournalEntry, deps: UploaderDeps): Prom
   }
 }
 
+/**
+ * The scan floor: the attempt's `channelHighWater`, recorded before it
+ * started. Only the journal knows it today, and 0 means the journal knew no
+ * message in that channel, which is not proof of an empty channel. Without
+ * a floor, recovery holds instead of scanning from id 1. A server-side floor
+ * that survives a lost journal needs migration 10 (not yet authorized).
+ */
+function attemptFloor(attempt: UploadAttempt | undefined): number | null {
+  return attempt && attempt.channelHighWater > 0 ? attempt.channelHighWater : null;
+}
+
 async function reconcileEntry(entry: JournalEntry, deps: UploaderDeps): Promise<StepResult> {
   const last = entry.state.upload === "uploading" ? entry.attempts.at(-1) : undefined;
+  // Bound to the entry's kind: the movie bot and Movies channel, or the series bot and Series channel.
+  const kind = entry.kind;
   const result = await reconcileUpload({
     fingerprint: entry.fingerprint,
     sizeBytes: entry.sizeBytes,
-    afterMessageId: last?.channelHighWater ?? 0,
-    probe: (messageId) => deps.telegram.probeChannelMessage(entry.kind, messageId),
+    attemptNumber: last?.number ?? null,
+    floorMessageId: attemptFloor(last),
+    transport: {
+      checkAccess: () => deps.telegram.checkRecoveryAccess(kind),
+      postMarker: (text) => deps.telegram.postRecoveryMarker(kind, text),
+      probe: (messageId) => deps.telegram.probeChannelMessage(kind, messageId),
+    },
+    sleep: deps.sleep,
+    now: deps.now,
+    pacing: deps.recoveryPacing,
   });
-  const age = last ? deps.now().getTime() - Date.parse(last.startedAt) : null;
-  const decision = decideAfterReconcile(result, age, deps.graceMs);
+  const decision = decideAfterReconcile(result, last ? new Date(last.startedAt) : null, deps.graceMs);
 
   if (decision.action === "record_confirmed") {
     const { record } = decision;
@@ -243,6 +266,10 @@ async function reconcileEntry(entry: JournalEntry, deps: UploaderDeps): Promise<
   if (decision.action === "review") {
     // Persist the block so no later start can bypass the reviewer.
     await tellServer(deps, entry, "permanent", decision.reason);
+  }
+  if (decision.action === "hold") {
+    // Stays uncertain, which already refuses a new start; the code tells the operator why.
+    await tellServer(deps, entry, "uncertain", decision.reason);
   }
   return { result: "resume", action: decision };
 }

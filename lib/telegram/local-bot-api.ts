@@ -5,9 +5,10 @@ import { pathToFileURL } from "node:url";
 import * as z from "zod";
 import { isFingerprint } from "@/lib/ingestion/fingerprint";
 import { SUPPORTED_EXTENSIONS } from "@/lib/ingestion/parser";
+import { isRecoveryMarker } from "@/lib/ingestion/recovery";
 import { fingerprintFromCaption, TELEGRAM_CAPTION_MAX, TELEGRAM_MAX_FILE_BYTES, telegramMediaMessageSchema, toTelegramMediaRecord } from "@/lib/ingestion/telegram";
 import type { CatalogueKind } from "@/types/catalogue";
-import type { ChannelProbeResult, SourceFingerprint, TelegramMediaRecord, UploadOutcome } from "@/types/ingestion";
+import type { ChannelProbeResult, MarkerPostResult, RecoveryAccessResult, RecoveryCallFailure, SourceFingerprint, TelegramMediaRecord, UploadOutcome } from "@/types/ingestion";
 
 /**
  * Telegram transport for the ingestion uploader (C2): a self-hosted Bot API
@@ -302,6 +303,37 @@ export function mapSentMessage(result: unknown, request: UploadRequest, target: 
   return { status: "succeeded", record };
 }
 
+// ---------------------------------------------------------------------------
+// Recovery calls (C2B.1A): read-only access check, marker, channel probe
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps a failed recovery call. Only a status code and Telegram's `retry_after`
+ * are used: never the description text. A 4xx other than 401/403/429 on a
+ * setup call is a configuration problem for the operator.
+ */
+function recoveryFailure(reply: Exclude<Reply, { kind: "ok" }>, prefix: string): RecoveryCallFailure {
+  if (reply.kind === "unreachable") return { status: "transient", code: "bot_api_unreachable" };
+  if (reply.kind === "uncertain") return { status: "transient", code: `${prefix}_${reply.code}` };
+  if (reply.code === 429) return { status: "rate_limited", retryAfterSeconds: reply.retryAfter };
+  if (reply.code >= 500) return { status: "transient", code: `telegram_server_${reply.code}` };
+  if (reply.code === 401) return { status: "blocked", code: "telegram_unauthorized" };
+  if (reply.code === 403) return { status: "blocked", code: "telegram_forbidden" };
+  return { status: "blocked", code: `${prefix}_rejected_${reply.code}` };
+}
+
+/**
+ * The one description the probe reads. Bot API has no error code that
+ * separates "no such message" from other 400s, so this text is the only
+ * signal that an id is empty. Any other 400 (a service message, protected
+ * content, a changed wording) is `uninspectable`: if Telegram rewords this,
+ * scans become incomplete, never falsely empty.
+ */
+const MESSAGE_NOT_FOUND = /^Bad Request: message to forward not found$/i;
+
+const chatInfo = z.object({ id: z.number().int(), has_protected_content: z.boolean().optional() });
+const sentText = z.object({ message_id: z.number().int().positive(), chat: z.object({ id: z.number().int() }), text: z.string() });
+
 const forwardOrigin = z.object({
   forward_origin: z.object({
     type: z.literal("channel"),
@@ -316,6 +348,10 @@ export interface LocalBotApiClient {
   /** Every check sendDocument makes before the network, without sending. */
   preflight(request: UploadRequest): Promise<{ ok: true; channelId: number } | { ok: false; code: string; permanent: boolean }>;
   sendDocument(request: UploadRequest): Promise<UploadOutcome | { status: "rejected"; code: string; permanent: boolean }>;
+  /** Read-only (getChat): the kind's channel and the recovery group are reachable, and forwarding can work. */
+  checkRecoveryAccess(kind: CatalogueKind): Promise<RecoveryAccessResult>;
+  /** Posts a recovery marker (sendMessage, text only) to the kind's channel with the kind's bot. */
+  postRecoveryMarker(kind: CatalogueKind, text: string): Promise<MarkerPostResult>;
   /** A channel probe for reconcileUpload(). */
   probeChannelMessage(kind: CatalogueKind, messageId: number): Promise<ChannelProbeResult>;
 }
@@ -346,14 +382,52 @@ export function createLocalBotApiClient(config: LocalBotApiConfig, deps: Transpo
     },
 
     /**
+     * `has_protected_content` is a stable getChat field, so a channel that
+     * forbids forwarding is caught here, before any marker is posted.
+     */
+    async checkRecoveryAccess(kind) {
+      if (config.reconcileChatId === null) return { status: "blocked", code: "reconcile_chat_not_configured" };
+      const target = config.bots[kind];
+      for (const chatId of [target.channelId, config.reconcileChatId]) {
+        const reply = await call(config, deps, target.token, "getChat", { chat_id: chatId }, deps.requestTimeoutMs);
+        if (reply.kind !== "ok") return recoveryFailure(reply, "get_chat");
+        const chat = chatInfo.safeParse(reply.result);
+        if (!chat.success || chat.data.id !== chatId) return { status: "blocked", code: "get_chat_unexpected_reply" };
+        if (chatId === target.channelId && chat.data.has_protected_content === true) return { status: "blocked", code: "channel_content_protected" };
+      }
+      return { status: "ok" };
+    },
+
+    /**
+     * A text message only: there is no document, file or path parameter, and
+     * the text must be a recovery marker. A timed-out post may still exist;
+     * that is harmless, because a marker is never media and never matches.
+     */
+    async postRecoveryMarker(kind, text) {
+      if (!isRecoveryMarker(text)) return { status: "blocked", code: "marker_text_invalid" };
+      const target = config.bots[kind];
+      const reply = await call(config, deps, target.token, "sendMessage", {
+        chat_id: target.channelId,
+        text,
+        disable_notification: true,
+        link_preview_options: { is_disabled: true },
+      }, deps.requestTimeoutMs);
+      if (reply.kind !== "ok") return recoveryFailure(reply, "marker");
+      const sent = sentText.safeParse(reply.result);
+      if (!sent.success || sent.data.chat.id !== target.channelId || sent.data.text !== text) return { status: "blocked", code: "marker_unexpected_reply" };
+      return { status: "posted", messageId: sent.data.message_id };
+    },
+
+    /**
      * Bot API cannot read channel history, so a probe forwards one message id
-     * into the private reconciliation chat, reads the forwarded copy (caption
-     * and file identity survive a forward), then deletes that copy. Forwarding
-     * fails on channels with protected content; that surfaces as an error,
-     * never as "missing".
+     * into the private recovery group, reads the forwarded copy (caption and
+     * file identity survive a forward), then deletes that copy. Only
+     * Telegram's "not found" reply means `missing`; a message that exists but
+     * cannot be forwarded (a service message, protected content) or any other
+     * refusal is `uninspectable`.
      */
     async probeChannelMessage(kind, messageId) {
-      if (config.reconcileChatId === null) return { status: "error", code: "reconcile_chat_not_configured" };
+      if (config.reconcileChatId === null) return { status: "blocked", code: "reconcile_chat_not_configured" };
       const target = config.bots[kind];
       const reply = await call(config, deps, target.token, "forwardMessage", {
         chat_id: config.reconcileChatId,
@@ -361,22 +435,20 @@ export function createLocalBotApiClient(config: LocalBotApiConfig, deps: Transpo
         message_id: messageId,
         disable_notification: true,
       }, deps.requestTimeoutMs);
-      if (reply.kind === "unreachable") return { status: "error", code: "bot_api_unreachable" };
-      if (reply.kind === "uncertain") return { status: "error", code: reply.code };
-      if (reply.kind === "error") {
-        if (reply.code === 400 && /not found|MESSAGE_ID_INVALID/i.test(reply.description)) return { status: "missing" };
-        if (reply.code === 400 && /can't be forwarded|protected/i.test(reply.description)) return { status: "error", code: "channel_content_protected" };
-        return { status: "error", code: reply.code === 429 ? "telegram_rate_limited" : `telegram_rejected_${reply.code}` };
+      if (reply.kind === "error" && reply.code === 400) {
+        return MESSAGE_NOT_FOUND.test(reply.description) ? { status: "missing" } : { status: "uninspectable", code: "telegram_rejected_400" };
       }
+      if (reply.kind === "error" && reply.code < 500 && ![401, 403, 429].includes(reply.code)) return { status: "uninspectable", code: `telegram_rejected_${reply.code}` };
+      if (reply.kind !== "ok") return recoveryFailure(reply, "probe");
 
       const origin = forwardOrigin.safeParse(reply.result);
       const copy = reply.result as Record<string, unknown>;
       if (origin.success) {
-        // Best effort: a leftover copy in the private chat is harmless.
+        // Best effort: a leftover copy in the private group is harmless.
         await call(config, deps, target.token, "deleteMessage", { chat_id: config.reconcileChatId, message_id: origin.data.message_id }, deps.requestTimeoutMs);
       }
       if (!origin.success || origin.data.forward_origin.chat.id !== target.channelId || origin.data.forward_origin.message_id !== messageId) {
-        return { status: "error", code: "unexpected_forward" };
+        return { status: "uninspectable", code: "unexpected_forward" };
       }
       const message = telegramMediaMessageSchema.safeParse({
         message_id: messageId,
@@ -386,7 +458,7 @@ export function createLocalBotApiClient(config: LocalBotApiConfig, deps: Transpo
         video: copy.video,
         document: copy.document,
       });
-      if (!message.success) return { status: "error", code: "malformed_message" };
+      if (!message.success) return { status: "uninspectable", code: "malformed_message" };
       const record: TelegramMediaRecord | null = toTelegramMediaRecord(kind, message.data);
       return record === null ? { status: "not_media" } : { status: "found", record };
     },

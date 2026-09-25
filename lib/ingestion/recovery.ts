@@ -1,7 +1,10 @@
+import { fingerprintFromCaption } from "@/lib/ingestion/telegram";
 import type {
-  ChannelProbe,
   ReconcileDecision,
   ReconciliationResult,
+  RecoveryCallFailure,
+  RecoveryMarker,
+  RecoveryTransport,
   ResumeAction,
   ServerUploadStatus,
   SourceFingerprint,
@@ -10,71 +13,157 @@ import type {
 } from "@/types/ingestion";
 
 /**
- * Crash recovery for uploads (C2). Pure: the channel is read through an
- * injected probe, so nothing here touches the network, disk or database.
+ * Crash recovery for uploads (C2). Pure: Telegram is reached through an
+ * injected transport, so nothing here touches the network, disk or database.
  *
  * The crash window: the journal and server know an upload started, Telegram
  * accepts the file, then the process dies before the success is recorded.
  * The file carries the `velora-src:` caption token, so recovery looks for it
  * in the channel instead of uploading again. "Timeout, so upload again" is
  * never a decision here: an uncertain attempt is reconciled first, and an
- * ambiguous reconciliation goes to review, never to a new upload.
+ * ambiguous or unfinished reconciliation never leads to a new upload.
+ *
+ * Bounded marker protocol (C2B.1A). The Bot API has no channel-history
+ * method, and deleted messages leave gaps of any length, so the end of the
+ * channel can never be inferred from missing ids. Instead:
+ *
+ * 1. floor: the highest message id known to exist before the attempt started.
+ *    Unknown means `incomplete`: the scan never starts blindly at id 1.
+ * 2. upper bound: post a short text marker to the same channel with the same
+ *    bot. Channel ids increase, so every message posted before the marker has
+ *    a smaller id.
+ * 3. inspect every id strictly between floor and marker. Only `missing`,
+ *    `not_media` and `found` count as inspected; anything else ends the scan
+ *    as `incomplete`, `rate_limited`, `transient` or `permission_blocked`.
+ * 4. `not_found_confirmed` only when the whole interval was inspected.
+ *
+ * Nothing here depends on deleting the marker.
  */
+
+export interface RecoveryPacing {
+  /** Wait between probes. Each probe forwards into the recovery group (~20 posts/min per group). */
+  probeIntervalMs: number;
+  /** A 429 whose `retry_after` is at most this is waited out in place; longer ones end the scan. */
+  maxInlineRetryAfterSeconds: number;
+  /** 429s waited out per scan before it ends as `rate_limited`. */
+  maxRateLimitWaits: number;
+  /** Transient failures retried per message id, backing off exponentially from `transientBackoffMs`. */
+  maxTransientRetries: number;
+  transientBackoffMs: number;
+  /** Largest interval scanned; a larger one is `incomplete` and needs an operator. */
+  maxIntervalIds: number;
+}
+
+export const DEFAULT_RECOVERY_PACING: RecoveryPacing = {
+  probeIntervalMs: 3_000,
+  maxInlineRetryAfterSeconds: 120,
+  maxRateLimitWaits: 5,
+  maxTransientRetries: 3,
+  transientBackoffMs: 5_000,
+  maxIntervalIds: 2_000,
+};
 
 export interface ReconcileOptions {
   fingerprint: SourceFingerprint;
   sizeBytes: number;
+  attemptNumber: number | null;
   /**
-   * Highest message id known in the channel before the attempt started.
-   * Uploads are sequential and channel message ids increase, so the file,
-   * if posted, has a larger id.
+   * Highest message id proven to exist in the channel before the attempt
+   * started, or null when unknown. The file, if posted, has a larger id.
    */
-  afterMessageId: number;
-  probe: ChannelProbe;
-  /** Stop after this many consecutive missing ids: the end of the channel. */
-  missingStreak?: number;
-  /** Hard bound on probes; reaching it without the end is `scan_incomplete`. */
-  maxProbes?: number;
+  floorMessageId: number | null;
+  /** Already bound to the entry's bot and channel. */
+  transport: RecoveryTransport;
+  sleep(ms: number): Promise<void>;
+  now(): Date;
+  pacing?: Partial<RecoveryPacing>;
 }
 
-export const DEFAULT_MISSING_STREAK = 20;
-export const DEFAULT_MAX_PROBES = 500;
+export const RECOVERY_MARKER_PREFIX = "velora-recovery:v1";
 
 /**
- * Bot API has no channel-history method, so the probe looks at message ids one
- * at a time, upward from the high-water mark. Deleted messages leave gaps; the
- * streak of consecutive missing ids is what marks the end of the channel.
+ * The marker text: recognisable, short, and tied to the source and attempt.
+ * It never carries the caption token, so it cannot match a fingerprint, and
+ * it holds no path, token or credential.
  */
-export async function reconcileUpload(options: ReconcileOptions): Promise<ReconciliationResult> {
-  const missingStreak = options.missingStreak ?? DEFAULT_MISSING_STREAK;
-  const maxProbes = options.maxProbes ?? DEFAULT_MAX_PROBES;
-  const matches: TelegramMediaRecord[] = [];
-  let streak = 0;
-  let messageId = options.afterMessageId;
-
-  for (let probes = 0; probes < maxProbes; probes += 1) {
-    messageId += 1;
-    const result = await options.probe(messageId);
-    if (result.status === "error") return { status: "unavailable", code: result.code };
-    if (result.status === "missing") {
-      streak += 1;
-      if (streak >= missingStreak) return settle(matches, options.sizeBytes, messageId);
-      continue;
-    }
-    streak = 0;
-    if (result.status === "found" && result.record.sourceFingerprint === options.fingerprint) matches.push(result.record);
-  }
-  return { status: "ambiguous", reason: "scan_incomplete", messageIds: matches.map((record) => record.messageId) };
+export function buildRecoveryMarker(fingerprint: SourceFingerprint, attemptNumber: number | null, at: Date): string {
+  return `${RECOVERY_MARKER_PREFIX} src=${fingerprint} attempt=${attemptNumber ?? "unknown"} at=${at.toISOString()}`;
 }
 
-function settle(matches: TelegramMediaRecord[], sizeBytes: number, scannedThrough: number): ReconciliationResult {
-  const messageIds = matches.map((record) => record.messageId);
-  if (matches.length === 0) return { status: "not_found", scannedThrough };
-  if (matches.length > 1) return { status: "ambiguous", reason: "multiple_matches", messageIds };
-  const [record] = matches;
-  // Same token but a different size is not our file: never adopt it.
-  if (record.fileSizeBytes !== null && record.fileSizeBytes !== sizeBytes) return { status: "ambiguous", reason: "size_mismatch", messageIds };
-  return { status: "confirmed", record };
+const MARKER = /^velora-recovery:v1 src=sf1-[0-9a-f]{64} attempt=(\d{1,3}|unknown) at=\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
+
+/** The transport posts only text that passes this: it cannot be used to post anything else. */
+export function isRecoveryMarker(text: string): boolean {
+  return MARKER.test(text) && fingerprintFromCaption(text) === null;
+}
+
+function fromCallFailure(result: RecoveryCallFailure): ReconciliationResult {
+  return result.status === "blocked" ? { status: "permission_blocked", code: result.code } : result;
+}
+
+export async function reconcileUpload(options: ReconcileOptions): Promise<ReconciliationResult> {
+  const pacing = { ...DEFAULT_RECOVERY_PACING, ...options.pacing };
+  const floor = options.floorMessageId;
+  if (floor === null || !Number.isSafeInteger(floor) || floor <= 0) return { status: "incomplete", reason: "floor_unknown", messageIds: [] };
+
+  const access = await options.transport.checkAccess();
+  if (access.status !== "ok") return fromCallFailure(access);
+
+  const postedAt = options.now();
+  const posted = await options.transport.postMarker(buildRecoveryMarker(options.fingerprint, options.attemptNumber, postedAt));
+  if (posted.status !== "posted") return fromCallFailure(posted);
+  const marker: RecoveryMarker = { messageId: posted.messageId, postedAt: postedAt.toISOString() };
+  // The floor is wrong if the marker lands at or below it: never guess.
+  if (marker.messageId <= floor) return { status: "incomplete", reason: "floor_not_below_marker", messageIds: [] };
+  if (marker.messageId - floor - 1 > pacing.maxIntervalIds) return { status: "incomplete", reason: "interval_too_large", messageIds: [] };
+
+  const matches: TelegramMediaRecord[] = [];
+  const matchIds = () => matches.map((record) => record.messageId);
+  let rateLimitWaits = 0;
+  let transientRetries = 0;
+  let probes = 0;
+  // The id advances only after it was inspected: no id is ever skipped.
+  for (let messageId = floor + 1; messageId < marker.messageId; ) {
+    if (probes > 0) await options.sleep(pacing.probeIntervalMs);
+    probes += 1;
+    const result = await options.transport.probe(messageId);
+
+    switch (result.status) {
+      case "rate_limited": {
+        const wait = result.retryAfterSeconds;
+        if (wait === null || wait > pacing.maxInlineRetryAfterSeconds || rateLimitWaits >= pacing.maxRateLimitWaits) return result;
+        rateLimitWaits += 1;
+        await options.sleep((wait + 1) * 1000);
+        continue;
+      }
+      case "transient":
+        if (transientRetries >= pacing.maxTransientRetries) return result;
+        await options.sleep(pacing.transientBackoffMs * 2 ** transientRetries);
+        transientRetries += 1;
+        continue;
+      case "blocked":
+        return { status: "permission_blocked", code: result.code };
+      case "uninspectable":
+        return { status: "incomplete", reason: "uninspectable_message", messageIds: [...matchIds(), messageId] };
+      case "found":
+        if (result.record.sourceFingerprint === options.fingerprint) {
+          matches.push(result.record);
+          // Same token but a different size is not our file: never adopt it.
+          if (result.record.fileSizeBytes !== null && result.record.fileSizeBytes !== options.sizeBytes) {
+            return { status: "ambiguous", reason: "size_mismatch", messageIds: matchIds() };
+          }
+          if (matches.length > 1) return { status: "ambiguous", reason: "multiple_matches", messageIds: matchIds() };
+        }
+        break;
+      case "missing":
+      case "not_media":
+        break;
+    }
+    transientRetries = 0;
+    messageId += 1;
+  }
+
+  return matches.length === 1 ? { status: "found", record: matches[0], marker } : { status: "not_found_confirmed", floorMessageId: floor, marker };
 }
 
 /** The journal facts resume needs. */
@@ -129,23 +218,35 @@ export function decideResume(input: ResumeInput): ResumeAction {
 
 /**
  * The self-hosted Bot API server keeps uploading after the HTTP request that
- * started it times out, so "not found" soon after an attempt proves nothing.
- * Only after this grace period may an attempt be abandoned. Abandoning only
+ * started it times out, so the file may be posted after a marker placed soon
+ * after the attempt. Absence proves something only when the marker itself was
+ * posted at least this long after the attempt started. Abandoning only
  * permits a new upload; it never starts one.
  */
 export const DEFAULT_RECONCILE_GRACE_MS = 3 * 60 * 60 * 1000;
 
-export function decideAfterReconcile(result: ReconciliationResult, attemptAgeMs: number | null, graceMs = DEFAULT_RECONCILE_GRACE_MS): ReconcileDecision {
+/**
+ * `attemptStartedAt` is the attempt's start on the same clock that dated the
+ * marker (the uploader's), or null when no attempt record survives.
+ */
+export function decideAfterReconcile(result: ReconciliationResult, attemptStartedAt: Date | null, graceMs = DEFAULT_RECONCILE_GRACE_MS): ReconcileDecision {
   switch (result.status) {
-    case "confirmed":
+    case "found":
       return { action: "record_confirmed", record: result.record };
     case "ambiguous":
       return { action: "review", reason: `reconcile_${result.reason}` };
-    case "unavailable":
-      return { action: "retry_later", code: result.code };
-    case "not_found":
-      // With no journal attempt there is no start time, so absence cannot be trusted.
-      if (attemptAgeMs === null) return { action: "review", reason: "reconcile_attempt_time_unknown" };
-      return attemptAgeMs >= graceMs ? { action: "abandon" } : { action: "wait", reason: "within_upload_grace_period" };
+    case "incomplete":
+      return { action: "hold", reason: `reconcile_incomplete_${result.reason}` };
+    case "permission_blocked":
+      return { action: "hold", reason: `reconcile_blocked_${result.code}` };
+    case "rate_limited":
+      return { action: "retry_later", code: "telegram_rate_limited", retryAfterSeconds: result.retryAfterSeconds };
+    case "transient":
+      return { action: "retry_later", code: result.code, retryAfterSeconds: null };
+    case "not_found_confirmed": {
+      if (attemptStartedAt === null) return { action: "hold", reason: "reconcile_attempt_time_unknown" };
+      const markerAfterStartMs = Date.parse(result.marker.postedAt) - attemptStartedAt.getTime();
+      return markerAfterStartMs >= graceMs ? { action: "abandon" } : { action: "wait", reason: "within_upload_grace_period" };
+    }
   }
 }

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { buildRecoveryMarker, reconcileUpload } from "@/lib/ingestion/recovery";
 import { buildUploadCaption, fingerprintFromCaption, TELEGRAM_CAPTION_MAX, TELEGRAM_MAX_FILE_BYTES } from "@/lib/ingestion/telegram";
 import {
   createLocalBotApiClient,
@@ -295,34 +296,157 @@ describe("channel probe for reconciliation", () => {
     document: { file_id: "BQACAgQAAx0-file", file_unique_id: "AgADuniq", file_size: SIZE },
     ...overrides,
   });
+  const refusal = (error_code: number, description: string, retry_after?: number) =>
+    json({ ok: false, error_code, description, ...(retry_after === undefined ? {} : { parameters: { retry_after } }) }, error_code);
+  const probeWith = async (reply: () => Promise<Response>) => client(reply).api.probeChannelMessage("movie", 43);
 
-  it("forwards one message to the private chat, reads it, and deletes the copy", async () => {
+  it("forwards one message to the private group, reads it, and deletes the copy", async () => {
     const { fetch, api } = client(async (url) => (url.endsWith("/forwardMessage") ? json({ ok: true, result: forwarded() }) : json({ ok: true, result: true })));
     const result = await api.probeChannelMessage("movie", 42);
     expect(result).toMatchObject({ status: "found", record: { chatId: MOVIES, messageId: 42, fileUniqueId: "AgADuniq", sourceFingerprint: FP, telegramDate: new Date(1_790_000_000 * 1000).toISOString() } });
     expect(JSON.parse(String(fetch.mock.calls[0][1].body))).toEqual({ chat_id: OPS, from_chat_id: MOVIES, message_id: 42, disable_notification: true });
     expect(fetch.mock.calls[1][0]).toContain("/deleteMessage");
+    expect(JSON.parse(String(fetch.mock.calls[1][1].body)).chat_id).toBe(OPS);
   });
 
-  it("reports a missing message as missing", async () => {
-    const { api } = client(async () => json({ ok: false, error_code: 400, description: "Bad Request: message to forward not found" }, 400));
-    expect(await api.probeChannelMessage("movie", 43)).toEqual({ status: "missing" });
+  it("only Telegram's exact not-found reply means missing", async () => {
+    expect(await probeWith(async () => refusal(400, "Bad Request: message to forward not found"))).toEqual({ status: "missing" });
+    // Any other 400 (a service message, protected content, or new wording) could hide a message.
+    for (const description of ["Bad Request: message can't be forwarded", "Bad Request: message has protected content and can't be forwarded", "Bad Request: MESSAGE_ID_INVALID", "Bad Request: message to forward not found (retry)", ""]) {
+      expect(await probeWith(async () => refusal(400, description)), description).toEqual({ status: "uninspectable", code: "telegram_rejected_400" });
+    }
+    expect(await probeWith(async () => refusal(404, "Not Found"))).toEqual({ status: "uninspectable", code: "telegram_rejected_404" });
   });
 
-  it("reports protected content as an error, never as missing", async () => {
-    const { api } = client(async () => json({ ok: false, error_code: 400, description: "Bad Request: message can't be forwarded" }, 400));
-    expect(await api.probeChannelMessage("movie", 43)).toEqual({ status: "error", code: "channel_content_protected" });
+  it("classifies rate limits, transient failures and permission failures by status code, never as missing", async () => {
+    expect(await probeWith(async () => refusal(429, "Too Many Requests: retry after 7", 7))).toEqual({ status: "rate_limited", retryAfterSeconds: 7 });
+    expect(await probeWith(async () => refusal(429, "Too Many Requests"))).toEqual({ status: "rate_limited", retryAfterSeconds: null });
+    expect(await probeWith(async () => refusal(502, "Bad Gateway"))).toEqual({ status: "transient", code: "telegram_server_502" });
+    expect(await probeWith(async () => refusal(403, "Forbidden: bot is not a member of the channel chat"))).toEqual({ status: "blocked", code: "telegram_forbidden" });
+    expect(await probeWith(async () => refusal(401, "Unauthorized"))).toEqual({ status: "blocked", code: "telegram_unauthorized" });
+    expect(await probeWith(async () => Promise.reject(Object.assign(new Error("timeout"), { name: "TimeoutError" })))).toEqual({ status: "transient", code: "probe_timeout" });
+    expect(await probeWith(async () => Promise.reject(Object.assign(new Error("refused"), { cause: { code: "ECONNREFUSED" } })))).toEqual({ status: "transient", code: "bot_api_unreachable" });
   });
 
-  it("reports a non-media message and rejects a forward from the wrong origin", async () => {
-    expect(await client(async (url) => (url.endsWith("/forwardMessage") ? json({ ok: true, result: forwarded({ caption: undefined, document: undefined, text: "hi" }) }) : json({ ok: true, result: true }))).api.probeChannelMessage("movie", 42)).toEqual({ status: "not_media" });
-    expect(await client(async (url) => (url.endsWith("/forwardMessage") ? json({ ok: true, result: forwarded({ forward_origin: { type: "channel", chat: { id: SERIES }, message_id: 42, date: 1 } }) }) : json({ ok: true, result: true }))).api.probeChannelMessage("movie", 42)).toEqual({ status: "error", code: "unexpected_forward" });
+  it("reports a non-media message, and an unreadable forward as uninspectable", async () => {
+    const reply = (result: unknown) => async (url: string) => (url.endsWith("/forwardMessage") ? json({ ok: true, result }) : json({ ok: true, result: true }));
+    expect(await client(reply(forwarded({ caption: undefined, document: undefined, text: "hi" }))).api.probeChannelMessage("movie", 42)).toEqual({ status: "not_media" });
+    expect(await client(reply(forwarded({ forward_origin: { type: "channel", chat: { id: SERIES }, message_id: 42, date: 1 } }))).api.probeChannelMessage("movie", 42)).toEqual({ status: "uninspectable", code: "unexpected_forward" });
+    expect(await client(reply({ message_id: 900 })).api.probeChannelMessage("movie", 42)).toEqual({ status: "uninspectable", code: "unexpected_forward" });
   });
 
-  it("needs a reconciliation chat", async () => {
+  it("needs a recovery group", async () => {
     const { fetch, api } = client(noNetwork, regularFile, config({ ...ENV, TELEGRAM_RECONCILE_CHAT_ID: undefined }));
-    expect(await api.probeChannelMessage("movie", 42)).toEqual({ status: "error", code: "reconcile_chat_not_configured" });
+    expect(await api.probeChannelMessage("movie", 42)).toEqual({ status: "blocked", code: "reconcile_chat_not_configured" });
+    expect(await api.checkRecoveryAccess("movie")).toEqual({ status: "blocked", code: "reconcile_chat_not_configured" });
     expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("recovery access check (read-only)", () => {
+  const chat = (id: number, extra: Record<string, unknown> = {}) => json({ ok: true, result: { id, type: "channel", ...extra } });
+
+  it("reads the kind's channel and the recovery group with the kind's bot, and nothing else", async () => {
+    for (const [kind, token, channel] of [["movie", MOVIE_TOKEN, MOVIES], ["series", SERIES_TOKEN, SERIES]] as const) {
+      const { fetch, api } = client(async (_url, init) => chat(JSON.parse(String(init.body)).chat_id));
+      expect(await api.checkRecoveryAccess(kind)).toEqual({ status: "ok" });
+      expect(fetch.mock.calls.map(([url]) => url)).toEqual([`http://127.0.0.1:8081/bot${token}/getChat`, `http://127.0.0.1:8081/bot${token}/getChat`]);
+      expect(fetch.mock.calls.map(([, init]) => JSON.parse(String(init.body)))).toEqual([{ chat_id: channel }, { chat_id: OPS }]);
+    }
+  });
+
+  it("stops before any marker when the channel protects its content", async () => {
+    const { fetch, api } = client(async () => chat(MOVIES, { has_protected_content: true }));
+    expect(await api.checkRecoveryAccess("movie")).toEqual({ status: "blocked", code: "channel_content_protected" });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("maps failures without reading descriptions", async () => {
+    expect(await client(async () => json({ ok: false, error_code: 400, description: "Bad Request: chat not found" }, 400)).api.checkRecoveryAccess("movie")).toEqual({ status: "blocked", code: "get_chat_rejected_400" });
+    expect(await client(async () => json({ ok: false, error_code: 429, description: "x", parameters: { retry_after: 3 } }, 429)).api.checkRecoveryAccess("movie")).toEqual({ status: "rate_limited", retryAfterSeconds: 3 });
+    expect(await client(async () => chat(SERIES)).api.checkRecoveryAccess("movie")).toEqual({ status: "blocked", code: "get_chat_unexpected_reply" });
+  });
+});
+
+describe("recovery marker post", () => {
+  const MARKER_TEXT = buildRecoveryMarker(FP, 1, new Date("2026-09-25T10:00:00Z"));
+  const sent = (chatId: number, text = MARKER_TEXT, messageId = 77) => json({ ok: true, result: { message_id: messageId, date: 1_790_000_000, chat: { id: chatId, type: "channel" }, text } });
+
+  it("posts the movie marker with the movie bot to the Movies channel, and the series marker with the series bot to the Series channel", async () => {
+    for (const [kind, token, channel] of [["movie", MOVIE_TOKEN, MOVIES], ["series", SERIES_TOKEN, SERIES]] as const) {
+      const { fetch, api } = client(async () => sent(channel));
+      expect(await api.postRecoveryMarker(kind, MARKER_TEXT)).toEqual({ status: "posted", messageId: 77 });
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(fetch.mock.calls[0][0]).toBe(`http://127.0.0.1:8081/bot${token}/sendMessage`);
+      expect(JSON.parse(String(fetch.mock.calls[0][1].body)).chat_id).toBe(channel);
+    }
+  });
+
+  it("is a text message only: no document, file, path or caption, and never sendDocument", async () => {
+    const { fetch, api } = client(async () => sent(MOVIES));
+    await api.postRecoveryMarker("movie", MARKER_TEXT);
+    expect(JSON.parse(String(fetch.mock.calls[0][1].body))).toEqual({ chat_id: MOVIES, text: MARKER_TEXT, disable_notification: true, link_preview_options: { is_disabled: true } });
+    expect(fetch.mock.calls.some(([url]) => /sendDocument|sendVideo|deleteMessage/.test(url))).toBe(false);
+  });
+
+  it("refuses any text that is not a marker, without a network call", async () => {
+    const { fetch, api } = client(noNetwork);
+    for (const text of [caption(), `velora-src:${FP}`, "C:\\Media\\Movies\\John.Wick.2014.VJ.Junior.mkv", `${MARKER_TEXT}\n${caption()}`, ""]) {
+      expect(await api.postRecoveryMarker("movie", text)).toEqual({ status: "blocked", code: "marker_text_invalid" });
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not accept a reply for another chat or other text as the upper bound", async () => {
+    expect(await client(async () => sent(SERIES)).api.postRecoveryMarker("movie", MARKER_TEXT)).toEqual({ status: "blocked", code: "marker_unexpected_reply" });
+    expect(await client(async () => sent(MOVIES, "edited")).api.postRecoveryMarker("movie", MARKER_TEXT)).toEqual({ status: "blocked", code: "marker_unexpected_reply" });
+    expect(await client(async () => Promise.reject(Object.assign(new Error("t"), { name: "TimeoutError" }))).api.postRecoveryMarker("movie", MARKER_TEXT)).toEqual({ status: "transient", code: "marker_timeout" });
+    expect(await client(async () => json({ ok: false, error_code: 403, description: "Forbidden: not enough rights" }, 403)).api.postRecoveryMarker("movie", MARKER_TEXT)).toEqual({ status: "blocked", code: "telegram_forbidden" });
+  });
+});
+
+describe("bounded recovery over the real client (fake Telegram)", () => {
+  /** A fake local Bot API: channel messages by id, a marker landing at `markerId`, and no delete rights anywhere. */
+  function telegramServer(messages: Record<number, Record<string, unknown>>, markerId: number) {
+    return async (url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      if (url.endsWith("/getChat")) return json({ ok: true, result: { id: body.chat_id, type: "channel" } });
+      if (url.endsWith("/sendMessage")) return json({ ok: true, result: { message_id: markerId, date: 1_790_000_000, chat: { id: body.chat_id, type: "channel" }, text: body.text } });
+      if (url.endsWith("/deleteMessage")) return json({ ok: false, error_code: 400, description: "Bad Request: message can't be deleted" }, 400);
+      if (url.endsWith("/forwardMessage")) {
+        const message = messages[body.message_id];
+        if (!message) return json({ ok: false, error_code: 400, description: "Bad Request: message to forward not found" }, 400);
+        return json({ ok: true, result: { message_id: 5000 + body.message_id, date: 1_790_000_500, chat: { id: OPS, type: "supergroup" }, forward_origin: { type: "channel", chat: { id: MOVIES, type: "channel" }, message_id: body.message_id, date: 1_790_000_000 }, ...message } });
+      }
+      throw new Error(`unexpected call ${url}`);
+    };
+  }
+  const transport = (api: ReturnType<typeof client>["api"]) => ({
+    checkAccess: () => api.checkRecoveryAccess("movie"),
+    postMarker: (text: string) => api.postRecoveryMarker("movie", text),
+    probe: (id: number) => api.probeChannelMessage("movie", id),
+  });
+  const run = (api: ReturnType<typeof client>["api"]) =>
+    reconcileUpload({ fingerprint: FP, sizeBytes: SIZE, attemptNumber: 1, floorMessageId: 10, transport: transport(api), sleep: async () => {}, now: () => new Date("2026-09-25T10:00:00Z") });
+
+  it("finds the file behind a 150-id deleted gap, although neither marker nor copies can be deleted", async () => {
+    const { fetch, api } = client(telegramServer({ 161: { caption: caption(), document: { file_id: "f", file_unique_id: "u", file_size: SIZE } } }, 175));
+    expect(await run(api)).toMatchObject({ status: "found", record: { messageId: 161, sourceFingerprint: FP } });
+    const calls = fetch.mock.calls.map(([url, init]) => ({ method: url.slice(url.lastIndexOf("/") + 1), body: JSON.parse(String(init.body)) }));
+    // Nothing was ever deleted from the channel, and no media was sent.
+    expect(calls.filter(({ method }) => method === "deleteMessage").every(({ body }) => body.chat_id === OPS)).toBe(true);
+    expect(calls.some(({ method }) => /sendDocument|sendVideo/.test(method))).toBe(false);
+    expect(calls.filter(({ method }) => method === "sendMessage")).toHaveLength(1);
+    expect(calls.filter(({ method }) => method === "forwardMessage").map(({ body }) => body.message_id)).toEqual(Array.from({ length: 164 }, (_, index) => 11 + index));
+  });
+
+  it("confirms absence only across the full interval, and a non-forwardable message blocks that conclusion", async () => {
+    expect(await run(client(telegramServer({ 12: { text: "a note" } }, 40)).api)).toMatchObject({ status: "not_found_confirmed", marker: { messageId: 40 } });
+    const service = async (url: string, init: RequestInit) =>
+      url.endsWith("/forwardMessage") && JSON.parse(String(init.body)).message_id === 20
+        ? json({ ok: false, error_code: 400, description: "Bad Request: message can't be forwarded" }, 400)
+        : telegramServer({}, 40)(url, init);
+    expect(await run(client(service).api)).toEqual({ status: "incomplete", reason: "uninspectable_message", messageIds: [20] });
   });
 });
 

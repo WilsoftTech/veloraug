@@ -211,21 +211,63 @@ export type UploadOutcome =
   | { status: "failed"; code: string; retryable: boolean; retryAfterSeconds: number | null }
   | { status: "uncertain"; code: string };
 
+/**
+ * A recovery call to Telegram that produced no usable answer. None of these
+ * is ever read as "the message does not exist".
+ */
+export type RecoveryCallFailure =
+  /** 429. `retryAfterSeconds` is Telegram's `retry_after`, when given. */
+  | { status: "rate_limited"; retryAfterSeconds: number | null }
+  /** Timeout, network error, 5xx, unreadable reply: ask again later. */
+  | { status: "transient"; code: string }
+  /** Permission or configuration problem: an operator must act. */
+  | { status: "blocked"; code: string };
+
 /** One channel message looked up during reconciliation. */
 export type ChannelProbeResult =
   | { status: "found"; record: TelegramMediaRecord }
-  /** A message exists at that id but carries no video or document. */
+  /** A forwardable message with no video or document (text, a recovery marker). */
   | { status: "not_media" }
+  /** Telegram reports no message at this id: deleted, or never used. */
   | { status: "missing" }
-  | { status: "error"; code: string };
+  /**
+   * Something is, or may be, at this id, but it could not be read: a service
+   * message, protected content, or a refusal the probe cannot classify. It is
+   * never treated as missing.
+   */
+  | { status: "uninspectable"; code: string }
+  | RecoveryCallFailure;
 
-export type ChannelProbe = (messageId: number) => Promise<ChannelProbeResult>;
+/** Read-only check that recovery can run for one kind's channel. */
+export type RecoveryAccessResult = { status: "ok" } | RecoveryCallFailure;
+
+/** Posting a recovery marker (a short text message, never media). */
+export type MarkerPostResult = { status: "posted"; messageId: number } | RecoveryCallFailure;
+
+/** The Telegram operations recovery uses, already bound to one bot and channel. */
+export interface RecoveryTransport {
+  checkAccess(): Promise<RecoveryAccessResult>;
+  postMarker(text: string): Promise<MarkerPostResult>;
+  probe(messageId: number): Promise<ChannelProbeResult>;
+}
+
+/** The marker that bounded a scan from above, and when it was posted (local clock). */
+export interface RecoveryMarker {
+  messageId: number;
+  postedAt: string;
+}
 
 export type ReconciliationResult =
-  | { status: "confirmed"; record: TelegramMediaRecord }
-  | { status: "not_found"; scannedThrough: number }
-  | { status: "ambiguous"; reason: "multiple_matches" | "size_mismatch" | "scan_incomplete"; messageIds: number[] }
-  | { status: "unavailable"; code: string };
+  /** Exactly one match with equal size, and every id in the interval inspected. */
+  | { status: "found"; record: TelegramMediaRecord; marker: RecoveryMarker }
+  /** Every id strictly between the floor and the marker was inspected; no match. */
+  | { status: "not_found_confirmed"; floorMessageId: number; marker: RecoveryMarker }
+  | { status: "ambiguous"; reason: "multiple_matches" | "size_mismatch"; messageIds: number[] }
+  /** Part of the interval could not be inspected, or no interval could be set. */
+  | { status: "incomplete"; reason: "floor_unknown" | "floor_not_below_marker" | "interval_too_large" | "uninspectable_message"; messageIds: number[] }
+  | { status: "rate_limited"; retryAfterSeconds: number | null }
+  | { status: "transient"; code: string }
+  | { status: "permission_blocked"; code: string };
 
 /**
  * What the server (Supabase, through the worker boundary) knows about a source.
@@ -268,8 +310,11 @@ export type ReconcileDecision =
   | { action: "abandon" }
   /** Not found yet, but the server may still be uploading: check again later. */
   | { action: "wait"; reason: string }
+  /** Conflicting evidence: blocked until a reviewer decides. */
   | { action: "review"; reason: string }
-  | { action: "retry_later"; code: string };
+  /** The scan could not finish: stays uncertain until an operator acts. Never uploads. */
+  | { action: "hold"; reason: string }
+  | { action: "retry_later"; code: string; retryAfterSeconds: number | null };
 
 // ---------------------------------------------------------------------------
 // Lifecycle

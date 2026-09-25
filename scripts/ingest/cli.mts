@@ -14,6 +14,7 @@
 // Tokens are never printed. Paths are shown only in this terminal.
 import { readFile, stat } from "node:fs/promises";
 import { basename, extname, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import * as z from "zod";
 import { parseFilename } from "@/lib/ingestion/parser";
@@ -202,6 +203,7 @@ function uploaderDeps(store: Journal, config: LocalBotApiConfig, server: Ingesti
       return Math.max(0, ...entries.filter((entry) => entry.kind === kind && entry.telegram).map((entry) => entry.telegram!.messageId));
     },
     now: () => new Date(),
+    sleep: (ms) => sleep(ms),
   };
 }
 
