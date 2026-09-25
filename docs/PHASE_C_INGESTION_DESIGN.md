@@ -2,7 +2,9 @@
 
 Date: 2026-09-25
 Baseline: `phase-a-foundation` at `0b70ac1` (Phases A and B complete). Hosted: 8 migrations.
-Status: **C1 contract checkpoint implemented locally. No migration. Not pushed.**
+Status: **C1 contract checkpoint implemented locally. C2A transport, recovery and
+tooling implemented locally; C2A migration 9 blocked on a schema decision (see
+"C2A"). No migration added. Not pushed.**
 
 This checkpoint defines how a local VJ-translated media file becomes a reviewed,
 publishable catalogue record. It adds the pure domain modules and their tests, and
@@ -395,3 +397,276 @@ Allowing approval from `review_pending` fails one test.
    `lib/catalogue-boundary.test.ts`.
 6. A trial on a small, non-production sample of real filenames, to measure parser
    coverage before any bulk upload.
+
+---
+
+# C2A — Secure upload foundation
+
+Date: 2026-09-25. Base: C1 (`5beff50`, `091622c`) on remote `0b70ac1`.
+Status: **transport, recovery, journal, TMDB adapter and CLI implemented and tested
+locally. Migration 9 NOT written: blocked on the schema decision below.** No upload,
+no Telegram call, no hosted change.
+
+## Approved architecture
+
+- **Transport:** a self-hosted Telegram Bot API server (`telegram-bot-api --local`),
+  not MTProto user sessions. Each bot uploads its own files, so `file_id` is valid for
+  the bot that will later serve it.
+- **Confirmation:** the `sendDocument` reply is the evidence of an upload. Velora does
+  not wait for a webhook or update, and none arrives: a bot receives no update for
+  its own channel post.
+- **Database writes:** narrow, worker-only `SECURITY DEFINER` commands. There are no
+  table grants for `service_role`, and no publication command.
+
+## C2A blocker: migration 9 needs a table change first
+
+The brief allows migration 9 only for the worker boundary, and requires a stop before
+any table change. Mapping the uploader onto the existing schema gives this:
+
+| Need | Existing schema | Fits? |
+| --- | --- | --- |
+| Persist the `sendDocument` message | `private.telegram_media`: every column maps from the reply (`toTelegramMediaRecord`) | **Yes** |
+| "DB knows the upload is starting" before any message exists | Only `ingestion_events` can hold ingestion state, and `telegram_update_id bigint NOT NULL` with `update_kind in ('channel_post','edited_channel_post')` | **No**: there is no update, and a synthetic `update_id` is forbidden |
+| One registration per source fingerprint (idempotency) | The fingerprint exists only inside `parsed jsonb`, with no unique key | **No**: a unique key cannot be enforced |
+| Match evidence for an uploaded file | `metadata_match_candidates.ingestion_event_id NOT NULL` | **No**: it needs an event row first |
+
+So an uploader-originated item has no valid row, before or after upload. Worker RPCs
+over the current tables could record `telegram_media` only, which leaves the upload
+crash window unprotected on the server side. This is C1 decision point 2, now
+confirmed.
+
+### Options (decision needed)
+
+**A. Extend `private.ingestion_events` (recommended, smallest).** In migration 9:
+
+- add `origin text not null default 'webhook'` with a check of
+  `('webhook','uploader')`;
+- make `telegram_update_id` and `update_kind` nullable, with a check that they are
+  present exactly when `origin = 'webhook'`. The existing unique
+  `(bot_type, telegram_update_id)` is unchanged, since NULLs are distinct;
+- add `source_fingerprint text`, checked against `^sf1-[0-9a-f]{64}$`, required for
+  `uploader` rows, with a partial unique index `where source_fingerprint is not null`;
+- add `upload_state text` (`not_uploaded|uploading|uploaded|upload_failed`, uploader
+  rows only), `upload_attempt_count`, `upload_started_at`, `source_size_bytes`;
+- add a partial unique index on `telegram_media_id` for uploader rows (one file, one
+  item).
+
+Candidates, statuses and every existing webhook row keep working unchanged. No code
+path writes `ingestion_events` yet, and every role's privileges are revoked, so no
+backfill is expected. Confirm the hosted row count read-only before deploying. Optional: add
+`private.telegram_channels (bot_type primary key, chat_id)`, so the database itself
+rejects media recorded for a channel that is not the bot's (forged channel id).
+
+**B. New `private.ingestion_sources` table**, keyed by fingerprint, holding the
+upload track, with candidates re-pointed to it. This is cleaner in isolation, but it
+adds a second lifecycle root and touches the candidate FK. Not recommended.
+
+## Worker boundary threat model (design for migration 9)
+
+| Question | Answer |
+| --- | --- |
+| Who calls | The uploader CLI on the operator machine only, through PostgREST `rpc/` with the service-role key. The key is never in Vercel or a browser |
+| Executing role | Functions owned by `postgres`, `SECURITY DEFINER`, `search_path = ''`, schema-qualified. `service_role` still has **no** privilege on the private tables, and definer rights are the only bridge. EXECUTE is revoked from `PUBLIC`, `anon` and `authenticated`, and granted to `service_role` only, per function |
+| Trusted input | None. Every argument is validated: fingerprint pattern, `bot_type` enum, positive ids, bounded text, error code `^[a-z0-9_]{1,100}$`, caption token equal to the fingerprint, size equal to the registered size |
+| Tables touched | `private.ingestion_events`, `private.telegram_media` and, for evaluation, `private.metadata_match_candidates`. Never `public.*` |
+| Another record's id | Commands take no internal ids. They are keyed by `(fingerprint, bot_type)`; a `bot_type` mismatch with the registered row is refused |
+| Arbitrary transitions | Each command is exactly one transition, guarded by `where upload_state = …` under a row lock: start (`not_uploaded`/`upload_failed` → `uploading`), record (`uploading` → `uploaded`), fail (`uploading` → `upload_failed`) |
+| Replay / idempotency | Start: the unique fingerprint makes re-registration a no-op, and a start while `uploading` is refused (reconcile first). Record: the same message again returns `already_recorded`; a different message for the same fingerprint, or a message already linked to another fingerprint, returns `conflict` and sets `needs_review`. `telegram_media_delivery_key` stays the uniqueness authority. A duplicate `file_unique_id` is flagged for review (D3), never merged |
+| Forged channel ids | Without `telegram_channels`, the database accepts any `chat_id`; the adapter and webhook allow-lists are then the only check. With it, the check is declarative |
+| Error disclosure | Generic codes only (`ingest_illegal_transition`, `ingest_conflict`, `ingest_invalid_input`). No row data or SQL detail |
+| Publication | Impossible through these commands: none writes `public.*`, sets `status = 'published'` or sets a candidate `approved`. Evaluation writes `pending` candidates only. Approval and publication stay behind the C3/C4 reviewer contract, so a compromised uploader cannot publish |
+
+Proposed commands, mirroring `lib/uploader/store.ts`:
+`ingest_upload_status`, `ingest_upload_start`, `ingest_upload_record`,
+`ingest_upload_fail` and, if C2B needs it, `ingest_record_evaluation`. That is five
+functions and no CRUD. A dedicated `ingest_worker` Postgres role with a minted JWT
+would narrow the key's blast radius further. It needs custom JWT issuance, so it is
+deferred to G4 hardening.
+
+## Local Bot API adapter (`lib/telegram/local-bot-api.ts`)
+
+- **Fails closed.** `TELEGRAM_BOT_API_URL` has no default. Any `*.telegram.org` host
+  is refused, as are credentials, paths or queries in the URL, and plain HTTP off
+  loopback (the token is in the request path). Missing or invalid configuration
+  refuses to run. Errors name variables, never values.
+- **Routing.** `transport` (bot plus channel) must equal the ingestion `kind`, and the
+  configured channel must equal the journal's `intendedChannelId`, recorded at scan
+  time. A movie through the series transport, or the reverse, fails before the
+  network. A file name never selects a channel.
+- **No whole-file reads.** `--local` mode: the request body is a `file://` URI
+  (optionally translated by `TELEGRAM_BOT_API_PATH_MAP`), and the server reads the
+  file from its own disk. The module imports no file-reading API; only an injected
+  `stat` is used.
+- **Preflight (no network):** regular file; supported extension; size > 0 and
+  ≤ ceiling; size on disk equals size at scan time; valid fingerprint; the caption
+  carries exactly that fingerprint; caption ≤ 1024 characters.
+- **Reply handling.** `ok:true` is validated with the C1 message schema. The chat must
+  equal the target channel, media must be present, the caption token must match,
+  and `file_size`, when present, must match. Any failed check is `uncertain`, never a
+  partial identity. Optional fields map to `null`.
+- **Outcome classes.** `failed` (definite): a 4xx refusal, 429 with `retry_after`, or
+  connection refused. `uncertain`: a timeout, dropped connection, 5xx, or an
+  unreadable or malformed reply. Fetch errors are reduced to codes, so no URL or token
+  can reach a log, error or journal.
+
+### Maximum file size
+
+`TELEGRAM_MAX_FILE_BYTES = 2000 * 1024 * 1024 = 2,097,152,000 bytes` (2000 MiB),
+unchanged from C1. This is Telegram's upload ceiling: 4000 parts of 512 KiB, the
+limit behind the documented "2000 MB". Exactly the ceiling passes; one byte more is
+`file_too_large` (permanent) at scan, inspect and preflight. C2B must confirm it with
+one real file just under the ceiling. A refusal would be a definite 4xx, so it cannot
+cause a duplicate. `scan` prints the largest file and its headroom. No disk was
+scanned in C2A.
+
+### Caption and fingerprint
+
+```text
+John Wick (2014)
+VJ Junior
+Movie                      (or: Series S01E02)
+velora-src:sf1-<64 hex>
+```
+
+The caption is deterministic plain text (no `parse_mode`). Control characters are
+removed and each human line is limited to 200 characters, so the whole caption
+always fits in 1024. The token is always the last line and always intact. It never
+contains a path, file name, token or secret. `fingerprintFromCaption` (C1) parses it
+back; zero or conflicting tokens give `null`.
+
+## Crash window and reconciliation (`lib/ingestion/recovery.ts`, `lib/uploader/upload.ts`)
+
+The order of evidence for one upload:
+
+1. journal `uploading`, with a new attempt (`startedAt`, `channelHighWater`);
+2. server `ingest_upload_start`. If it refuses, nothing is sent;
+3. `sendDocument`;
+4. journal stores the validated reply;
+5. server `ingest_upload_record`;
+6. journal `dbAcknowledgedAt`.
+
+| Crash or outcome | Recovery |
+| --- | --- |
+| Before 3 | Reconcile, then abandon after the grace period. Nothing was posted |
+| After 3, before 4 (the crash window) | Journal `uploading` → `reconcile`: probe the channel for the caption token → `record_confirmed` → server → journal. **No re-upload** |
+| After 4, before 5/6 | `record_in_db`: replay the journal's reply. No Telegram call |
+| After 6 | `none` |
+| `uncertain` (timeout, 5xx) | Stays `uploading`. `upload` refuses and routes to `resume`, which reconciles first |
+| Definite failure | `upload_failed`; an explicit retry is allowed (≤ 5 attempts) |
+| Server `uploaded`, journal behind | `adopt_server` |
+| Journal and server identity differ | `review`; never overwritten |
+
+**Reconciliation contract.** The Bot API has no channel-history method. The probe
+forwards message id *n* from the channel into the private `TELEGRAM_RECONCILE_CHAT_ID`
+chat, where caption and file identity survive a forward. It reads the copy and
+deletes it. It scans upward from the attempt's `channelHighWater`. Uploads are
+serial, so the file, if posted, has a higher id. The end of the channel is 20
+consecutive missing ids; the hard bound is 500 probes. Results:
+
+- **confirmed**: exactly one match with equal size;
+- **not_found**;
+- **ambiguous**: more than one match, a size mismatch, or the bound reached (review,
+  never upload);
+- **unavailable**: a Telegram error (retry later).
+
+The local server keeps uploading after the HTTP call times out, so `not_found` inside
+the 3-hour grace period means **wait**, and after it, **abandon**. Abandoning only
+permits a later explicit upload.
+
+Limits: forwarding fails on channels with **protected content**. That is reported as
+`channel_content_protected`, never as missing. Confirm the channel setting in C2B.
+Probes are rate-limited like any bot call, and the bound keeps them few.
+
+## Local journal (`lib/uploader/journal.ts`)
+
+- One JSON file per fingerprint in `~/.velora-ingest/journal`, or
+  `VELORA_INGEST_JOURNAL_DIR`. The repository is refused except for the Git-ignored
+  `/.velora-ingest/`.
+- Atomic replace: write a temp file with `flush`, then `rename`. A torn temp file from
+  a crash is ignored, and a corrupt entry is refused rather than guessed. A `.lock`
+  file allows one writer.
+- It holds the paths, kind, `intendedChannelId`, C1 `IngestionState`, the last plan,
+  attempts, the validated Telegram record and the DB acknowledgement. It holds no
+  tokens or keys.
+- It is operational only. Once Supabase acknowledges an upload, the server record is
+  authoritative (`decideResume`).
+
+## TMDB ingestion adapter (`lib/tmdb/ingestion-search.ts`)
+
+`searchTmdbForIngestion` goes through the existing `tmdbFetch` transport to
+`/search/movie` or `/search/tv` and maps results to C1 `TmdbCandidate`. The year is
+deliberately not used as a filter, because the matcher needs namesakes and ±1 years.
+It is allowlisted in `lib/catalogue-boundary.test.ts`, and a new assertion checks
+that no app, component or library module imports it. Normal browsing still makes
+zero TMDB requests.
+
+## CLI (`npm run ingest -- <command>`)
+
+The CLI runs on plain Node 24 through native type stripping plus a 30-line resolve
+hook (`scripts/ingest/register.mjs`, for the `@/` alias and a `server-only` stub). It
+adds no dependency. `.env.local` is loaded with `--env-file-if-exists`.
+
+| Command | C2A behaviour |
+| --- | --- |
+| `scan <root> --kind movie\|series [--vjs f] [--match]` | Walk, fingerprint (discovery-key cache), parse, plan, journal. Prints the largest file's headroom |
+| `inspect <file> --kind … [--full-hash]` | One plan, with the caption and optional full SHA-256. Writes nothing |
+| `upload [--limit n]` | Dry run: lists files and captions |
+| `upload --execute` | **Refused.** It needs the Bot API configuration **and** the worker boundary; `unavailableStore` makes execution impossible in C2A |
+| `resume [--execute]` | Dry run: prints each recovery decision. `--execute` is refused like `upload` |
+| `status` | Counts per plan, upload state, DB acknowledgement and stop reason |
+
+## Environment contract
+
+| Runtime | Variables |
+| --- | --- |
+| Next.js server | Unchanged. No Telegram variable is read by the app |
+| Uploader CLI | `TELEGRAM_BOT_API_URL`, `TELEGRAM_MOVIES_BOT_TOKEN`, `TELEGRAM_MOVIES_CHANNEL_ID`, `TELEGRAM_SERIES_BOT_TOKEN`, `TELEGRAM_SERIES_CHANNEL_ID`, `TELEGRAM_RECONCILE_CHAT_ID`, optional `TELEGRAM_BOT_API_PATH_MAP`, `VELORA_INGEST_JOURNAL_DIR`; C2B adds the Supabase URL and service-role key for the worker RPCs |
+| Bot API server | Its own `--api-id` / `--api-hash` (or `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` in its environment), `--local`, `--dir`, `--http-ip-address=127.0.0.1` |
+
+The names follow the operator's existing `.env.local` (`TELEGRAM_MOVIES_*`,
+`TELEGRAM_SERIES_*`).
+
+## C2B prerequisites
+
+1. **Schema decision for migration 9** (option A or B above), then migration 9 with
+   pgTAP tests: permissions, commands, idempotency, conflicts, illegal transitions,
+   no publication, and a definer audit (owner, `prosecdef`, `search_path`, exact
+   ACLs). After that, a `SupabaseIngestionStore` implementing `IngestionStore` and a
+   separately authorized hosted deploy.
+2. **Telegram credentials:** `api_id`/`api_hash` from my.telegram.org, for the server
+   only.
+3. **Local Bot API server:** build `telegram-bot-api` (natively on Windows via vcpkg,
+   or under WSL2/Docker). Run it with `--local --dir=<persistent dir>
+   --http-ip-address=127.0.0.1`. With Docker or WSL, mount the library read-only and
+   set `TELEGRAM_BOT_API_PATH_MAP`. The `--dir` directory holds the bots' sessions
+   and must survive restarts. A restart drops in-flight uploads, which then surface as
+   `uncertain` and are reconciled.
+4. **Move both bots off the cloud Bot API:** call `logOut` once per bot against
+   `api.telegram.org`, then use them only through the local server. After `logOut`, a
+   bot cannot log back into the cloud server for 10 minutes. Cloud webhooks and
+   `getUpdates` stop, and any other service using those tokens breaks. **Not executed
+   in C2A.**
+5. **Channels:** both bots are admins of their own channel only.
+   `TELEGRAM_SERIES_CHANNEL_ID` in the current `.env.local` is **not** in numeric
+   `-100…` form and must be corrected (the movies value is). Channel content
+   protection must be off for reconciliation, or another probe must be approved.
+6. **Reconciliation chat:** a private chat or group where both bots can post and
+   delete.
+7. **Trial:** `scan` a small, non-production sample to measure parser and VJ
+   coverage. Then one explicit `upload --execute` of one small file, a crash drill
+   (kill mid-upload, then `resume`), and one file near the 2000 MiB ceiling.
+
+## C2A tests
+
+| File | Tests | Covers |
+| --- | --- | --- |
+| `lib/telegram/local-bot-api.test.ts` | 42 | Fail-closed configuration and no cloud fallback; routing and cross-channel refusal; every preflight rejection before the network (ceiling ±1, zero bytes, extension, changed file); file-URI upload and no file reads; reply mapping, optional fields and malformed replies; 4xx/5xx/429/timeout/connection classes; no token in errors or logs; forward probe (found, missing, protected, wrong origin); deterministic caption |
+| `lib/uploader/uploader.test.ts` | 31 | Bounded reconciliation (confirmed, gaps, not found, multiple, size mismatch, incomplete, unavailable); resume decisions; journal (round trip, atomic replace, torn temp file, corruption, no secrets, lock, location); the §26 crash scenarios end to end; no publication; C2A refusal without the worker boundary |
+| Boundary tests | +1 | Ingestion TMDB adapter unreachable from app code. The C1 client-import test now also covers `lib/telegram` and `lib/uploader` |
+
+Mutation checks, each caught by at least one test:
+
+- removing the reconcile-before-retry guard (3 failures);
+- trusting absence without the grace period (2);
+- adopting multiple matches (2);
+- removing the transport/kind check (1).
