@@ -1050,6 +1050,9 @@ Recovery is slow on purpose. A rate limit is never read as "not found".
 
 ## Lower bound on a fresh machine: migration 10 required (proposed, not created)
 
+> Superseded by C2B.1B (below), which implemented migration 10. Its design differs
+> from this proposal where noted there.
+
 Migration 9 state is **not** enough for a safe floor without the journal.
 `ingest_upload_status` returns neither the attempt's start time nor any channel
 position. Uploaded rows from other sources cannot be ordered against the uncertain
@@ -1159,3 +1162,191 @@ results counted as inspected; the interval ending one id early; an unknown floor
 scanning from id 1; an incomplete scan abandoning; the grace period ignored; a
 marker below the floor accepted; "can't be forwarded", 429 and 5xx read as missing;
 the marker sent to the other kind's channel; protected content not detected.
+
+# C2B.1B — Migration 10: durable Telegram recovery bounds
+
+Date: 2026-09-25. Branch: `phase-a-foundation`, remote at `6dc9141`, with C2B.1A
+(`102c6cf`, `d9cbe35`) and this checkpoint local and not pushed. Migration 10,
+`20260925194322_ingestion_recovery_bounds.sql`, is **local only, not deployed**.
+No Telegram call, no hosted change, no channel configured.
+`REAL_TELEGRAM_UPLOADS_AUTHORIZED` is still `false`.
+
+This supersedes the "migration 10 required (proposed)" section of C2B.1A. Crash
+recovery no longer depends on the local journal: a fresh machine resumes from
+Supabase state alone.
+
+## Schema change
+
+| Object | Change |
+| --- | --- |
+| `private.telegram_channels.checkpoint_message_id` | `bigint not null default 0`, CHECK `between 0 and 2147483647` |
+| `private.ingestion_events.upload_floor_message_id` | `bigint`, CHECK null, or (`origin = 'uploader'` and `between 1 and 2147483647`) |
+| `private.guard_upload_floor()` + trigger | The floor may change only when the attempt count increases (`ingest_recovery_floor_immutable`) |
+| `private.guard_channel_checkpoint()` + trigger | The checkpoint never decreases (`ingest_checkpoint_regression`). Changing a bot's `chat_id` resets it to 0, and is refused while that bot has an unresolved upload |
+
+Existing rows get no floor: nothing is fabricated. Hosted had 0 ingestion rows.
+An unresolved uploader row without a floor fails closed: status reports
+`null`, the worker holds, and the checkpoint cannot advance past it.
+`private.ingestion_events` stays the single lifecycle root. There is no new table
+and no second lifecycle.
+
+## Worker commands (all `public`, SECURITY DEFINER, owner `postgres`, `search_path = ''`)
+
+| Command | Change |
+| --- | --- |
+| `ingest_upload_start(p_source_fingerprint text, p_bot_type text, p_chat_id bigint, p_source_size_bytes bigint) returns table (upload_state text, upload_attempt_count integer, upload_floor_message_id bigint)` | Same arguments. Computes, persists and returns the floor. Dropped and recreated (the return type changed) |
+| `ingest_upload_status(p_source_fingerprint text, p_bot_type text)` | Also returns `upload_started_at timestamptz`, `upload_age_seconds bigint` and `upload_floor_message_id bigint`. Dropped and recreated |
+| `ingest_upload_record(…15 arguments…) returns text` | Same signature. A message at or below the attempt's floor returns `conflict` (review, `recovery_floor_not_below_message`) and is never recorded |
+| `ingest_upload_fail(text, text, text, text)` | Unchanged; it never touches the floor |
+| **New** `ingest_channel_checkpoint(p_bot_type text, p_chat_id bigint, p_message_id bigint) returns bigint` | Advance-only checkpoint (below) |
+
+New error codes: `ingest_recovery_floor_unknown` (start with no checkpoint and no
+recorded message in the channel), `ingest_recovery_unresolved` (a checkpoint advance
+while an upload in that channel is unresolved).
+
+## Floor semantics
+
+When a new attempt starts, the server computes, in the same transaction:
+
+```
+floor = greatest(channel checkpoint,
+                 max(message_id) of private.telegram_media for that bot and channel)
+```
+
+- Every message counted was posted before this transaction. A recorded message was
+  posted before it was recorded; a checkpoint was observed before it was reported.
+  The file is sent only after `ingest_upload_start` returns, so its id is larger than
+  the floor.
+- A floor of 0 (a new channel with no checkpoint) refuses the start. The operator
+  seeds the checkpoint once with an id seen in the channel
+  (`npm run ingest -- checkpoint --kind movie --message-id <n> --execute`). A new
+  channel's first message, the service message "channel created", is id 1.
+- The caller never supplies a floor: `ingest_upload_start` has no such argument,
+  service_role has no table privilege, and the trigger blocks any in-attempt change.
+- **Attempts.** A new floor is assigned exactly when a new attempt starts: the first
+  start, or a retry from `upload_failed` (a definite failure, or a verified-absent
+  abandonment). `uploading` and `uncertain` cannot restart (migration 9), so an
+  unresolved attempt keeps its floor through holds, retries of recovery and newer
+  uploads. `ingest_upload_fail` and `ingest_upload_record` never change it.
+
+## Checkpoint invariant
+
+> Every Telegram message id at or below a channel's checkpoint was posted before
+> every upload attempt that is still unresolved (`uploading` or `uncertain`) in that
+> channel, and before every attempt started after the checkpoint was set.
+
+The checkpoint does not prove that those messages still exist; deleted messages do
+not affect it. It is only a safe scan floor.
+
+`ingest_channel_checkpoint`:
+
+1. validates the arguments (bot type, a channel, an id in `1..2^31-1`);
+2. takes the channel's lock exclusively;
+3. resolves the allow-listed channel for that bot and `chat_id`
+   (`ingest_channel_not_allowed` otherwise), and locks its row;
+4. treats an id at or below the current checkpoint as a no-op: it returns the
+   current value, never regresses, and is safe to replay;
+5. refuses (`ingest_recovery_unresolved`) while any uploader row for that bot is
+   `uploading` or `uncertain`. `blocked` rows belong to a reviewer and need no scan;
+6. otherwise advances, and returns the new checkpoint.
+
+**Trust boundary.** The worker (service_role) reports ids it observed; the database
+cannot check them against Telegram. It decides only whether advancing is safe:
+monotonic, the right channel, and no unresolved upload. So a buggy or malicious
+worker can never move the checkpoint past an existing unresolved upload. An id
+reported too high affects only later attempts, and it fails closed:
+- a marker at or below the floor makes the scan `incomplete`;
+- a successful `sendDocument` at or below the floor goes to review in
+  `ingest_upload_record`.
+
+The uploader reports a marker only after the resolution it closed was recorded
+on the server. The report is best effort: a refusal or an outage only keeps later
+floors lower, which means a longer scan, never a skipped id.
+
+## Concurrency model
+
+`ingest_upload_start` takes `pg_advisory_xact_lock_shared(1001, k)`, and
+`ingest_channel_checkpoint` takes `pg_advisory_xact_lock(1001, k)`, where k is 1 for
+movie and 2 for series. Both take the lock before reading any checkpoint, media or
+upload state, and hold it to the end of the transaction. Plpgsql under READ
+COMMITTED takes a new snapshot per statement, so every read after the lock sees what
+committed before it.
+
+| Interleaving | Outcome |
+| --- | --- |
+| Start A holds the lock; checkpoint B arrives | B waits. Then it sees A's `uploading` row and refuses |
+| Checkpoint B holds the lock; start C arrives | C waits. Then it reads B's committed checkpoint. Safe: B's id was observed before C began |
+| Start A and start C together | Shared locks: both proceed. Each floor is computed from committed state only; a smaller floor is always safe |
+| A becomes `uncertain` (fail) | No lock needed. `uncertain` still blocks any advance, and A's persisted floor is untouched |
+| A's record commits during C's start | C may miss it; its floor is only lower (safe). A's own floor is fixed |
+
+pgTAP proves the lock contention with a second, independent session (dblink with a
+300 ms `lock_timeout`). With this transaction holding the start and checkpoint
+locks, the other session's checkpoint advance and its start both fail with `55P03`.
+A different lock key is free, which rules out a broken session. The orderings above
+are also run sequentially.
+
+## Fresh-machine recovery (`resolveRecoveryFloor`, `lib/ingestion/recovery.ts`)
+
+1. The uploader starts an attempt. The server persists the floor, and the journal
+   stores a copy (`recoveryFloorMessageId`).
+2. The process crashes, and the whole journal is lost.
+3. On another machine, `scan` recreates the entry, and `resume --server` or
+   `--execute` checks every entry against the server. That matters because only the
+   server still knows the upload is unresolved.
+4. `ingest_upload_status` returns the state, the floor, `upload_started_at` and
+   `upload_age_seconds`.
+5. The worker posts a recovery marker, scans only `(floor, marker)`, and finds the
+   file or rules it out (C2B.1A protocol).
+
+Floor priority:
+- The server floor is authoritative.
+- The journal copy only corroborates: equal means proceed; lower or higher means a
+  `reconcile_floor_conflict` hold with no Telegram call. The larger value is never
+  chosen silently.
+- No server floor (a pre-migration row) is a `reconcile_floor_unknown` hold.
+- The journal's own `channelHighWater` is informational and never a floor.
+
+The grace period uses the server's attempt age, read before the marker is posted and
+placed on the uploader's clock, so clock skew between the machines cannot shorten
+the 3 hours.
+
+**The journal's reduced role.** It holds local paths, plans, the sendDocument reply
+(replayed if the server missed it) and a copy of the floor. None of it is required
+for safety. Losing it costs a rescan, and nothing else.
+
+## Tests
+
+- pgTAP `006_ingestion_recovery_bounds.test.sql` (81). It covers:
+  - schema and checks;
+  - start refused without a floor;
+  - checkpoint validation, wrong or unconfigured channel, advance, lower and equal
+    no-ops, and owner regression refused;
+  - the floor persisted, returned, not forgeable and immutable, from the checkpoint
+    or the highest recorded message, channel-scoped;
+  - an unresolved attempt keeps its floor; a legitimate retry gets a new one;
+  - `uploading`, `uncertain` and legacy floorless rows block the checkpoint;
+    resolved and blocked rows do not;
+  - evidence at the floor goes to review; a channel change resets the checkpoint;
+  - fresh-machine status; lock modes and two-session contention;
+  - the exact ACL of all five commands; trigger functions; private-table and column
+    privileges; and the publication boundary.
+- `005` is updated for migration 10: five worker commands, fixture checkpoints, and
+  the start's third column. `003` adds `ingest_channel_checkpoint` to the reviewed
+  SECURITY DEFINER set.
+- `tests/integration/ingestion-recovery.test.ts` runs against local PostgREST with
+  the real store and uploader and a fake Telegram. Machine A crashes uncertain and
+  loses its journal. Machine B recovers from status alone: probes stay in
+  `(500, 520)`, it records 512, and the checkpoint becomes 520.
+- Unit tests cover `resolveRecoveryFloor`: agreement, lower and higher journal,
+  missing server floor, and clock skew. End to end they cover journal present,
+  absent, corrupt, lower, higher and empty; a new machine; a missing DB floor; a
+  retry with a new floor; and checkpoint offers. The store maps the new rows and
+  calls only the five commands. The CLI `checkpoint` command validates its input
+  and fails closed without configuration.
+
+## Deployment status
+
+Migration 10 is applied only to the local stack (clean bootstrap 1–10). Hosted
+still has 9 migrations. The hosted deployment needs separate authorization.
+Afterwards, each channel's checkpoint must be seeded once before its first upload.
