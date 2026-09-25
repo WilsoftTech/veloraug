@@ -2,9 +2,9 @@
 
 Date: 2026-09-25
 Baseline: `phase-a-foundation` at `0b70ac1` (Phases A and B complete). Hosted: 8 migrations.
-Status: **C1 contract checkpoint implemented locally. C2A transport, recovery and
-tooling implemented locally; C2A migration 9 blocked on a schema decision (see
-"C2A"). No migration added. Not pushed.**
+Status: **C1 on the remote. C2A (transport, recovery, tooling) and C2A.1
+(migration 9 worker boundary and RPC store) implemented and validated locally.
+Migration 9 is not deployed; nothing is pushed; no real upload has happened.**
 
 This checkpoint defines how a local VJ-translated media file becomes a reviewed,
 publishable catalogue record. It adds the pure domain modules and their tests, and
@@ -420,6 +420,10 @@ no Telegram call, no hosted change.
 
 ## C2A blocker: migration 9 needs a table change first
 
+> **Resolved in C2A.1** (2026-09-25): Option A was approved and implemented,
+> together with the channel allow-list. See "C2A.1" below. This section is kept
+> as the decision record.
+
 The brief allows migration 9 only for the worker boundary, and requires a stop before
 any table change. Mapping the uploader onto the existing schema gives this:
 
@@ -670,3 +674,227 @@ Mutation checks, each caught by at least one test:
 - trusting absence without the grace period (2);
 - adopting multiple matches (2);
 - removing the transport/kind check (1).
+
+---
+
+# C2A.1 — Migration 9: uploader-origin ingestion and the worker boundary
+
+Date: 2026-09-25. Base: remote `091622c` plus C2A (`7fb5c78`, `cb73ee6`, `1df0a2b`).
+Status: **implemented and validated locally. Migration 9 NOT deployed. No real
+upload. Not pushed.**
+
+Approved decisions:
+
+- Option A: `private.ingestion_events` stays the single ingestion lifecycle root.
+- A private Telegram channel allow-list.
+- `service_role` as the only caller of the worker commands.
+
+## Migration `20260925004059_ingestion_uploader_worker_boundary.sql`
+
+### Schema
+
+| Object | Change |
+| --- | --- |
+| `private.telegram_channels` (**new**) | `bot_type text primary key` (`movie`/`series`), `chat_id bigint not null unique`, checked `< -1000000000000` (a `-100…` channel id), `created_at`, `updated_at` with the shared trigger. It ships **empty** |
+| `private.ingestion_events` (altered) | Adds `origin` (`webhook` default / `uploader`), `source_fingerprint`, `source_size_bytes`, `upload_state`, `upload_attempt_count` (default 0), `upload_started_at`, `upload_failure_code`, `upload_failed_at`. `telegram_update_id` and `update_kind` drop `NOT NULL`; the shape checks below keep them mandatory for webhook rows |
+
+Constraints added to `ingestion_events`:
+
+- `origin_check`: `origin in ('webhook','uploader')`.
+- `source_fingerprint_check`: matches `^sf1-[0-9a-f]{64}$`.
+- `source_size_check`: 1 to 2,097,152,000 bytes.
+- `upload_state_check`: `uploading | uncertain | uploaded | upload_failed | blocked`.
+- `upload_attempt_count_check`: 0 to 5.
+- `upload_failure_code_check`: matches `^[a-z0-9_]{1,100}$`.
+- **`webhook_shape_check`**: a webhook row must have `telegram_update_id` and
+  `update_kind`, and every uploader column null or 0. That is exactly the B-1 shape.
+- **`uploader_shape_check`**: an uploader row must have no update id or kind; must
+  have a fingerprint, size, state, at least 1 attempt and a start time; must link
+  media **exactly when** `uploaded`; and must have a failure code exactly when it
+  has a failure time.
+
+Indexes added:
+
+- `ingestion_events_source_fingerprint_key`: **unique** `(source_fingerprint) where origin = 'uploader'`. This is the idempotency identity.
+- `ingestion_events_uploader_media_key`: **unique** `(telegram_media_id) where origin = 'uploader' and telegram_media_id is not null`. One delivery backs one uploader ingestion.
+
+`private.telegram_media` is unchanged. Every `sendDocument` field maps onto an existing
+column, optional Telegram fields stay `NULL`, and no update id is fabricated.
+
+### Upload state (independent of the review `status`)
+
+`status` stays the review track (`received`, `needs_review`, …); `upload_state` is
+the upload track. No worker command sets `matched`, `published` or an `approved`
+candidate. "Not started" is represented by the absence of a row, which
+`ingest_upload_status` reports as `new`.
+
+```text
+(no row)      -start->  uploading            (attempt 1)
+upload_failed -start->  uploading            (attempt + 1, at most 5)
+uploading     -record-> uploaded
+uncertain     -record-> uploaded             (reconciliation found it)
+upload_failed -record-> uploaded             (found after abandonment)
+uploading     -fail->   upload_failed (retryable | abandoned) | uncertain | blocked (permanent)
+uncertain     -fail->   upload_failed (abandoned) | uncertain | blocked (permanent)
+```
+
+- There is no `uploading`/`uncertain` → `start`: an interrupted attempt must be
+  reconciled first.
+- There is no automatic stale-attempt transition.
+- `uploaded` is final: a later `fail` is `ingest_illegal_transition`, and a different
+  message is a `conflict`.
+
+### Worker commands (all in `public`, for PostgREST `rpc/`)
+
+| Function | Returns | Purpose |
+| --- | --- | --- |
+| `ingest_upload_status(p_source_fingerprint text, p_bot_type text)` | one row: `upload_state` (`new` when absent), `upload_attempt_count`, `upload_failure_code`, `needs_review`, then the linked `telegram_media` identity (null unless uploaded) | Resume decisions and adoption of a server-recorded upload |
+| `ingest_upload_start(p_source_fingerprint text, p_bot_type text, p_chat_id bigint, p_source_size_bytes bigint)` | `(upload_state, upload_attempt_count)` | Register (idempotent, reusing the existing row) and start one attempt towards the allow-listed channel |
+| `ingest_upload_record(p_source_fingerprint, p_bot_type, p_chat_id, p_message_id, p_file_id, p_file_unique_id, p_media_kind, p_file_name, p_mime_type, p_caption, p_file_size_bytes, p_duration_seconds, p_width, p_height, p_telegram_date timestamptz)` | `recorded` \| `already_recorded` \| `conflict` | Record the `sendDocument` (or reconciled) message as `telegram_media` and link it |
+| `ingest_upload_fail(p_source_fingerprint text, p_bot_type text, p_outcome text, p_failure_code text)` | new `upload_state` | `retryable`, `uncertain`, `abandoned` or `permanent` |
+
+`ingest_record_evaluation` is **omitted**. Uploading does not need persisted match
+evidence, so the privileged surface stays smaller. It belongs with the C3/C4 review
+contract.
+
+What `record` checks:
+
+- the chat is the allow-listed channel **for that bot type**;
+- the caption carries **exactly** this fingerprint's `velora-src:` token;
+- the size equals the registered size;
+- the kind matches the registration.
+
+How `record` handles evidence:
+
+- An existing delivery is adopted only if it is the same `file_unique_id` and
+  unclaimed. Otherwise it returns `conflict` and sets `needs_review`.
+- A second message for an uploaded source returns `conflict` plus `needs_review`
+  (`duplicate_upload_evidence`), and nothing is overwritten.
+- The same `file_unique_id` already delivered elsewhere is recorded but flagged
+  `duplicate_telegram_file` (D3).
+
+Errors are fixed codes with no row data: `ingest_invalid_input` (22023),
+`ingest_channel_not_allowed`, `ingest_not_registered`, `ingest_identity_mismatch`,
+`ingest_already_uploaded`, `ingest_attempts_exhausted` and
+`ingest_illegal_transition` (P0001).
+
+### Privilege audit
+
+| Item | State |
+| --- | --- |
+| Function owner | `postgres` for all four |
+| `SECURITY DEFINER` | all four. This is required, not convenient: `service_role` has no privilege on the private tables, and definer rights are the only bridge |
+| `search_path` | `''` on all four; every object is schema-qualified; no dynamic SQL (tested) |
+| EXECUTE | Revoked from `PUBLIC`, `anon`, `authenticated` and `service_role`, then granted to **`service_role` only**. Exact ACL tested: `{postgres=X/postgres, service_role=X/postgres}` |
+| Direct table grants | **None added.** `telegram_channels`, `ingestion_events` and `telegram_media` are revoked from `PUBLIC`, `anon`, `authenticated` and `service_role`, and service_role direct read/write is tested to fail with 42501 |
+| RLS | Enabled on `telegram_channels` with no policies; unchanged (enabled, no policies) on the B-1 tables |
+| Public catalogue | Untouched. No worker function references a `public` table or the value `'approved'` (tested structurally), and a draft title with a version stays draft, unready and unlinked after an upload (tested behaviourally) |
+
+### Webhook compatibility
+
+A valid `channel_post` row inserts exactly as before and defaults to
+`origin = 'webhook'`. These are all still refused:
+
+- a replayed `(bot_type, telegram_update_id)` (23505);
+- a missing update id or update kind (23514);
+- an invalid kind (23514);
+- any uploader column on a webhook row (23514).
+
+Match candidates still attach to webhook events. **Result: no regression.**
+
+## Channel allow-list configuration (per deployment)
+
+The migration is deterministic and commits no real channel id. After migration 9 is
+deployed, the operator runs this **as the database owner** (SQL editor, or `psql` with
+the pooler URL). The worker cannot run it: `service_role` has no privilege on the
+table.
+
+```sql
+insert into private.telegram_channels (bot_type, chat_id) values
+  ('movie',  <Movies channel id, -100…>),
+  ('series', <Series channel id, -100…>)
+on conflict (bot_type) do update set chat_id = excluded.chat_id;
+```
+
+Until both rows exist, `ingest_upload_start` and `ingest_upload_record` fail with
+`ingest_channel_not_allowed`: it fails closed. The ids must equal
+`TELEGRAM_MOVIES_CHANNEL_ID` / `TELEGRAM_SERIES_CHANNEL_ID`. The adapter checks the
+same routing again before any network call.
+
+## Worker store (`lib/uploader/store.ts`)
+
+- `createRpcIngestionStore(rpc)` implements `IngestionStore` over the four RPCs. It
+  has no `.from()`, schema or SQL access (tested).
+- Payloads carry the fingerprint, kind, size, channel and the Telegram identity.
+  They never carry a local path, token or journal data.
+- Replies are validated with Zod. A wrong shape is `store_bad_reply`, never a guess.
+- Errors are reduced to `IngestStoreError.code`: the database's `ingest_*` code,
+  or `store_error` / `store_unavailable`. Raw server text is never surfaced.
+- `supabaseRpcTransport(env)` reads `NEXT_PUBLIC_SUPABASE_URL` and
+  `SUPABASE_SERVICE_ROLE_KEY` (CLI only). It refuses publishable keys and plain
+  HTTP off localhost, and names variables, never values.
+- `offlineStore` is used when nothing is configured: status `unknown`, and every
+  write refuses.
+
+Orchestrator changes (`lib/uploader/upload.ts`):
+
+- An `uncertain` send is recorded on the server (`uncertain`). Even with a lost
+  journal, the database then refuses a blind start (tested).
+- A journal failure the server never heard is synced first (`sync_failure`).
+- An ambiguous reconciliation is persisted as `blocked` (review).
+- Abandonment is recorded as `abandoned`.
+- `decideResume` treats server `unknown` as stop, `uncertain` as reconcile and
+  `blocked` as review.
+
+**Safety gate.** `REAL_TELEGRAM_UPLOADS_AUTHORIZED = false` in `upload.ts`:
+
+- `uploadEntry` and `resumeEntry` refuse unless the caller enables Telegram
+  (only tests do, against fakes).
+- The CLI refuses `upload --execute` and `resume --execute` before reading any
+  configuration.
+- A test asserts that the constant is `false`, and a plain-Node CLI test asserts
+  the refusal.
+- C2B flips the constant only with the first authorized upload.
+
+`resume --server` (dry run) calls only the read-only status RPC.
+
+Database types: the worker RPCs are deliberately absent from
+`lib/supabase/database.types.ts`, because clients cannot execute them. This is
+recorded in its header.
+
+## C2A.1 tests
+
+| Suite | Count | Covers |
+| --- | --- | --- |
+| `supabase/tests/database/005_ingestion_worker_boundary.test.sql` | 92 | Schema and shape checks; webhook regression; allow-list constraints and privacy; exact ACLs, owner, definer, `search_path`, no dynamic SQL; anon/authenticated denied (catalog and live); service_role has no direct table access; every state transition, idempotency, channel routing, caption token, replay, conflict, uncertain blocking, retry, the attempt cap, permanent block, D3; publication boundary |
+| `003_security_boundaries` (updated) | 30 | 18 tables; the reviewed definer set now includes the four `ingest_upload_*`; the allow-list is closed to clients and service_role |
+| `lib/uploader/store.test.ts` | 13 | RPC selection, exact payloads, state mapping, record round trip, error normalization, configuration |
+| `lib/uploader/uploader.test.ts` | 35 | C2A scenarios plus: the gate, uncertain persisted and blind start blocked with a lost journal, failure sync, server channel refusal, persisted review block |
+| `lib/uploader/cli.test.ts` | 2 | The real CLI loads on plain Node and refuses `--execute` |
+| `tests/integration/ingestion-store.test.ts` | 4 | The real store against **local** PostgREST: status, fail-closed allow-list, error codes, anon JWT denied |
+
+Adversarial mutations were applied to the local database only and are now restored.
+Each was caught:
+
+| Mutation | Failing assertions |
+| --- | --- |
+| Grant a worker RPC to `authenticated` | 2 |
+| Drop fingerprint uniqueness | 44 |
+| Allow a movie upload to the Series channel | 46 |
+| Allow an uncertain upload to restart | 3 |
+| Upload success publishes | 2 |
+
+A one-off local round trip through real PostgREST (not committed) returned
+`recorded`, then `already_recorded`, then an exact record equality, then
+`conflict`, then `ingest_illegal_transition`, then anon `42501`.
+
+## Remaining for C2B
+
+1. A separately authorized hosted deploy of migration 9. Before it, confirm
+   read-only that hosted `ingestion_events` has no rows.
+2. Configure `private.telegram_channels` (above) with numeric ids. The current
+   `TELEGRAM_SERIES_CHANNEL_ID` in `.env.local` must be corrected first.
+3. Set up the local Bot API server, `api_id`/`api_hash`, `logOut` for both bots and
+   the reconciliation chat (see "C2B prerequisites" in C2A).
+4. Flip `REAL_TELEGRAM_UPLOADS_AUTHORIZED` with the first authorized upload. Then
+   do a crash drill and a near-ceiling file.
