@@ -6,7 +6,9 @@ Status: **C1 on the remote. C2A (transport, recovery, tooling) and C2A.1
 (migration 9 worker boundary and RPC store) implemented and validated locally.
 Migration 9 deployed to hosted on 2026-09-25 (C2A.2, below); hosted has 9
 migrations. The channel allow-list is intentionally empty. Branch not pushed; no
-Telegram call and no real upload has happened. C2B has not started.**
+Telegram call and no real upload has happened. C2B.1A (below) replaced the
+end-of-channel heuristic with a bounded marker recovery protocol, locally; the bot
+migration has not started.**
 
 This checkpoint defines how a local VJ-translated media file becomes a reviewed,
 publishable catalogue record. It adds the pure domain modules and their tests, and
@@ -562,26 +564,9 @@ The order of evidence for one upload:
 | Server `uploaded`, journal behind | `adopt_server` |
 | Journal and server identity differ | `review`; never overwritten |
 
-**Reconciliation contract.** The Bot API has no channel-history method. The probe
-forwards message id *n* from the channel into the private `TELEGRAM_RECONCILE_CHAT_ID`
-chat, where caption and file identity survive a forward. It reads the copy and
-deletes it. It scans upward from the attempt's `channelHighWater`. Uploads are
-serial, so the file, if posted, has a higher id. The end of the channel is 20
-consecutive missing ids; the hard bound is 500 probes. Results:
-
-- **confirmed**: exactly one match with equal size;
-- **not_found**;
-- **ambiguous**: more than one match, a size mismatch, or the bound reached (review,
-  never upload);
-- **unavailable**: a Telegram error (retry later).
-
-The local server keeps uploading after the HTTP call times out, so `not_found` inside
-the 3-hour grace period means **wait**, and after it, **abandon**. Abandoning only
-permits a later explicit upload.
-
-Limits: forwarding fails on channels with **protected content**. That is reported as
-`channel_content_protected`, never as missing. Confirm the channel setting in C2B.
-Probes are rate-limited like any bot call, and the bound keeps them few.
+**Reconciliation contract.** Superseded in C2B.1A: the "20 consecutive missing ids
+means end of channel" rule is removed. See "C2B.1A — Recovery hardening" below for
+the bounded marker protocol that replaced it.
 
 ## Local journal (`lib/uploader/journal.ts`)
 
@@ -959,3 +944,218 @@ PASS.** Migration 9 only. No channel row, no Telegram call, no upload, no C2B.
 Channel configuration, the local Bot API server, `logOut`, and
 `REAL_TELEGRAM_UPLOADS_AUTHORIZED` all remain as listed in "Remaining for C2B".
 C2B has not started.
+
+# C2B.1A — Recovery hardening before the bot migration
+
+Date: 2026-09-25. Branch: `phase-a-foundation` at `6dc9141` plus this checkpoint
+(local, not pushed). The C2B.1 preflight was **BLOCKED** because crash recovery
+treated 20 consecutive missing message ids as the end of the channel, and a deleted
+gap could then authorize a duplicate upload. That rule is removed. No migration,
+no Telegram call and no hosted change in this checkpoint.
+`REAL_TELEGRAM_UPLOADS_AUTHORIZED` is still `false`.
+
+## Bounded marker protocol (`reconcileUpload`, `lib/ingestion/recovery.ts`)
+
+The Bot API cannot read channel history. Deleted messages leave gaps of any length,
+so a run of missing ids proves nothing. Recovery bounds the search on both sides
+instead:
+
+1. **Floor (lower bound).** The attempt's `channelHighWater`: the highest message id
+   the journal knew in that channel when the attempt started. Every such message was
+   posted before the attempt, so the file, if posted, has a larger id. A floor of 0
+   or no attempt record is **unknown**. The result is then `incomplete/floor_unknown`
+   with **no Telegram call**, and the scan never starts at id 1.
+2. **Access check (read-only).** `getChat` on the kind's channel and on the recovery
+   group, with the kind's bot. `has_protected_content: true` (a stable API field)
+   stops here, before any marker.
+3. **Upper bound.** Post a recovery marker (`sendMessage`, text only) to the same
+   channel with the same bot. Channel message ids increase, so everything posted
+   before the marker has a smaller id. A marker at or below the floor means the floor
+   is wrong (`incomplete`).
+4. **Scan** every id strictly between floor and marker, upward. Each probe forwards
+   the id into the recovery group, reads the copy and deletes the copy (best effort).
+   The id advances only after it was inspected.
+5. **Classify** the result (next section).
+
+The marker is never deleted, and correctness does not depend on deleting it: it is
+text, never media, and it cannot match a fingerprint. No additional bot permission
+is needed.
+
+### Marker
+
+```
+velora-recovery:v1 src=sf1-<64 hex> attempt=<n|unknown> at=<ISO-8601 UTC>
+```
+
+It is one line of about 120 characters, with no path, token or credential. It never
+contains `velora-src:`, so `fingerprintFromCaption` returns `null` for it.
+`postRecoveryMarker` posts only text that passes `isRecoveryMarker`, and posts it with
+the kind's own bot to the kind's own channel (Movies → Movies, Series → Series). Its
+body is exactly `chat_id`, `text`, `disable_notification` and
+`link_preview_options`. There is no document, file or path parameter. The reply must
+come from the same chat and carry the same text before its `message_id` is used as
+the bound. A timed-out marker may exist, and that is harmless; the next run posts a
+new one.
+
+### Probe classification (`probeChannelMessage`)
+
+| Telegram reply | Probe result | Scan treats it as |
+| --- | --- | --- |
+| Forwarded copy with the target token and equal size | `found` | match |
+| Forwarded copy: other file, or text (earlier markers included) | `found` / `not_media` | inspected, not the target |
+| 400 with exactly `Bad Request: message to forward not found` | `missing` | inspected, empty |
+| Any other 400: service message, protected message, unknown wording | `uninspectable` | **incomplete** |
+| Other 4xx except 401/403/429; unexpected forward origin; malformed copy | `uninspectable` | **incomplete** |
+| 429 (with `retry_after` when given) | `rate_limited` | wait, or stop as **rate_limited** |
+| 5xx, timeout, network error, unreachable server | `transient` | back off, or stop as **transient** |
+| 401 / 403, recovery group not configured | `blocked` | **permission_blocked** |
+
+Only status codes and `retry_after` are used, with one exception: the not-found
+text. The Bot API has no code that separates "no such message" from other 400s, and
+it cannot tell a service message from a protected or forbidden one. So text is used
+only to reach `missing`. If Telegram rewords it, scans become `incomplete`, never
+falsely empty.
+
+### Outcomes, decisions and database state
+
+| Scan result | Decision (`decideAfterReconcile`) | Server (`ingest_upload_fail`) | Upload allowed? |
+| --- | --- | --- | --- |
+| `found`: exactly one match, full interval inspected | `record_confirmed` | `ingest_upload_record` | never needed |
+| `not_found_confirmed`: full interval, no match, marker ≥ 3 h after attempt start | `abandon` | `abandoned` → `upload_failed` | only now, explicitly |
+| `not_found_confirmed`: marker within the grace period | `wait` | unchanged (`uploading`/`uncertain`) | no |
+| `ambiguous`: two matches, or same token and different size | `review` | `permanent` → `blocked` | no |
+| `incomplete`: floor unknown, marker ≤ floor, interval > 2000 ids, uninspectable id | `hold` | `uncertain` (+ reason code) | no |
+| `permission_blocked` | `hold` | `uncertain` (+ reason code) | no |
+| `rate_limited` / `transient` | `retry_later` | unchanged | no |
+
+The 3-hour grace period is unchanged. It is now measured from the attempt's start to
+the marker's post time, both on the uploader's clock. A scan inside the grace period
+can establish `found`. Absence inside it only means `wait`, because the local server
+may still post the file after the marker. `uploading` and `uncertain` both make the
+database refuse a new `ingest_upload_start`, so a hold or a retry cannot turn into a
+blind restart.
+
+### Pacing and rate limits (`DEFAULT_RECOVERY_PACING`)
+
+- 3 s between probes (about 20 forwards per minute into the recovery group).
+- A 429 whose `retry_after` is at most 120 s is waited out (`retry_after` + 1 s)
+  on the same id, at most 5 times per scan. A longer or missing `retry_after`, or a
+  sixth 429, ends the scan as `rate_limited`.
+- A transient failure is retried on the same id after 5 s, 10 s and 20 s, then the
+  scan ends as `transient`.
+- The largest interval is 2000 ids (about 1 h 40 min at this pace). A larger one is
+  `incomplete/interval_too_large` and needs an operator.
+
+Recovery is slow on purpose. A rate limit is never read as "not found".
+
+## Lower bound on a fresh machine: migration 10 required (proposed, not created)
+
+Migration 9 state is **not** enough for a safe floor without the journal.
+`ingest_upload_status` returns neither the attempt's start time nor any channel
+position. Uploaded rows from other sources cannot be ordered against the uncertain
+attempt either: the local server can post an uncertain file after later uploads
+finished. Without the journal, recovery therefore holds (`floor_unknown`): safe, but
+unresolvable until the journal is restored or migration 10 lands. A first-ever upload
+into a channel has the same problem (journal floor 0).
+
+Proposed migration 10 (awaiting authorization; nothing written):
+
+```sql
+-- 1. Operator-verified per-channel checkpoint (for example, the id of a marker
+--    posted while configuring the channel). Advance-only.
+alter table private.telegram_channels
+  add column recovery_floor_message_id bigint not null default 0
+    check (recovery_floor_message_id >= 0);
+
+-- 2. Per-attempt floor, captured by ingest_upload_start in the same transaction:
+--    greatest(channel checkpoint, max(message_id) of private.telegram_media in that
+--    bot/channel). Every such message existed before the attempt, so the file's id
+--    is larger. Captured per attempt, it never moves.
+alter table private.ingestion_events
+  add column upload_floor_message_id bigint
+    check (upload_floor_message_id is null or upload_floor_message_id >= 0);
+-- (uploader shape check: not null for uploader rows; hosted has 0 uploader rows.)
+
+-- 3. ingest_upload_start sets upload_floor_message_id (create or replace, same signature).
+-- 4. ingest_upload_status also returns upload_started_at and upload_floor_message_id
+--    (return type changes: drop + create, then re-revoke and re-grant service_role).
+-- 5. New public.ingest_channel_checkpoint(p_bot_type text, p_chat_id bigint,
+--    p_message_id bigint) returns bigint: advance-only; refuses
+--    (ingest_illegal_transition) while any uploader row for that bot is
+--    uploading or uncertain, so the checkpoint never passes an unresolved upload.
+--    SECURITY DEFINER, search_path '', EXECUTE service_role only.
+```
+
+With it, the floor is `max(journal floor, server floor)`: both are safe, so their
+maximum is safe. The server attempt start replaces the journal's, so a fresh machine
+can reconcile from the server alone. The code keeps the floor in one function
+(`attemptFloor`, `lib/uploader/upload.ts`), where the server value would be added.
+
+## Docker topology for the local Bot API server (planned, not started)
+
+```
+Windows Node uploader (npm run ingest)
+  -> http://127.0.0.1:8081            TELEGRAM_BOT_API_URL (loopback only)
+  -> Docker: telegram-bot-api --local  port published as 127.0.0.1:8081:8081
+  -> Telegram
+```
+
+- Publish the port on loopback only (`127.0.0.1:8081:8081`), never `0.0.0.0`. The
+  adapter already refuses plain HTTP to any non-loopback host.
+- Persistent server state (`--dir`, the bot sessions) goes in a host directory
+  **outside the repository**, for example `C:\velora-ops\telegram-bot-api` mounted at
+  `/var/lib/telegram-bot-api`. It survives container restarts and is never committed.
+- `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` go to the container only, not to the Next.js
+  app.
+- Future media mapping, not yet in use: `G:\Movies` mounted read-only at
+  `/media/movies`, with `TELEGRAM_BOT_API_PATH_MAP=G:\Movies=>/media/movies`. Do not
+  assume `G:` is shared with Docker Desktop until it is checked. No media validation
+  against it yet.
+- Image: no official image exists. Choose one, pin it by digest, and record it
+  before first start. A widely used community build is `aiogram/telegram-bot-api`.
+  It needs separate approval, because this is a supply-chain decision.
+- A container restart drops in-flight uploads. They surface as `uncertain` and go
+  through the marker protocol above.
+
+## Operational status
+
+| Item | Status |
+| --- | --- |
+| `TELEGRAM_MOVIES_CHANNEL_ID` / `TELEGRAM_SERIES_CHANNEL_ID` in `.env.local` | Corrected locally (leading `-` added); both valid `-100…` and distinct. Not committed |
+| `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` | **Absent**: manual prerequisite (my.telegram.org, API development tools) |
+| `TELEGRAM_RECONCILE_CHAT_ID` | **Absent**: the operator creates "Velora Ingestion Recovery" with both bots and the operator; its numeric id and the bots' post/forward permissions must be verified. Operational preflight stays blocked until then |
+| `TELEGRAM_BOT_API_URL` | Absent until the Docker server exists |
+| Recovery markers posted to real channels | None |
+| `logOut`, `sendDocument`, any Telegram write | None |
+
+## Tests
+
+- `lib/ingestion/recovery.test.ts` (new, 27): target just below the marker and far
+  below it; gaps of more than 20, more than 100 and about 390 deleted ids; other
+  files and text ignored; full-interval confirmation; duplicate and size-mismatch
+  ambiguity; service or non-forwardable ids; a rate limit and a transient failure
+  halfway through (recovered and persistent); permission failures at the access,
+  marker and probe stages; marker failures; unknown floors; marker at or below the
+  floor; oversized interval; pacing. An exhaustive check puts every failure kind at
+  every position of an interval and never gets `not_found_confirmed` or `found`.
+  Also marker content and the decision table, including grace.
+- `lib/telegram/local-bot-api.test.ts`: probe classification by status code (only
+  the exact not-found text is `missing`); the access check (read-only, per-kind bot,
+  protected channel); marker posting (Movies bot → Movies channel, Series bot → Series
+  channel, text-only body, non-marker text refused offline, reply validation); and
+  the whole protocol over the real client against a fake server that refuses every
+  delete (150-id gap found; nothing deleted from the channel; no media sent).
+- `lib/uploader/uploader.test.ts`: end to end over the journal and the fake worker
+  store. Covers a gap longer than 20; a fresh machine with a lost journal (hold, no
+  marker, no probe, no upload); a journal floor of 0; an uninspectable hold that stays
+  `uncertain`; rate-limit and permission holds; no delete capability; per-kind bot
+  routing; and `REAL_TELEGRAM_UPLOADS_AUTHORIZED === false` with no recovery call
+  when disabled.
+
+Mutation check (each mutant applied alone, recovery, uploader and transport tests
+run, file restored): 16 of 16 killed. The mutants: the 20-id and 100-id gap
+heuristics; uninspectable, rate-limited, persistently transient and permission
+results counted as inspected; the interval ending one id early; an unknown floor
+scanning from id 1; an incomplete scan abandoning; the grace period ignored; a
+marker below the floor accepted; "can't be forwarded", 429 and 5xx read as missing;
+the marker sent to the other kind's channel; protected content not detected.
