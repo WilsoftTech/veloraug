@@ -1347,6 +1347,111 @@ for safety. Losing it costs a rescan, and nothing else.
 
 ## Deployment status
 
-Migration 10 is applied only to the local stack (clean bootstrap 1–10). Hosted
-still has 9 migrations. The hosted deployment needs separate authorization.
+Migration 10 was first applied to the local stack only (clean bootstrap 1–10).
+It was deployed to hosted in C2B.1C (below).
 Afterwards, each channel's checkpoint must be seeded once before its first upload.
+
+# C2B.1C — Hosted deployment of migration 10
+
+Date: 2026-09-25. Branch: `phase-a-foundation`, 5 commits ahead of remote `6dc9141`
+(not pushed). Status: **C2B.1C HOSTED DURABLE RECOVERY: PASS.** Migration 10 only.
+No channel row, no checkpoint seeded, no Telegram call, no upload.
+
+## Preflight (read-only MCP)
+
+| Check | Observed | Status |
+| --- | --- | --- |
+| Repository | 5 ahead / 0 behind; the ahead set is exactly C2B.1A and C2B.1B. The only migration difference from the remote is the new migration 10; migrations 1–9 are unchanged | PASS |
+| Hosted history | Exactly 9, ending `20260925004059`; migration 10 absent | PASS |
+| Hosted data (aggregate counts) | `ingestion_events` 0, `telegram_media` 0, `metadata_match_candidates` 0, `telegram_channels` 0 | PASS |
+| Migration 10 objects | None present before the push | PASS |
+| Local gate | Clean bootstrap 1–10 and `npm run test:db`: 339 pgTAP tests pass | PASS |
+
+## Pre-deployment source audit
+
+- **Scope.** Two `alter table` changes add one column and one CHECK each. There are
+  two invoker trigger functions with their triggers. `ingest_upload_status` and
+  `ingest_upload_start` are dropped and recreated, `ingest_upload_record` is
+  replaced, and `ingest_channel_checkpoint` is new. The rest is revokes and grants.
+  `ingest_upload_fail` is untouched. No reference to any catalogue, VJ, watchlist,
+  auth or `catalogue_access` object.
+- **Channel-ID reset.** On an UPDATE that changes `chat_id`, the trigger sets
+  `checkpoint_message_id` to 0, overriding any value set in the same statement.
+  With an unresolved upload for that bot it refuses. So a checkpoint cannot follow a
+  bot to another channel. The worker cannot trigger this:
+  - it has no privilege on `private.telegram_channels`;
+  - the only command that writes the table (`ingest_channel_checkpoint`) sets
+    `checkpoint_message_id` alone, on the row it resolved by bot type and `chat_id`,
+    and never touches `chat_id`.
+  A newly inserted channel row starts at the default 0. Only the owner can insert,
+  as part of operator configuration.
+- **Record vs floor.** `ingest_upload_record` rejects `p_message_id <=
+  upload_floor_message_id` for any source not yet uploaded. It marks the ingestion
+  `needs_review` (`recovery_floor_not_below_message`), records nothing, and returns
+  `conflict`. `upload_state` stays `uploading`/`uncertain`, so no restart is
+  possible. The equality boundary (message id = floor) is a pgTAP case
+  (`006`, "a message at the floor").
+- **Zero floor.** `ingest_upload_start` raises `ingest_recovery_floor_unknown` when
+  the computed floor is below 1, before any insert or update. With no channel
+  configured it already fails earlier, with `ingest_channel_not_allowed`.
+- **Locking.** Start takes `pg_advisory_xact_lock_shared(1001, k)` and checkpoint
+  takes `pg_advisory_xact_lock(1001, k)`. Both compute k as 1 for movie and 2 for
+  series, from the already-validated bot type, so a caller's string never becomes a
+  lock key. Both take the lock after argument validation and before any read.
+  `_xact_` locks are released at transaction end. The only other advisory locks in
+  the schema (watchlist, search history) use the single-`bigint` form, which
+  PostgreSQL keeps in a separate key space from the two-`int4` form, so they cannot
+  collide. The SQL matches "Concurrency model" in C2B.1B.
+
+## Deployment
+
+- Supabase CLI `2.117.0` (`dist/supabase.js`, spawned without a shell),
+  `db push --db-url` over the session pooler (port 5432), as for migration 9. The URL
+  came from the local environment. It was never printed, and the output was
+  redacted.
+- Migration SHA-256 `2768e96f…a4b9dcf4`, equal to the `HEAD` blob immediately before
+  the push.
+- The dry run proposed exactly `20260925194322_ingestion_recovery_bounds.sql`, with
+  no seeds and no roles. The push applied that one migration and exited 0.
+- No configuration write went with it.
+
+## Verification (read-only MCP)
+
+| Check | Observed | Status |
+| --- | --- | --- |
+| History | 10 migrations, ending `20260925194322_ingestion_recovery_bounds` | PASS |
+| `telegram_channels.checkpoint_message_id` | `bigint`, NOT NULL, default 0; CHECK `0 … 2147483647` | PASS |
+| `ingestion_events.upload_floor_message_id` | `bigint`, nullable, no default; CHECK null, or (`origin = 'uploader'` and `1 … 2147483647`) | PASS |
+| Migration 9 constraints and indexes | Origin, fingerprint, size, upload state, attempts, failure code, webhook/uploader shape CHECKs; both partial unique indexes; FK; update key: unchanged | PASS |
+| Triggers | `ingestion_events_guard_upload_floor` → `private.guard_upload_floor()` and `telegram_channels_guard_checkpoint` → `private.guard_channel_checkpoint()`, both BEFORE UPDATE FOR EACH ROW. The functions are invoker, `search_path=""`, ACL `postgres=X/postgres` only | PASS |
+| Five RPCs | Owner `postgres`, SECURITY DEFINER, `search_path=""`; signatures and return shapes as in the migration (`status` STABLE, others VOLATILE) | PASS |
+| Function bodies | `md5(prosrc)` of all five RPCs and both trigger functions equals the local stack built from the repository | PASS |
+| RPC ACL | `{postgres=X/postgres,service_role=X/postgres}` on all five; EXECUTE false for `anon`, `authenticated` and `PUBLIC` | PASS |
+| Private privileges | `telegram_channels`, `ingestion_events`, `telegram_media`, `metadata_match_candidates`: no table or column privilege for `anon`, `authenticated`, `service_role` or `PUBLIC`; none has `USAGE` on `private`. RLS on, 0 policies | PASS |
+| Publication boundary | No RPC or trigger body references `public.*`, `auth.*`, `catalogue_access`, publication, availability, rights, approval, VJs, watchlists or versions. No dynamic SQL. The new triggers are on private tables only | PASS |
+| Inert state | `telegram_channels` 0, `ingestion_events` 0, `telegram_media` 0, `metadata_match_candidates` 0 | PASS |
+
+## Advisors (compared with the pre-deploy baseline of the same session)
+
+- Security: unchanged. There are 5 INFO `rls_enabled_no_policy` findings (the
+  accepted deny-all `private` tables) and the accepted `record_search` /
+  `trending_searches` WARN pairs. No finding mentions a migration-10 function or
+  table.
+- Performance: unchanged (2 composite-FK INFO, 12 unused-index INFO).
+- New findings: none. Blocking findings: none.
+
+## Hosted state now
+
+- Fresh-machine durable recovery is available: an unresolved upload can be
+  reconciled from `ingest_upload_status` alone.
+- `private.telegram_channels` is intentionally **empty**, and every start and record
+  fails closed with `ingest_channel_not_allowed`. Once a channel is configured, its
+  checkpoint is 0, so starts still fail with `ingest_recovery_floor_unknown`
+  until a checkpoint is seeded.
+- **Checkpoints are intentionally unseeded.** Seeding is an operational
+  prerequisite of Telegram setup. It needs a message id actually observed in that
+  configured channel after the channel is verified. The id must never be guessed,
+  derived from a URL, copied between Movies and Series, or taken from another
+  channel.
+- The Telegram bot migration (`logOut`, the local Bot API server) has **not**
+  begun. `REAL_TELEGRAM_UPLOADS_AUTHORIZED` is still `false`.
