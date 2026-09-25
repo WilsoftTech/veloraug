@@ -4,7 +4,9 @@ Date: 2026-09-25
 Baseline: `phase-a-foundation` at `0b70ac1` (Phases A and B complete). Hosted: 8 migrations.
 Status: **C1 on the remote. C2A (transport, recovery, tooling) and C2A.1
 (migration 9 worker boundary and RPC store) implemented and validated locally.
-Migration 9 is not deployed; nothing is pushed; no real upload has happened.**
+Migration 9 deployed to hosted on 2026-09-25 (C2A.2, below); hosted has 9
+migrations. The channel allow-list is intentionally empty. Branch not pushed; no
+Telegram call and no real upload has happened. C2B has not started.**
 
 This checkpoint defines how a local VJ-translated media file becomes a reviewed,
 publishable catalogue record. It adds the pure domain modules and their tests, and
@@ -680,8 +682,8 @@ Mutation checks, each caught by at least one test:
 # C2A.1 — Migration 9: uploader-origin ingestion and the worker boundary
 
 Date: 2026-09-25. Base: remote `091622c` plus C2A (`7fb5c78`, `cb73ee6`, `1df0a2b`).
-Status: **implemented and validated locally. Migration 9 NOT deployed. No real
-upload. Not pushed.**
+Status: **implemented and validated locally. No real upload. Not pushed.**
+(Deployed to hosted later, in C2A.2, below.)
 
 Approved decisions:
 
@@ -890,11 +892,70 @@ A one-off local round trip through real PostgREST (not committed) returned
 
 ## Remaining for C2B
 
-1. A separately authorized hosted deploy of migration 9. Before it, confirm
-   read-only that hosted `ingestion_events` has no rows.
+1. ~~A separately authorized hosted deploy of migration 9. Before it, confirm
+   read-only that hosted `ingestion_events` has no rows.~~ Done in C2A.2.
 2. Configure `private.telegram_channels` (above) with numeric ids. The current
    `TELEGRAM_SERIES_CHANNEL_ID` in `.env.local` must be corrected first.
 3. Set up the local Bot API server, `api_id`/`api_hash`, `logOut` for both bots and
    the reconciliation chat (see "C2B prerequisites" in C2A).
 4. Flip `REAL_TELEGRAM_UPLOADS_AUTHORIZED` with the first authorized upload. Then
    do a crash drill and a near-ceiling file.
+
+# C2A.2 — Hosted deployment of migration 9
+
+Date: 2026-09-25. Branch: `phase-a-foundation`, local at `f98da5a` (remote
+`091622c` plus C2A and C2A.1, not pushed). Status: **C2A.2 HOSTED DEPLOYMENT:
+PASS.** Migration 9 only. No channel row, no Telegram call, no upload, no C2B.
+
+## Preflight (read-only MCP)
+
+| Check | Observed | Status |
+| --- | --- | --- |
+| Migrations 1–8 | Byte-identical in the working tree, `HEAD` and remote `091622c` | PASS |
+| Hosted history | Exactly 8, ending `20260924195306`; migration 9 absent | PASS |
+| Hosted data (aggregate counts) | `ingestion_events` 0, `metadata_match_candidates` 0, `telegram_media` 0 | PASS |
+| Starting schema | B-1 shape as assumed: `telegram_update_id`/`update_kind` NOT NULL, no uploader columns, `ingestion_events_update_key`, status CHECK includes `needs_review`/`published`/`rejected`/`ignored`; `private.set_updated_at()` present; no `telegram_channels`, `ingest_upload_*` or conflicting index names; all three tables owner-only ACL, RLS on, no policies | PASS |
+
+## Deployment
+
+- Mechanism as B-1/B-2 and B4: Supabase CLI `2.117.0`, `db push --db-url` over the
+  session pooler (port 5432; the CLI token lacks `database_write`). The URL comes
+  from the local environment and was never printed.
+- Migration SHA-256 `d46b013a…c6320d76a`, equal to the `HEAD` blob, checked
+  immediately before the push.
+- Dry-run proposed exactly `20260925004059_ingestion_uploader_worker_boundary.sql`,
+  no seeds, no roles. The push applied that one migration and exited 0.
+- Not used: `migration repair`, ad-hoc DDL, the service-role key, any other migration.
+
+## Verification (read-only MCP)
+
+| Check | Observed | Status |
+| --- | --- | --- |
+| History | 9 migrations, ending `20260925004059_ingestion_uploader_worker_boundary` | PASS |
+| `private.telegram_channels` | PK `bot_type` (CHECK movie/series), `chat_id` bigint UNIQUE with CHECK `< -1000000000000`, `created_at`/`updated_at`, `set_updated_at` trigger; owner `postgres`; RLS on, no policies; ACL `{postgres=arwdDxtm/postgres}` | PASS |
+| `ingestion_events` additions | 8 columns with the migration's types, nullability and defaults; `telegram_update_id`/`update_kind` now nullable; the 8 new CHECKs (origin, fingerprint, size, upload state, attempts, failure code, webhook shape, uploader shape) match the migration text | PASS |
+| Partial unique indexes | `ingestion_events_source_fingerprint_key` `WHERE origin = 'uploader'`; `ingestion_events_uploader_media_key` `WHERE origin = 'uploader' AND telegram_media_id IS NOT NULL` | PASS |
+| Existing keys/FKs | `ingestion_events_update_key` and `telegram_media_id` FK unchanged | PASS |
+| RPCs | All four: owner `postgres`, `SECURITY DEFINER`, `search_path=""`, identity arguments and return shapes as in the migration (`status` STABLE, others VOLATILE). `prosrc` MD5 equals the repository body for each | PASS |
+| RPC ACL | `{postgres=X/postgres,service_role=X/postgres}` on all four; EXECUTE false for `anon` and `authenticated`; no `PUBLIC` entry | PASS |
+| Private-table privileges | `ingestion_events`, `telegram_channels`, `telegram_media`, `metadata_match_candidates`: no table or column privilege for `anon`, `authenticated`, `service_role` or `PUBLIC`; none of them has `USAGE` on `private` | PASS |
+| Publication boundary | RPC write targets are only `private.ingestion_events` and `private.telegram_media`; no body references `public.*`, `catalogue_access.*` or `auth.*`; the only triggers on the touched tables are `set_updated_at` | PASS |
+| Channel allow-list | `private.telegram_channels`: **0 rows**, intentionally. Hosted start/record fail closed with `ingest_channel_not_allowed` until the operator configures it ("Channel allow-list configuration" above). No write call was made to demonstrate this | PASS |
+| Data | `ingestion_events`, `telegram_media`, `metadata_match_candidates`: 0 rows | PASS |
+
+## Advisors (compared with the pre-deploy baseline of the same day)
+
+- Security: one new finding, INFO `rls_enabled_no_policy` on
+  `private.telegram_channels`. Reviewed and accepted. It is the intended deny-all
+  posture (RLS on, no policies, no grants; only the definer reads it) and the same
+  class as the accepted findings on the other `private` tables. No finding for any
+  `ingest_upload_*` function. The two accepted `record_search`/`trending_searches`
+  WARN pairs are unchanged.
+- Performance: unchanged (2 composite-FK INFO, 12 unused-index INFO).
+- Blocking findings: none.
+
+## Still not done
+
+Channel configuration, the local Bot API server, `logOut`, and
+`REAL_TELEGRAM_UPLOADS_AUTHORIZED` all remain as listed in "Remaining for C2B".
+C2B has not started.
