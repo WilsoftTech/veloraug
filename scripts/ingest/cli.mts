@@ -4,12 +4,13 @@
 //   scan <root> --kind movie|series [--vjs vjs.json] [--match]
 //   inspect <file> --kind movie|series [--vjs vjs.json] [--match] [--full-hash]
 //   upload [--limit n] [--execute]
-//   resume [--execute]
+//   resume [--server] [--execute]
 //   status
 //
-// Dry run is the default. `--execute` additionally needs the local Bot API
-// configuration AND the Supabase worker boundary; in C2A that boundary is not
-// deployed, so nothing can be uploaded or reconciled from here yet.
+// Dry run is the default. `--execute` needs the code-level authorization
+// (REAL_TELEGRAM_UPLOADS_AUTHORIZED, false until C2B), the local Bot API
+// configuration and the Supabase worker store (service-role key). `resume
+// --server` reads upload status through the worker RPC; it never writes.
 // Tokens are never printed. Paths are shown only in this terminal.
 import { readFile, stat } from "node:fs/promises";
 import { basename, extname, resolve } from "node:path";
@@ -26,8 +27,8 @@ import { isTmdbConfigured } from "@/lib/tmdb/client";
 import { searchTmdbForIngestion } from "@/lib/tmdb/ingestion-search";
 import { JOURNAL_DIR_ENV, newJournalEntry, openJournal, resolveJournalDir, type Journal, type JournalEntry } from "@/lib/uploader/journal";
 import { fingerprintFile, hashFile, toSourceFile, walkMedia, type DiscoveredFile } from "@/lib/uploader/scan";
-import { unavailableStore } from "@/lib/uploader/store";
-import { planResume, resumeEntry, uploadEntry, type UploaderDeps } from "@/lib/uploader/upload";
+import { createRpcIngestionStore, offlineStore, supabaseRpcTransport, type IngestionStore } from "@/lib/uploader/store";
+import { planResume, REAL_TELEGRAM_UPLOADS_AUTHORIZED, resumeEntry, uploadEntry, type UploaderDeps } from "@/lib/uploader/upload";
 import type { CatalogueKind } from "@/types/catalogue";
 import type { DuplicateSubject, KnownVj, MatchOutcome } from "@/types/ingestion";
 
@@ -45,6 +46,7 @@ const { positionals, values } = parseArgs({
     "full-hash": { type: "boolean", default: false },
     execute: { type: "boolean", default: false },
     limit: { type: "string" },
+    server: { type: "boolean", default: false },
   },
 });
 const [command, target] = positionals;
@@ -137,8 +139,7 @@ async function scan() {
       const existing = cached ?? (await store.get(fingerprint));
       if (existing && existing.kind !== kind) {
         // The kind selects the bot and channel; it never changes silently.
-        console.log(`${"hold".padEnd(18)} ${mib(file.sizeBytes).padStart(12)}  ${file.relativePath}
-${" ".repeat(20)}stop: kind_changed (journaled as ${existing.kind})`);
+        console.log(`${"hold".padEnd(18)} ${mib(file.sizeBytes).padStart(12)}  ${file.relativePath}\n${" ".repeat(20)}stop: kind_changed (journaled as ${existing.kind})`);
         counts.set("hold", (counts.get("hold") ?? 0) + 1);
         continue;
       }
@@ -182,10 +183,11 @@ async function inspect() {
   }, null, 2));
 }
 
-function uploaderDeps(store: Journal, config: LocalBotApiConfig): UploaderDeps {
+function uploaderDeps(store: Journal, config: LocalBotApiConfig, server: IngestionStore): UploaderDeps {
   return {
     journal: store,
-    store: unavailableStore,
+    store: server,
+    telegramEnabled: REAL_TELEGRAM_UPLOADS_AUTHORIZED,
     telegram: createLocalBotApiClient(config, {
       fetch,
       stat: async (path) => {
@@ -203,12 +205,20 @@ function uploaderDeps(store: Journal, config: LocalBotApiConfig): UploaderDeps {
   };
 }
 
+function workerStore(): IngestionStore {
+  const transport = supabaseRpcTransport(process.env);
+  if (!transport.ok) fail(`the worker store needs:\n  ${transport.errors.join("\n  ")}`);
+  return createRpcIngestionStore(transport.rpc);
+}
+
 /** Gate for every command that could reach Telegram or write to Supabase. */
-function executionConfig(): LocalBotApiConfig {
+function executionDeps(store: Journal): UploaderDeps {
+  if (!REAL_TELEGRAM_UPLOADS_AUTHORIZED) {
+    fail("real Telegram uploads are disabled in code until C2B is authorized (REAL_TELEGRAM_UPLOADS_AUTHORIZED). Nothing was sent.");
+  }
   const loaded = loadLocalBotApiConfig(process.env);
   if (!loaded.ok) fail(`--execute needs the local Bot API configuration:\n  ${loaded.errors.join("\n  ")}`);
-  if (!unavailableStore.available) fail("--execute needs the Supabase ingestion write boundary (migration 9), which is not deployed. Nothing was sent.");
-  return loaded.config;
+  return uploaderDeps(store, loaded.config, workerStore());
 }
 
 async function upload() {
@@ -226,7 +236,7 @@ async function upload() {
     return;
   }
 
-  const deps = uploaderDeps(store, executionConfig());
+  const deps = executionDeps(store);
   const release = await store.lock();
   try {
     for (const entry of candidates) {
@@ -244,13 +254,15 @@ async function resume() {
   const store = await journal();
   const entries = (await store.list()).filter((entry) => entry.state.upload === "uploading" || (entry.telegram !== null && entry.dbAcknowledgedAt === null));
   if (!values.execute) {
+    // Offline unless --server: then only the read-only status RPC is called.
+    const server = values.server ? workerStore() : offlineStore;
     for (const entry of entries) {
-      console.log(`${entry.relativePath}: ${JSON.stringify(await planResume(entry, unavailableStore))}`);
+      console.log(`${entry.relativePath}: ${JSON.stringify(await planResume(entry, server))}`);
     }
     console.log(`\ndry run: ${entries.length} entr${entries.length === 1 ? "y" : "ies"} to settle. Nothing was sent.`);
     return;
   }
-  const deps = uploaderDeps(store, executionConfig());
+  const deps = executionDeps(store);
   const release = await store.lock();
   try {
     for (const entry of entries) console.log(`${entry.relativePath}: ${JSON.stringify(await resumeEntry(entry, deps))}`);

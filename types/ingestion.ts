@@ -227,13 +227,24 @@ export type ReconciliationResult =
   | { status: "ambiguous"; reason: "multiple_matches" | "size_mismatch" | "scan_incomplete"; messageIds: number[] }
   | { status: "unavailable"; code: string };
 
-/** What the server (Supabase, through the worker boundary) knows about a source. */
+/**
+ * What the server (Supabase, through the worker boundary) knows about a source.
+ * Mirrors ingestion_events.upload_state; `absent` is "no ingestion yet" and
+ * `unknown` means the server could not be asked.
+ */
 export type ServerUploadStatus =
   | { status: "unknown" }
   | { status: "absent" }
   | { status: "uploading" }
+  /** May have been posted: reconcile before anything else. */
+  | { status: "uncertain" }
   | { status: "uploaded"; record: TelegramMediaRecord }
-  | { status: "failed" };
+  | { status: "failed" }
+  /** Permanently blocked, waiting for a reviewer. */
+  | { status: "blocked"; code: string | null };
+
+/** How a failed or unresolved attempt is recorded (ingest_upload_fail). */
+export type UploadFailureOutcome = "retryable" | "uncertain" | "abandoned" | "permanent";
 
 export type ResumeAction =
   /** Journal and server agree the upload is recorded. */
@@ -246,6 +257,8 @@ export type ResumeAction =
   | { action: "reconcile" }
   /** Nothing was posted; a new upload is allowed when the operator asks for it. */
   | { action: "upload_allowed" }
+  /** The journal holds a definite failure the server never received. */
+  | { action: "sync_failure"; code: string }
   | { action: "review"; reason: string }
   | { action: "stop"; reason: string };
 

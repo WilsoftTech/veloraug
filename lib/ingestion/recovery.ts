@@ -85,6 +85,8 @@ export interface ResumeInput {
   dbAcknowledged: boolean;
   rejected: boolean;
   attemptsExhausted: boolean;
+  /** Code of the journal's last definite failure, if the last attempt failed. */
+  lastFailureCode: string | null;
   server: ServerUploadStatus;
 }
 
@@ -98,22 +100,30 @@ const sameDelivery = (a: TelegramMediaRecord, b: TelegramMediaRecord) =>
  */
 export function decideResume(input: ResumeInput): ResumeAction {
   const { server } = input;
+  if (server.status === "unknown") return { action: "stop", reason: "server_status_unavailable" };
   if (input.telegram !== null) {
     if (server.status === "uploaded") {
       return sameDelivery(server.record, input.telegram) ? { action: "none" } : { action: "review", reason: "telegram_identity_conflict" };
     }
-    if (server.status === "unknown") return { action: "stop", reason: "server_status_unavailable" };
+    if (server.status === "blocked") return { action: "review", reason: "server_blocked" };
     return input.dbAcknowledged ? { action: "review", reason: "server_lost_acknowledged_upload" } : { action: "record_in_db", record: input.telegram };
   }
   if (server.status === "uploaded") return { action: "adopt_server", record: server.record };
+  if (server.status === "blocked") return { action: "review", reason: server.code ?? "server_blocked" };
   if (input.upload === "uploading") return { action: "reconcile" };
   if (input.upload === "uploaded") return { action: "review", reason: "journal_uploaded_without_identity" };
   if (input.rejected) return { action: "stop", reason: "rejected" };
+  // The server may know of a post the journal lost (journal reset, or it
+  // recorded "uncertain"): the same crash window seen from the other side.
+  if (server.status === "uncertain") return { action: "reconcile" };
+  if (server.status === "uploading") {
+    // A journal failure is the definite outcome of that attempt: the server
+    // just never heard it. Without one, the attempt must be reconciled.
+    return input.upload === "upload_failed" && input.lastFailureCode !== null
+      ? { action: "sync_failure", code: input.lastFailureCode }
+      : { action: "reconcile" };
+  }
   if (input.attemptsExhausted) return { action: "stop", reason: "upload_attempts_exhausted" };
-  // A server record left in "uploading" with no journal attempt (the journal
-  // was lost or reset) is the same crash window seen from the other side. A
-  // journal `upload_failed` is the definite outcome and needs no lookup.
-  if (server.status === "uploading" && input.upload === "not_uploaded") return { action: "reconcile" };
   return { action: "upload_allowed" };
 }
 

@@ -9,7 +9,10 @@
  *  - `Insert`/`Update: never` (or a narrowed `Update`) encode which writes
  *    clients are actually granted. `search_history.Insert` and `.Update` are
  *    `never` on purpose: clients cannot write it, only `record_search` can;
- *  - catalogue `Row`s list only the column-level SELECT grants.
+ *  - catalogue `Row`s list only the column-level SELECT grants;
+ *  - the `ingest_upload_*` worker RPCs (20260925004059) are deliberately
+ *    absent: only service_role may execute them, and the uploader CLI calls
+ *    them through its own typed transport (lib/uploader/store.ts).
  *
  * Regenerating? Diff-review the output against this file; never replace it
  * wholesale, or those restrictions are silently lost.

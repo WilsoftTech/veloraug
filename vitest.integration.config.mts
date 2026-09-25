@@ -13,7 +13,14 @@ function localSupabase() {
   if (!/^http:\/\/(127\.0\.0\.1|localhost):/.test(status.API_URL ?? "")) {
     throw new Error("Catalogue integration tests only run against a local Supabase stack.");
   }
-  return { NEXT_PUBLIC_SUPABASE_URL: status.API_URL, NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: status.PUBLISHABLE_KEY };
+  return {
+    NEXT_PUBLIC_SUPABASE_URL: status.API_URL,
+    NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: status.PUBLISHABLE_KEY,
+    // LOCAL stack keys for the ingestion worker store test only: service_role
+    // (allowed) and the legacy anon JWT (must be denied by PostgreSQL grants).
+    SUPABASE_SERVICE_ROLE_KEY: status.SERVICE_ROLE_KEY,
+    LOCAL_ANON_JWT: status.ANON_KEY,
+  };
 }
 
 const root = fileURLToPath(new URL(".", import.meta.url));
