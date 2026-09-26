@@ -2028,3 +2028,167 @@ C2B.2D, the first controlled Movies upload, needs re-authorization. The
 single-file selection gap it reported is still open:
 - `scan` only walks directories;
 - `upload --limit 1` takes journal entries in fingerprint order.
+
+# C2B.2C.2 — Deterministic single-fingerprint upload selection (PASS)
+
+Status: **PASS (2026-09-27).** This checkpoint changed code, tests and docs only.
+No Telegram call, no hosted write, no upload. `REAL_TELEGRAM_UPLOADS_AUTHORIZED`
+is still `false`.
+
+## Why
+
+C2B.2D could not choose its one authorized file.
+- `scan` walks a whole directory, and every Movies file sits in one folder.
+- `upload --limit 1` then takes the first *planned* entry in fingerprint order.
+- The real scan confirmed the risk. Fourteen entries were journaled, 11 of them
+  uploadable. The one that sorts first is a different movie whose match is
+  ambiguous (`upload_then_review`), so `--limit 1` would have uploaded it instead
+  of the authorized file.
+
+## Operator contract
+
+```
+npm run ingest -- upload --fingerprint <sf1-…> [--kind movie|series] [--limit 1] [--execute]
+```
+
+It selects exactly one **already-scanned** journal entry.
+
+- **The value** must be `sf1-` plus exactly 64 lowercase hex characters
+  (`isFingerprint`). Nothing is normalized: uppercase, whitespace, short or long
+  hashes, other prefixes and paths are all `fingerprint_invalid`.
+- **It never reads a path** and never creates or edits journal state.
+  Unscanned files must be scanned first.
+- **Exactly one entry must match** by full string equality:
+  - none is `fingerprint_not_found`;
+  - more than one is `fingerprint_ambiguous` (a damaged journal, since the journal
+    keys files by fingerprint). It never picks one.
+- **Repeating the option** is `fingerprint_repeated`. It is parsed as a list,
+  so "last one wins" cannot happen.
+- **`--limit`** may be omitted, or given as the redundant `1`. Any other value is
+  `limit_conflicts_with_fingerprint`, so `--limit` can never change the selection.
+  Without `--fingerprint`, `--limit` is unchanged.
+- **`--kind`**, if given, must equal the entry's kind (`fingerprint_kind_mismatch`).
+  The fingerprint never changes routing: the entry's own kind picks the bot and
+  channel, as before.
+- **Errors** give a code and a fixed message. They never echo the value, so a
+  mistyped path or token is not printed. A missing value is a clean usage error,
+  not a stack trace.
+
+## Nothing is bypassed
+
+- **Selection is the only difference.** `selectUploadEntries`
+  (`lib/uploader/upload.ts`) replaces the CLI's inline filter.
+- **The rest is the one existing path:** the same `uploadEntry` loop, lock and
+  deps, in this order:
+  1. the real-upload gate;
+  2. the plan gate;
+  3. `planResume` against the server;
+  4. `preflight`;
+  5. `ingest_upload_start` and its floor;
+  6. `sendDocument`;
+  7. reply validation;
+  8. `ingest_upload_record`.
+- **Selection is not permission.** A fingerprint selects its entry whatever the
+  plan. A non-upload plan (`hold`, `reject`, `skip`, `verify_upload`) then reaches
+  `uploadEntry`, which refuses it explicitly (`plan_…`) instead of dropping it
+  silently.
+- **Lifecycle state still decides:**
+  - an entry already uploaded ends in `none`/`adopt_server`, never a second send;
+  - an unresolved one goes to `reconcile`.
+- **The code-level gate still dominates.** `upload --fingerprint <valid>
+  --execute` is refused before configuration, server or Telegram, as before.
+
+## Dry run
+
+Without `--execute`, `upload --fingerprint` prints what would happen:
+- the selected fingerprint ("exact match, 1 of N journal entries") and its
+  kind, relative file name, size, plan and journal state;
+- the destination: the kind's bot, whether the channel is the configured one,
+  and whether the bot is local. No ids are printed;
+- the caption;
+- the adapter's **offline** preflight: stat and path mapping only, with a fetch
+  that refuses.
+
+It does not write the journal. It does not ask the server; `uploadEntry` does
+that at execution.
+
+## `resume`: unchanged (decision)
+
+Resume already chooses deterministically from state:
+- it settles every journal entry that is locally pending, or, with `--server`,
+  every entry the server reports as unresolved;
+- `resumeEntry` never sends a file;
+- `upload` stops at the first uncertain result, so a run leaves at most one
+  unresolved attempt.
+
+A selector would add no safety. It would also invite the question of whether a
+planned entry can be "resumed", which it cannot.
+
+## Source revalidation (finding; not changed here)
+
+Before sending, `preflight` rechecks that the path is a regular file and that its
+size equals the scanned size (`source_changed_since_scan`). It does **not**
+recheck mtime or the sampled content.
+- **The risk:** a different file of exactly the same size, swapped in after the
+  scan, would be sent with the old fingerprint in its caption.
+- **Scope:** this predates the selector and applies to every upload. It needs
+  deliberate replacement, not ordinary drift.
+- **Mitigation for C2B.2D:** run `inspect <file> --kind movie` immediately
+  before `--execute`, and require its freshly computed fingerprint to equal the
+  selected one.
+- **Proposed follow-up (separate checkpoint):** recompute the sampled `sf1`
+  fingerprint at upload time (about 12 MiB read) and refuse on mismatch.
+
+## Tests
+
+- `lib/uploader/uploader.test.ts` covers:
+  - selection among several entries, and independence from journal order;
+  - neighbours that differ only in the last hex digit;
+  - normal selection unchanged;
+  - 13 malformed values;
+  - not found, repeated and duplicate entries;
+  - `--limit` rules and `--kind` mismatch;
+  - through the real `uploadEntry`:
+    - non-upload plans refused;
+    - an uploaded entry, and a lost journal, never re-sent;
+    - uncertain and interrupted entries go to reconcile;
+    - the gate refuses first;
+    - a selected episode keeps series routing through the real adapter
+      (`bot_not_on_local_server` while Series is on the cloud, and
+      `channel_changed_since_plan` for an episode planned for Movies), with no
+      request and no server start.
+- `lib/uploader/cli.test.ts`, on plain Node with fake credentials, covers:
+  - the dry run selects one of three entries, finds the configured local
+    channel, passes preflight, and writes nothing;
+  - selection is independent of order;
+  - selection with no configuration;
+  - `--execute` is refused by the gate;
+  - seven error codes, with and without `--execute`, and no path or token
+    echoed;
+  - a missing value.
+- **Mutation check.** Each of these was disabled in turn, and each change
+  failed tests:
+  - exact equality;
+  - zero-match, multi-match, format, repeated-option, limit and kind guards;
+  - the CLI gate;
+  - `uploadEntry`'s gate and plan gate.
+  All were restored.
+- **Suites:** `npm test` 292, `npm run test:db` 339, `npm run test:catalogue` 30.
+  Lint, typecheck and build pass.
+
+## Real trial dry run
+
+1. `scan G:\Movies --kind movie --match` ran with the hosted VJ list into a
+   scratch journal. It used local reads and read-only TMDB searches only.
+2. `upload --fingerprint sf1-a9a1b20b…` (the full value) selected exactly
+   `On The Hunt.VJ ICE P.2026.mkv`, 1 of 14 entries:
+   - "On The Hunt" (2026), VJ ICE P;
+   - plan `upload`; journal `not_uploaded`;
+   - destination: the configured movie channel through the local Bot API;
+   - preflight ok.
+3. The journal was byte-identical afterwards.
+4. With the real configuration, `--execute` was refused by the gate.
+5. Hosted was unchanged:
+   - ingestion events, media and candidates: 0;
+   - the Movies checkpoint is unchanged;
+   - 1 VJ.

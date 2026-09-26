@@ -3,7 +3,7 @@
 //
 //   scan <root> --kind movie|series [--vjs vjs.json] [--match]
 //   inspect <file> --kind movie|series [--vjs vjs.json] [--match] [--full-hash]
-//   upload [--limit n] [--execute]
+//   upload [--limit n | --fingerprint sf1-… [--kind movie|series]] [--execute]
 //   resume [--server] [--execute]
 //   checkpoint --kind movie|series --message-id <n> [--execute]
 //   status
@@ -17,6 +17,8 @@
 // reports a message id the operator observed in the channel to the server,
 // which advances the recovery checkpoint only if that is safe; it makes no
 // Telegram call.
+// `upload --fingerprint` selects exactly one already-scanned journal entry
+// (never a path) and runs it through the same checks as any other upload.
 // Tokens are never printed. Paths are shown only in this terminal.
 import { readFile, stat } from "node:fs/promises";
 import { basename, extname, resolve } from "node:path";
@@ -35,7 +37,7 @@ import { searchTmdbForIngestion } from "@/lib/tmdb/ingestion-search";
 import { JOURNAL_DIR_ENV, newJournalEntry, openJournal, resolveJournalDir, type Journal, type JournalEntry } from "@/lib/uploader/journal";
 import { fingerprintFile, hashFile, toSourceFile, walkMedia, type DiscoveredFile } from "@/lib/uploader/scan";
 import { createRpcIngestionStore, offlineStore, supabaseRpcTransport, type IngestionStore } from "@/lib/uploader/store";
-import { planResume, REAL_TELEGRAM_UPLOADS_AUTHORIZED, resumeEntry, uploadEntry, type UploaderDeps } from "@/lib/uploader/upload";
+import { isUploadPlanned, planResume, REAL_TELEGRAM_UPLOADS_AUTHORIZED, resumeEntry, selectUploadEntries, uploadEntry, type UploaderDeps, type UploadSelectionError } from "@/lib/uploader/upload";
 import type { CatalogueKind } from "@/types/catalogue";
 import type { DuplicateSubject, KnownVj, MatchOutcome } from "@/types/ingestion";
 
@@ -44,19 +46,28 @@ const MIB = 1024 * 1024;
 const UPLOAD_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 60 * 1000;
 
-const { positionals, values } = parseArgs({
-  allowPositionals: true,
-  options: {
-    kind: { type: "string" },
-    vjs: { type: "string" },
-    match: { type: "boolean", default: false },
-    "full-hash": { type: "boolean", default: false },
-    execute: { type: "boolean", default: false },
-    limit: { type: "string" },
-    server: { type: "boolean", default: false },
-    "message-id": { type: "string" },
-  },
-});
+const options = {
+  kind: { type: "string" },
+  vjs: { type: "string" },
+  match: { type: "boolean", default: false },
+  "full-hash": { type: "boolean", default: false },
+  execute: { type: "boolean", default: false },
+  limit: { type: "string" },
+  server: { type: "boolean", default: false },
+  "message-id": { type: "string" },
+  // Collected as a list so a repeated option is refused, not "last one wins".
+  fingerprint: { type: "string", multiple: true },
+} as const;
+
+let parsed: ReturnType<typeof parseArgs<{ allowPositionals: true; options: typeof options }>>;
+try {
+  parsed = parseArgs({ allowPositionals: true, options });
+} catch (error) {
+  // Node names the option, never its value, so no path or input is echoed.
+  console.error(`error: ${(error as Error).message}`);
+  process.exit(1);
+}
+const { positionals, values } = parsed;
 const [command, target] = positionals;
 
 function fail(message: string): never {
@@ -230,15 +241,30 @@ function executionDeps(store: Journal): UploaderDeps {
   return uploaderDeps(store, loaded.config, workerStore());
 }
 
+const SELECTION_ERRORS: Record<UploadSelectionError, string> = {
+  fingerprint_invalid: "--fingerprint must be a complete source fingerprint: sf1- followed by 64 lowercase hex characters",
+  fingerprint_repeated: "--fingerprint may be given once",
+  fingerprint_not_found: "no journal entry has that fingerprint; scan the library first",
+  fingerprint_ambiguous: "more than one journal entry has that fingerprint; the journal needs inspection",
+  fingerprint_kind_mismatch: "the selected entry is not of the --kind given",
+  limit_conflicts_with_fingerprint: "--fingerprint selects one entry; --limit may only be 1 with it",
+};
+
 async function upload() {
   const store = await journal();
-  const limit = values.limit ? Number.parseInt(values.limit, 10) : Number.POSITIVE_INFINITY;
-  const candidates = (await store.list()).filter((entry) => entry.plan && ["upload", "upload_then_review", "retry_upload"].includes(entry.plan.action)).slice(0, limit);
+  const all = await store.list();
+  const selection = selectUploadEntries(all, { fingerprints: values.fingerprint, limit: values.limit, kind: values.kind });
+  if (!selection.ok) fail(`${selection.code}: ${SELECTION_ERRORS[selection.code]}. Nothing was sent.`);
+  const candidates = selection.entries;
   const caption = (entry: JournalEntry) => {
     const parse = parseFilename(entry.fileName);
     return buildUploadCaption({ kind: entry.kind, title: parse.title, year: parse.year, vjName: parse.vjText, season: parse.season, episode: parse.episode, fingerprint: entry.fingerprint });
   };
 
+  if (!values.execute && values.fingerprint !== undefined) {
+    await describeSelected(candidates[0], all.length, caption(candidates[0]));
+    return;
+  }
   if (!values.execute) {
     for (const entry of candidates) console.log(`${entry.intendedChannelId === null ? "blocked (rescan with Telegram config)" : "would upload"}  ${entry.kind.padEnd(6)} ${mib(entry.sizeBytes).padStart(12)}  ${entry.relativePath}\n  caption: ${caption(entry).split("\n").join(" | ")}`);
     console.log(`\ndry run: ${candidates.length} file(s). Nothing was sent.`);
@@ -257,6 +283,56 @@ async function upload() {
   } finally {
     await release();
   }
+}
+
+/**
+ * Dry run of a fingerprint selection. It shows what uploadEntry would be given
+ * and runs the adapter's offline preflight (stat and path mapping only, with a
+ * fetch that refuses). The server is not asked: at execution uploadEntry
+ * checks its status before any start.
+ */
+async function describeSelected(entry: JournalEntry, total: number, text: string) {
+  console.log(`selected     ${entry.fingerprint}  (exact match, 1 of ${total} journal entr${total === 1 ? "y" : "ies"})`);
+  console.log(`kind         ${entry.kind}`);
+  console.log(`file         ${entry.relativePath}  ${mib(entry.sizeBytes)} (${entry.sizeBytes} bytes)`);
+  console.log(`plan         ${entry.plan?.action ?? "none"}${entry.plan?.stopReasons.length ? `  stop: ${entry.plan.stopReasons.join(", ")}` : ""}`);
+  console.log(`journal      upload ${entry.state.upload}, attempts ${entry.state.uploadAttempts}, review ${entry.state.review}`);
+
+  const reasons: string[] = [];
+  if (!isUploadPlanned(entry)) reasons.push(`plan_${entry.plan?.action ?? "missing"}`);
+  if (entry.state.upload === "uploading" || entry.state.upload === "uploaded") reasons.push(`journal_${entry.state.upload}`);
+  if (entry.intendedChannelId === null) reasons.push("channel_not_planned");
+
+  const config = telegramConfig();
+  if (config === null) {
+    console.log("destination  unknown: Telegram configuration absent or invalid");
+    reasons.push("telegram_config_invalid");
+  } else {
+    const offline = (async () => {
+      throw new Error("dry run: no network");
+    }) as unknown as typeof fetch;
+    const client = createLocalBotApiClient(config, {
+      fetch: offline,
+      stat: async (path) => {
+        const facts = await stat(path);
+        return { isFile: facts.isFile(), size: facts.size };
+      },
+      uploadTimeoutMs: UPLOAD_TIMEOUT_MS,
+      requestTimeoutMs: REQUEST_TIMEOUT_MS,
+    });
+    const preflight = entry.intendedChannelId === null ? null : await client.preflight({
+      transport: entry.kind, kind: entry.kind, intendedChannelId: entry.intendedChannelId, absolutePath: entry.absolutePath,
+      sizeBytes: entry.sizeBytes, fingerprint: entry.fingerprint, caption: text,
+    });
+    // Ids stay out of the output: only whether the channel is the configured one for this kind.
+    const channel = entry.intendedChannelId === config.bots[entry.kind].channelId ? `the configured ${entry.kind} channel` : "NOT the configured channel";
+    const transport = config.bots[entry.kind].local ? "local Bot API" : "not on the local Bot API";
+    console.log(`destination  ${entry.kind} bot -> ${channel} (${transport})`);
+    console.log(`preflight    ${preflight === null ? "not run" : preflight.ok ? "ok (sendDocument by local path)" : `refused: ${preflight.code}`}`);
+    if (preflight !== null && !preflight.ok) reasons.push(preflight.code);
+  }
+  console.log(`caption      ${text.split("\n").join(" | ")}`);
+  console.log(`\ndry run: ${reasons.length === 0 ? "would upload this entry only" : `would not upload (${reasons.join(", ")})`}. Server status is checked at execution. Nothing was sent.`);
 }
 
 /** Nothing to settle: a fresh or definitely failed source, or one already recorded on both sides. */

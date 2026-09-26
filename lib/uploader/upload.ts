@@ -1,4 +1,5 @@
 import "server-only";
+import { isFingerprint } from "@/lib/ingestion/fingerprint";
 import { decideAfterReconcile, decideResume, reconcileUpload, resolveRecoveryFloor, type RecoveryPacing } from "@/lib/ingestion/recovery";
 import { MAX_UPLOAD_ATTEMPTS, transition } from "@/lib/ingestion/state";
 import type { LocalBotApiClient } from "@/lib/telegram/local-bot-api";
@@ -49,6 +50,58 @@ export type StepResult =
   | { result: "resume"; action: ResumeAction | ReconcileDecision };
 
 const UPLOADABLE = new Set(["upload", "upload_then_review", "retry_upload"]);
+
+/** Whether an entry's scan plan lets `upload` hand it to uploadEntry (which checks again). */
+export const isUploadPlanned = (entry: JournalEntry) => entry.plan !== null && UPLOADABLE.has(entry.plan.action);
+
+export type UploadSelectionError =
+  | "fingerprint_invalid"
+  | "fingerprint_repeated"
+  | "fingerprint_not_found"
+  | "fingerprint_ambiguous"
+  | "fingerprint_kind_mismatch"
+  | "limit_conflicts_with_fingerprint";
+
+export interface UploadSelectionOptions {
+  /** Every `--fingerprint` value given, in order. Undefined when the option is absent. */
+  fingerprints?: readonly string[];
+  /** Raw `--limit`. */
+  limit?: string;
+  /** Raw `--kind`; with a fingerprint it must name the selected entry's kind. */
+  kind?: string;
+}
+
+/**
+ * Chooses the journal entries `upload` hands to uploadEntry. Selection is the
+ * only thing `--fingerprint` changes: the entry then goes through the same
+ * uploadEntry as any other, with every plan, state, server, preflight and
+ * authorization check.
+ *
+ * - Without a fingerprint: planned uploads in journal order, cut by `--limit`
+ *   (unchanged).
+ * - With one: exactly the journal entry whose fingerprint is equal to it,
+ *   whatever its plan or state. A plan that is not an upload is then refused
+ *   by uploadEntry explicitly, instead of being filtered out silently. The
+ *   value must already be canonical (`sf1-` + 64 lowercase hex): nothing is
+ *   normalized, and a path is never read or turned into an entry. `--limit`
+ *   may only be the redundant `1`, so it can never change what is selected.
+ */
+export function selectUploadEntries(entries: readonly JournalEntry[], options: UploadSelectionOptions): { ok: true; entries: JournalEntry[] } | { ok: false; code: UploadSelectionError } {
+  if (options.fingerprints === undefined) {
+    const limit = options.limit ? Number.parseInt(options.limit, 10) : Number.POSITIVE_INFINITY;
+    return { ok: true, entries: entries.filter(isUploadPlanned).slice(0, limit) };
+  }
+  if (options.fingerprints.length !== 1) return { ok: false, code: "fingerprint_repeated" };
+  const [wanted] = options.fingerprints;
+  if (!isFingerprint(wanted)) return { ok: false, code: "fingerprint_invalid" };
+  if (options.limit !== undefined && options.limit !== "1") return { ok: false, code: "limit_conflicts_with_fingerprint" };
+  const matches = entries.filter((entry) => entry.fingerprint === wanted);
+  if (matches.length === 0) return { ok: false, code: "fingerprint_not_found" };
+  // The journal keys files by fingerprint, so this means a damaged journal: never pick one.
+  if (matches.length > 1) return { ok: false, code: "fingerprint_ambiguous" };
+  if (options.kind !== undefined && options.kind !== matches[0].kind) return { ok: false, code: "fingerprint_kind_mismatch" };
+  return { ok: true, entries: matches };
+}
 
 function apply(entry: JournalEntry, event: IngestionEvent): JournalEntry {
   const next = transition(entry.state, event);
@@ -121,7 +174,7 @@ export async function planResume(entry: JournalEntry, store: IngestionStore): Pr
 
 export async function uploadEntry(entry: JournalEntry, caption: string, deps: UploaderDeps): Promise<StepResult> {
   if (!deps.telegramEnabled) return { result: "refused", code: "telegram_uploads_not_authorized" };
-  if (entry.plan === null || !UPLOADABLE.has(entry.plan.action)) return { result: "refused", code: `plan_${entry.plan?.action ?? "missing"}` };
+  if (!isUploadPlanned(entry)) return { result: "refused", code: `plan_${entry.plan?.action ?? "missing"}` };
   if (entry.intendedChannelId === null) return { result: "refused", code: "channel_not_planned" };
   if (!deps.store.available) return { result: "refused", code: "server_boundary_unavailable" };
 

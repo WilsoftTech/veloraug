@@ -4,10 +4,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { decideResume, DEFAULT_RECONCILE_GRACE_MS } from "@/lib/ingestion/recovery";
 import { buildUploadCaption } from "@/lib/ingestion/telegram";
-import type { LocalBotApiClient } from "@/lib/telegram/local-bot-api";
+import { createLocalBotApiClient, loadLocalBotApiConfig, type LocalBotApiClient } from "@/lib/telegram/local-bot-api";
 import { newJournalEntry, openJournal, resolveJournalDir, type Journal, type JournalEntry } from "@/lib/uploader/journal";
 import { offlineStore, type IngestionStore } from "@/lib/uploader/store";
-import { planResume, REAL_TELEGRAM_UPLOADS_AUTHORIZED, resumeEntry, uploadEntry, type UploaderDeps } from "@/lib/uploader/upload";
+import { planResume, REAL_TELEGRAM_UPLOADS_AUTHORIZED, resumeEntry, selectUploadEntries, uploadEntry, type UploaderDeps } from "@/lib/uploader/upload";
 import type { ChannelProbeResult, ServerUploadStatus, SourceFingerprint, TelegramMediaRecord, UploadFailureOutcome, UploadOutcome } from "@/types/ingestion";
 
 const FP = `sf1-${"c".repeat(64)}` as SourceFingerprint;
@@ -421,6 +421,153 @@ describe("crash and recovery", () => {
     expect(await uploadEntry(entry({ plan: { action: "hold", stopReasons: ["duplicate_same_title_same_vj"] } }), CAPTION, deps(new FakeStore(), api))).toEqual({ result: "refused", code: "plan_hold" });
     expect(await uploadEntry(entry({ intendedChannelId: null }), CAPTION, deps(new FakeStore(), api))).toEqual({ result: "refused", code: "channel_not_planned" });
     expect(api.sendDocument).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// upload --fingerprint (C2B.2C.2): selection only; everything after it is uploadEntry
+// ---------------------------------------------------------------------------
+
+describe("upload selection by fingerprint", () => {
+  const A = `sf1-${"a".repeat(64)}` as SourceFingerprint;
+  const B = `sf1-${"b".repeat(64)}` as SourceFingerprint;
+  const C = `sf1-${"f".repeat(64)}` as SourceFingerprint;
+  const named = (fingerprint: SourceFingerprint, overrides: Partial<JournalEntry> = {}) =>
+    entry({ fingerprint, fileName: `${fingerprint.slice(4, 8)}.mkv`, relativePath: `${fingerprint.slice(4, 8)}.mkv`, ...overrides });
+  const journalOrder = [named(A), named(B), named(C)];
+  const pick = (entries: JournalEntry[], options: Parameters<typeof selectUploadEntries>[1]) => {
+    const selected = selectUploadEntries(entries, options);
+    return selected.ok ? selected.entries.map((item) => item.fingerprint) : selected.code;
+  };
+  const only = (entries: JournalEntry[], options: Parameters<typeof selectUploadEntries>[1]) => {
+    const selected = selectUploadEntries(entries, options);
+    if (!selected.ok || selected.entries.length !== 1) throw new Error("expected exactly one selected entry");
+    return selected.entries[0];
+  };
+
+  it("selects exactly the entry with that fingerprint, whatever the journal order", () => {
+    expect(pick(journalOrder, { fingerprints: [B] })).toEqual([B]);
+    expect(pick([...journalOrder].reverse(), { fingerprints: [B] })).toEqual([B]);
+    expect(pick([named(C), named(B), named(A)], { fingerprints: [C] })).toEqual([C]);
+    // Contrast: without a selector, --limit 1 takes whatever sorts first.
+    expect(pick(journalOrder, { limit: "1" })).toEqual([A]);
+  });
+
+  it("matches the whole fingerprint: neighbours differing only in the last hex digit are never confused", () => {
+    const low = `sf1-${"9".repeat(63)}0` as SourceFingerprint;
+    const high = `sf1-${"9".repeat(63)}1` as SourceFingerprint;
+    const shared = `sf1-${"9".repeat(63)}2` as SourceFingerprint;
+    expect(pick([named(low), named(high)], { fingerprints: [high] })).toEqual([high]);
+    expect(pick([named(high), named(low)], { fingerprints: [low] })).toEqual([low]);
+    expect(pick([named(low), named(high)], { fingerprints: [shared] })).toBe("fingerprint_not_found");
+  });
+
+  it("without --fingerprint, selection is unchanged: planned uploads in journal order, cut by --limit", () => {
+    const mixed = [named(A, { plan: { action: "skip", stopReasons: ["already_uploaded"] } }), named(B), named(C, { plan: { action: "upload_then_review", stopReasons: ["vj_unresolved"] } })];
+    expect(pick(mixed, {})).toEqual([B, C]);
+    expect(pick(mixed, { limit: "1" })).toEqual([B]);
+  });
+
+  it("refuses a value that is not a complete canonical fingerprint, without normalizing it", () => {
+    const bad = ["", "sf1-", `sf1-${"b".repeat(63)}`, `sf1-${"b".repeat(65)}`, `SF1-${"b".repeat(64)}`, `sf1-${"B".repeat(64)}`, `sf2-${"b".repeat(64)}`,
+      ` ${B}`, `${B} `, `${B.slice(0, -1)}g`, "G:\\Movies\\On The Hunt.mkv", "/media/movies/x.mkv", "bbbb"];
+    for (const value of bad) expect(pick(journalOrder, { fingerprints: [value] })).toBe("fingerprint_invalid");
+  });
+
+  it("refuses an unknown fingerprint, a repeated option and a damaged journal with two matches", () => {
+    expect(pick(journalOrder, { fingerprints: [`sf1-${"e".repeat(64)}`] })).toBe("fingerprint_not_found");
+    expect(pick([], { fingerprints: [B] })).toBe("fingerprint_not_found");
+    expect(pick(journalOrder, { fingerprints: [B, B] })).toBe("fingerprint_repeated");
+    expect(pick(journalOrder, { fingerprints: [B, C] })).toBe("fingerprint_repeated");
+    expect(pick(journalOrder, { fingerprints: [] })).toBe("fingerprint_repeated");
+    expect(pick([named(A), named(B), named(B, { relativePath: "copy.mkv" })], { fingerprints: [B] })).toBe("fingerprint_ambiguous");
+  });
+
+  it("--limit can only be the redundant 1, so it never changes what is selected", () => {
+    expect(pick(journalOrder, { fingerprints: [C], limit: "1" })).toEqual([C]);
+    for (const limit of ["0", "2", "10", "01", "1.0", "abc", ""]) expect(pick(journalOrder, { fingerprints: [C], limit })).toBe("limit_conflicts_with_fingerprint");
+  });
+
+  it("a --kind given with the fingerprint must be the entry's kind; the fingerprint never changes routing", () => {
+    const episode = named(B, { kind: "series" });
+    expect(pick([named(A), episode], { fingerprints: [B], kind: "movie" })).toBe("fingerprint_kind_mismatch");
+    expect(pick([named(A), episode], { fingerprints: [B], kind: "films" })).toBe("fingerprint_kind_mismatch");
+    expect(only([named(A), episode], { fingerprints: [B], kind: "series" })).toBe(episode);
+  });
+
+  it("selection is not permission: a selected entry whose plan is not an upload is refused by uploadEntry, and nothing is sent", async () => {
+    const api = telegram(async () => ({ status: "succeeded", record: media(41) }));
+    const plans = [["hold", "duplicate_same_title_same_vj"], ["reject", "file_too_large"], ["skip", "already_uploaded"], ["verify_upload", "interrupted_upload"]] as const;
+    for (const [action, reason] of plans) {
+      const store = new FakeStore();
+      const selected = only([named(A), entry({ plan: { action, stopReasons: [reason] } })], { fingerprints: [FP] });
+      expect(await uploadEntry(selected, CAPTION, deps(store, api))).toEqual({ result: "refused", code: `plan_${action}` });
+      expect(store.calls).toEqual([]);
+    }
+    expect(api.preflight).not.toHaveBeenCalled();
+    expect(api.sendDocument).not.toHaveBeenCalled();
+  });
+
+  it("a selected entry already uploaded is not uploaded again, even with a stale upload plan", async () => {
+    const store = new FakeStore();
+    store.status = { status: "uploaded", record: media(41) };
+    const api = telegram(async () => ({ status: "succeeded", record: media(42) }));
+    const uploaded = entry({ state: { ...entry().state, upload: "uploaded", uploadAttempts: 1, telegram: { chatId: MOVIES, messageId: 41 } }, telegram: media(41), dbAcknowledgedAt: T0.toISOString() });
+    expect(await uploadEntry(only([uploaded], { fingerprints: [FP] }), CAPTION, deps(store, api))).toEqual({ result: "resume", action: { action: "none" } });
+    // A lost journal: the server's record still wins.
+    expect(await uploadEntry(only([entry()], { fingerprints: [FP] }), CAPTION, deps(store, api))).toEqual({ result: "resume", action: { action: "adopt_server", record: media(41) } });
+    expect(store.calls).toEqual([]);
+    expect(api.sendDocument).not.toHaveBeenCalled();
+  });
+
+  it("a selected entry with an unresolved attempt goes to reconciliation, never to a second send", async () => {
+    const store = new FakeStore();
+    store.status = { status: "uncertain" };
+    store.floor = 40;
+    const api = telegram(async () => ({ status: "succeeded", record: media(42) }));
+    expect(await uploadEntry(only([entry()], { fingerprints: [FP] }), CAPTION, deps(store, api))).toEqual({ result: "resume", action: { action: "reconcile" } });
+    const interrupted = entry({ state: { ...entry().state, upload: "uploading", uploadAttempts: 1 } });
+    expect(await uploadEntry(only([interrupted], { fingerprints: [FP] }), CAPTION, deps(new FakeStore(), api))).toEqual({ result: "resume", action: { action: "reconcile" } });
+    expect(api.sendDocument).not.toHaveBeenCalled();
+  });
+
+  it("with the gate off, a selected, valid, planned entry is refused before the server or Telegram", async () => {
+    const api = telegram(async () => ({ status: "succeeded", record: media(41) }));
+    const store = new FakeStore();
+    const selected = only([named(A), entry()], { fingerprints: [FP] });
+    expect(await uploadEntry(selected, CAPTION, { ...deps(store, api), telegramEnabled: REAL_TELEGRAM_UPLOADS_AUTHORIZED })).toEqual({ result: "refused", code: "telegram_uploads_not_authorized" });
+    expect(store.calls).toEqual([]);
+    expect(api.preflight).not.toHaveBeenCalled();
+  });
+
+  it("a selected episode keeps series routing through the real adapter: refused offline, never sent to Movies", async () => {
+    const SERIES_CHANNEL = -1002222222222;
+    const env = {
+      TELEGRAM_BOT_API_URL: "http://127.0.0.1:8081",
+      TELEGRAM_MOVIES_BOT_TOKEN: "1111111:AAAAmovieFAKEtokenFAKEtokenFAKEtok",
+      TELEGRAM_SERIES_BOT_TOKEN: "2222222:BBBBseriesFAKEtokenFAKEtokenFAKEto",
+      TELEGRAM_MOVIES_CHANNEL_ID: String(MOVIES),
+      TELEGRAM_SERIES_CHANNEL_ID: String(SERIES_CHANNEL),
+      TELEGRAM_MOVIES_BOT_ID: "1111111",
+      TELEGRAM_MOVIES_BOT_USERNAME: "fake_movies_bot",
+      TELEGRAM_SERIES_BOT_ID: "2222222",
+      TELEGRAM_SERIES_BOT_USERNAME: "fake_series_bot",
+    };
+    const network = vi.fn(() => Promise.reject(new Error("no network in tests")));
+    const episodeCaption = buildUploadCaption({ kind: "series", title: "Show", year: null, vjName: "Junior", season: 1, episode: 2, fingerprint: FP });
+    const run = async (candidate: JournalEntry, localBots: string) => {
+      const loaded = loadLocalBotApiConfig({ ...env, TELEGRAM_BOT_API_LOCAL_BOTS: localBots });
+      if (!loaded.ok) throw new Error(loaded.errors.join("; "));
+      const api = createLocalBotApiClient(loaded.config, { fetch: network as unknown as typeof globalThis.fetch, stat: async () => ({ isFile: true, size: SIZE }), uploadTimeoutMs: 1, requestTimeoutMs: 1 });
+      const store = new FakeStore();
+      const result = await uploadEntry(only([candidate], { fingerprints: [FP] }), episodeCaption, { journal, store, telegram: api, telegramEnabled: true, channelHighWater: async () => 0, now: () => T0, sleep: async () => {} });
+      return { result, calls: store.calls };
+    };
+    // Series is still on the cloud: refused before any request or server start.
+    expect(await run(entry({ kind: "series", intendedChannelId: SERIES_CHANNEL }), "movie")).toEqual({ result: { result: "refused", code: "bot_not_on_local_server" }, calls: [] });
+    // An episode planned for the Movies channel is refused even with both bots local.
+    expect(await run(entry({ kind: "series", intendedChannelId: MOVIES }), "movie,series")).toEqual({ result: { result: "refused", code: "channel_changed_since_plan" }, calls: [] });
+    expect(network).not.toHaveBeenCalled();
   });
 });
 
