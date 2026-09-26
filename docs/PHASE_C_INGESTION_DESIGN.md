@@ -1818,3 +1818,126 @@ the Movies path has passed its trial.
    - a file near the ceiling.
 3. Only then migrate Series. Repeat the same sequence (preflight, `logOut`, gate,
    identity, persistence), then register its channel.
+
+# C2B.2C — Movies channel registration and checkpoint bootstrap (PASS)
+
+Status: **PASS (2026-09-26).** The Movies channel is in the hosted allow-list, and
+its first checkpoint comes from a marker the Movies bot deliberately posted, using
+the id Telegram returned for it. Series is untouched. Real uploads stay disabled.
+Production channel, group and message ids are deliberately not recorded here.
+
+## Preflight
+
+- **Git:** `phase-a-foundation` at `ed7bef2`, 0 ahead / 0 behind.
+- **Local Bot API:**
+  - Docker Desktop had stopped and was started; the container came back healthy on
+    its own (`restart: unless-stopped`).
+  - Image 10.3, revision `2efabc72`; `--local`; published on `127.0.0.1:8081` only.
+  - Non-root, read-only root filesystem, `cap_drop: ALL`, `no-new-privileges`.
+  - The named volume `velora-telegram-bot-api-state` is the one from C2B.2B.
+- **Movies (read-only, through the local server):**
+  - the adapter's `checkIdentity` and a raw `getMe` agree: the configured id,
+    `is_bot`, exactly `veloramovies_bot`;
+  - `getChat` returns the configured channel, type `channel`, not
+    content-protected;
+  - `getChatMember` shows the bot is an `administrator` with `can_post_messages`.
+- **Recovery group:**
+  - the configured private supergroup, with no public username;
+  - the bot is an ordinary `member`;
+  - `checkRecoveryAccess` returned `ok`.
+- **Series:**
+  - not listed in `TELEGRAM_BOT_API_LOCAL_BOTS`;
+  - the adapter refuses it with `bot_not_on_local_server`, with no request made;
+  - cloud `getMe` still answers as `velora_series_bot`.
+- **Hosted (read-only):**
+  - 10 migrations; every ingestion table has 0 rows; no unresolved upload.
+  - `telegram_channels` has 0 rows. Its ACL is owner-only, RLS is on with no
+    policies, and no client role has a grant or `USAGE` on `private`.
+  - `ingest_channel_checkpoint` is owned by `postgres`, SECURITY DEFINER,
+    `search_path=""`, and EXECUTE is `postgres`/`service_role` only.
+  - The bodies of `ingest_channel_checkpoint` and `guard_channel_checkpoint` are
+    MD5-identical to migration 10 in the repository.
+
+## Registration (owner boundary)
+
+- One `insert into private.telegram_channels (bot_type, chat_id)` for `movie`:
+  - run as `postgres` through `psql` over the pooler, as "Channel allow-list
+    configuration" prescribes;
+  - the channel id was read from `.env.local` and never printed;
+  - the transaction refused to run unless the table and `ingestion_events` were
+    empty.
+- Readback, both in the transaction and after commit: exactly one row, `movie`,
+  channel equal to `TELEGRAM_MOVIES_CHANNEL_ID`, checkpoint `0`, no Series row.
+- Nothing else is stored: no token, username, group id or path.
+
+## Bootstrap marker
+
+- **Re-verified first.** Identity, channel and posting rights were checked again,
+  after registration and before the send.
+- **Sent once.** One `sendMessage` from the Movies bot through the local server,
+  with notifications off. The text is:
+
+  ```
+  velora-checkpoint:v1 bootstrap movies at=<ISO time> nonce=<8 hex>
+  ```
+
+  - It is distinct from `velora-recovery:v1`: `isRecoveryMarker` is false.
+  - It is distinct from media captions: no `velora-src:` token, and
+    `fingerprintFromCaption` returns null.
+  - It carries no id, path or credential.
+  - A local record was reserved before the call, so a rerun cannot send a second
+    marker.
+- **Reply validated before the id was used:**
+  - `ok`, and a positive `message_id` in the checkpoint's range;
+  - `chat.id` equals the registered channel, and `chat.type` is `channel`;
+  - the text is exactly what was sent;
+  - `sender_chat` is that channel, and `from`, if present, is the bot;
+  - the date is within minutes of the send;
+  - no media, not a forward.
+- **Retained.** The marker stays in the channel and is not pinned. It is the
+  external evidence for the first checkpoint.
+
+## Checkpoint
+
+- Seeded with `npm run ingest -- checkpoint --kind movie --message-id <id> --execute`,
+  which is the service_role worker calling `ingest_channel_checkpoint`.
+- The id was the marker's own returned id, not `+ 1`. The RPC returned that id.
+- Readback (MCP and `psql`): one row, `movie`, the configured channel, and
+  `checkpoint_message_id` equal to the marker id (> 0).
+- Monotonicity was not exercised in production. pgTAP `006` covers a lower id
+  (no-op), an equal id (no-op) and a direct regression (refused), and the
+  hosted body is identical to the tested one.
+
+## Writes
+
+| Where | Writes |
+| --- | --- |
+| Telegram | Exactly one `sendMessage` (the bootstrap marker). No `sendDocument`, recovery marker, forward or delete |
+| Hosted | Exactly two: the Movies channel insert (owner) and one checkpoint advance (RPC) |
+| Repository | This record and the roadmap status line |
+
+## State now
+
+| Item | State |
+| --- | --- |
+| Movies bot | Local Bot API; channel registered; checkpoint seeded (> 0) |
+| Series bot | Cloud Bot API; not registered; not logged out; no checkpoint |
+| Ingestion rows | `ingestion_events` 0, `telegram_media` 0, `metadata_match_candidates` 0 |
+| Real uploads | Disabled (`REAL_TELEGRAM_UPLOADS_AUTHORIZED = false`) |
+| Library mount (`G:\Movies`) | Not mounted |
+
+A Movies `ingest_upload_start` would no longer fail with `ingest_channel_not_allowed`
+or `ingest_recovery_floor_unknown`. Its floor would be the seeded checkpoint. No
+start was made.
+
+## Next boundary (needs its own authorization)
+
+The controlled Movies trial ("C2B.2B", "Next boundary", step 2):
+1. mount `G:\Movies`;
+2. scan;
+3. enable `REAL_TELEGRAM_UPLOADS_AUTHORIZED` through a reviewed change;
+4. one small upload;
+5. a crash drill;
+6. a file near the ceiling.
+
+Series comes after that.
