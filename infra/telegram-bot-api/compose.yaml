@@ -35,13 +35,15 @@ services:
         published: "8081"
         protocol: tcp
     volumes:
-      # Bot sessions and server state: a host directory outside the repository.
-      # It must already exist; Docker never creates it.
-      - type: bind
-        source: ${VELORA_BOT_API_STATE_DIR:-C:/velora-ops/telegram-bot-api}
+      # Bot sessions and server state, on a named volume (Docker's Linux
+      # filesystem), never a Windows bind mount. There, TDLib renames its binlog
+      # while it is open and the next stat returns ENOENT, aborting the server on
+      # the first bot login (C2B.2B). On first use the volume takes the image
+      # directory's owner (the non-root server user). `down -v` would erase every
+      # bot session: never pass -v.
+      - type: volume
+        source: state
         target: /var/lib/telegram-bot-api
-        bind:
-          create_host_path: false
     tmpfs:
       - /tmp/telegram-bot-api:size=256m,mode=1777
     read_only: true
@@ -54,3 +56,8 @@ services:
       options:
         max-size: 10m
         max-file: "3"
+
+volumes:
+  state:
+    # A fixed name, so the volume is found again whatever the project directory.
+    name: velora-telegram-bot-api-state
