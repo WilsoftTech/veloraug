@@ -1941,3 +1941,90 @@ The controlled Movies trial ("C2B.2B", "Next boundary", step 2):
 6. a file near the ceiling.
 
 Series comes after that.
+
+# C2B.2C.1 — Ice P VJ catalogue bootstrap (PASS)
+
+Status: **PASS (2026-09-27).** Hosted `public.vjs` now holds one active VJ, Ice P.
+No upload, no Telegram call, no ingestion write.
+
+## Why it was needed
+
+C2B.2D stopped before any upload. Its trial movie parsed the VJ text `ICE P`, but
+hosted `public.vjs` was empty. The resolver never creates a VJ, so it returned
+`unresolved`. The planner therefore chose `upload_then_review` (`vj_unresolved`)
+instead of `upload`.
+
+## Representation
+
+| Column | Value | Basis |
+| --- | --- | --- |
+| `name` | `VJ Ice P` | Repository convention: the dev seed uses `VJ Junior`/`VJ Emmy`, and the ingestion fixture uses `VJ Ice P` |
+| `slug` | `vj-ice-p` | Same convention; satisfies the slug CHECK |
+| `is_active` | `true` | |
+| `badge_variant`, `sort_order` | Defaults (`blue`, `0`) | |
+| `description`, `avatar_url` | Null | Nothing is known, so nothing was invented |
+
+- **No aliases.** The schema has no alias column. None is needed, because the
+  resolver's key covers every spelling in the library (below).
+- **The dev seed is unchanged.** Its VJs are synthetic, and hosted ids are never
+  copied into fixtures.
+
+## Write boundary
+
+- No client role can write `public.vjs`:
+  - `anon` and `authenticated` may read the public columns only, filtered by
+    `vjs: read active`;
+  - `service_role` has no privilege on it.
+- No admin write path exists yet; that is Phase G1.
+- So the row was inserted by the owner through `psql` over the pooler, the same
+  boundary C2B.2C used. The transaction refused to run unless `public.vjs` was
+  empty.
+
+## Normalization (proven against repository code, not assumed)
+
+`vjKey` = `normalizeTitle` (lowercase; every run of non-alphanumerics becomes one
+space), then drop a leading `vj` word, then remove spaces.
+
+- The name and the slug both give `icep`.
+- The five spellings `ICE P`, `Ice P`, `ICEP`, `ICE_P` and `VJ_ICEP` all give
+  `icep`. `resolveVj` resolves each of them to the hosted row, with no ambiguity.
+- All 14 files in the Movies library were checked too. `parseFilename` extracts
+  `Ice P`, `ICE P` or `ICEP`, and every one resolves to the same row.
+
+## Readback
+
+- **Owner (MCP):** exactly 1 VJ, with the values above.
+- **Anon REST (`/rest/v1/vjs`):** returns the row, so the public catalogue can
+  read it.
+- **Nothing else changed:**
+  - movies, series, versions and genres: 0;
+  - ingestion events, media and match candidates: 0;
+  - one channel row (`movie`), with its checkpoint unchanged.
+
+## Planner (dry run: `inspect`, no journal write)
+
+The C2B.2D trial file was re-inspected, with the `--vjs` input built from the
+hosted row.
+
+| Check | Result |
+| --- | --- |
+| Kind | Movie, confirmed |
+| Title | "On The Hunt" (2026) |
+| VJ | `resolved` to `vj-ice-p` |
+| TMDB match | Unchanged (score 1) |
+| Duplicate | `none` |
+| Action | **`upload`**, with no stop reasons |
+
+## Safety
+
+- Telegram writes: 0. Uploads and upload attempts: 0. Ingestion writes: 0.
+- The Movies checkpoint is unchanged, and Series is untouched.
+- `REAL_TELEGRAM_UPLOADS_AUTHORIZED = false`.
+- The media mount was not needed for the dry run and was not added.
+
+## Next
+
+C2B.2D, the first controlled Movies upload, needs re-authorization. The
+single-file selection gap it reported is still open:
+- `scan` only walks directories;
+- `upload --limit 1` takes journal entries in fingerprint order.
