@@ -2490,3 +2490,102 @@ finally {
 - Hosted is unchanged: ingestion rows 0, and the Movies checkpoint is unchanged.
 - C2B.2D is **not** complete. Its retry uses the procedure above with the
   authorized fingerprint.
+
+# C2B.2D — First controlled Movies upload, retry: BLOCKED — UNCERTAIN (2026-09-27)
+
+One authorized attempt, for the trial movie only. Its outcome is **uncertain**. It
+is preserved for a separately authorized reconciliation, and it has **not** been
+retried.
+
+## Preflight (all passed, immediately before execution)
+
+- **Git:** `b25e6e9`, level with the remote. The gate was unset in the shell and
+  absent from `.env.local`.
+- **Local Bot API:** healthy, `--local`, `127.0.0.1:8081` only. `G:\Movies` is
+  mounted read-only at `/media/movies`, and the file is visible at 1,004,462,878
+  bytes.
+- **Movies:** identity, channel, administrator with `can_post_messages`,
+  unprotected, and the recovery group all verified.
+- **Series:** on the cloud, refused locally with no request.
+- **Hosted:**
+  - 10 migrations;
+  - one `movie` channel row, equal to the configuration, at checkpoint 22;
+  - one active VJ;
+  - ingestion events, media and candidates 0.
+- **Dry run:** `upload --fingerprint <authorized> --kind movie` selected 1 of 14
+  entries. Preflight ok, and the current bytes equal the authorized fingerprint.
+
+## Execution
+
+- **Command:** run once, in PowerShell:
+
+  ```
+  npm run ingest -- upload --fingerprint <authorized> --kind movie --execute
+  ```
+
+  - `REAL_TELEGRAM_UPLOADS_AUTHORIZED=true` was set only inside the `try` block.
+  - `finally` removed it (confirmed).
+  - Duration: 23:00:58Z to 23:06:09Z.
+- **Result:** `{"result":"uncertain","code":"network_error"}`.
+- **Hosted after:**
+  - one uploader row: `movie`, upload state `uncertain`, attempt 1, floor 22,
+    failure code `network_error`, source size 1,004,462,878;
+  - `status = received`;
+  - `telegram_media` 0 and match candidates 0;
+  - the checkpoint is still 22 (not advanced).
+- **Journal after:** the entry is `uploading`, attempt 1 is `uncertain`
+  (`network_error`), with recovery floor 22. No Telegram record.
+- **Nothing else:** no Telegram read-back was attempted, because forward probes
+  belong to reconciliation. No retry, no marker, no delete.
+
+## Cause (defect found; not fixed here)
+
+The client aborted after exactly **300 s** without response headers.
+- The adapter's `sendDocument` passes an `AbortSignal.timeout(4 h)`.
+- But Node 24's built-in `fetch` (undici) also applies its default dispatcher
+  `headersTimeout` of 300 s, and the uploader never overrides it.
+- The local Bot API server replies only after Telegram has accepted the whole
+  file. So any upload that takes more than 300 s is cut off on the client side
+  and mapped to `uncertain` / `network_error`, while the server keeps uploading.
+
+**Evidence:**
+- The container did not restart.
+- Its network output kept growing after the client error: 622 MB at 23:06:1x,
+  671 MB at 23:06:51, 707 MB at 23:07:07.
+- It levelled off at **1.01 GB** at 23:10:02Z, which matches the file size
+  (1,004,462,878 bytes) plus overhead, with no restart. So the server very
+  probably finished the upload, and the movie is probably in the Movies channel
+  under the attempt's caption token. This is not confirmed: reading it back
+  needs the reconciliation probe, which was not authorized here.
+
+**Safety held:**
+- The attempt was already durable: `ingest_upload_start` fixed the floor at 22.
+- The server now refuses any new start for this fingerprint while it is
+  `uncertain`.
+- Crash reconciliation (marker plus bounded scan of `(22, marker)`) will find
+  the message by its `velora-src` caption token, or rule it out.
+
+**Fix (separate checkpoint):** give the Bot API transport a dispatcher whose
+`headersTimeout`/`bodyTimeout` cover the upload window (at least the 4 h upload
+timeout), with a test that a slow reply past 300 s is not `uncertain`.
+Reconciliation must stay the recovery path for this attempt.
+
+## State now
+
+| Item | State |
+| --- | --- |
+| Trial source | Hosted `uncertain` (floor 22); journal `uploading`; retry refused by the server |
+| Movies checkpoint | 22 (unchanged) |
+| Real uploads | Disabled: shell unset, not in `.env.local` |
+| Series | Cloud, unregistered, untouched |
+| Upload attempts | 1 (uncertain); 0 confirmed |
+
+## Next (each needs its own authorization)
+
+1. Fix the transport timeout (above).
+2. Reconcile this attempt, with `resume --server` first as a dry run:
+   - post a recovery marker;
+   - scan `(22, marker)`;
+   - record the message if it is found;
+   - otherwise the source stays held until the grace period ends.
+3. Only then continue C2B.2D.
