@@ -1654,10 +1654,12 @@ directory. Nothing in this checkpoint used a bot token against the local server.
    from a message actually observed in that channel.
 4. Mount `G:\Movies`, then run the trial in "C2B prerequisites" step 7.
 
-# C2B.2B — Movies bot migration (BLOCKED, then recovery preparation)
+# C2B.2B — Movies bot migration (PASS)
 
-Status: **the Movies bot is logged out of the cloud and not yet running locally.**
-Series is untouched on the cloud. No upload, marker, forward or checkpoint.
+Status: **PASS (2026-09-26).** The Movies bot runs on the local Bot API server and
+its session survives restart and recreation. Series stays on the cloud on purpose.
+The first attempt was blocked, as recorded below. The retry passed after the state
+volume, token and gate were fixed ("Retry").
 
 ## Identities
 
@@ -1699,9 +1701,8 @@ The numeric id is the primary assertion and the exact username the secondary one
   - the probe passes 5/5 on the live volume;
   - a sentinel survived `up --force-recreate` and was then removed;
   - the container is healthy, loopback-only, `--local`, Bot API 10.3.
-- The old bind directory is no longer mounted. It still holds the failed session
-  (one 128-byte `td.binlog`, in a directory named after the old token). Delete it
-  only after the token is revoked.
+- The old bind directory is no longer mounted. The failed session left in it was
+  deleted once the token was revoked (see "Token exposure").
 
 ## Token exposure
 
@@ -1738,19 +1739,82 @@ cloud. Now:
 - The split state is therefore
   `TELEGRAM_BOT_API_LOCAL_BOTS=movie`: Movies goes to the local server, and Series
   is refused locally and stays on the cloud.
-- `.env.local` currently lists no bot, so both are refused.
+- The list records completed migrations, never intended ones. `.env.local` listed no
+  bot until the retry's cloud `logOut` succeeded. It now lists `movie` only.
 
 Five tests cover the gate. Each gate element was mutation-checked: disabled, the
 tests fail; restored, they pass.
 
-## Resuming the migration (needs authorization)
+## Retry (PASS, 2026-09-26)
 
-1. ~~Rotate the Movies token, update `.env.local` and delete the old failed session
-   directory.~~ Done.
-2. With the new token, which is live on the cloud: cloud `getMe`, then `logOut`.
-3. Only after the `logOut`, set `TELEGRAM_BOT_API_LOCAL_BOTS=movie`. The list
-   records completed migrations, never intended ones. Then verify the bot through the
-   local server:
-   - local `getMe`;
-   - Movies channel and recovery group, read-only;
-   - session survival across a restart and an `up --force-recreate`.
+Recovery preparation was committed first. The gate listed no bot, so config was
+fail-closed.
+
+1. **Fresh preflight passed.**
+   - Cloud `getMe` with the rotated token returned the configured id,
+     `is_bot: true` and `veloramovies_bot`.
+   - Movies-channel administrator with `can_post_messages`; channel unprotected.
+   - Ordinary member of the private recovery supergroup; no webhook on either bot.
+   - Series healthy on the cloud.
+   - Local server healthy: 10.3, `--local`, loopback only, named volume, hardening
+     unchanged, no bot session.
+   - Hosted empty; flag `false`.
+2. **Cloud `logOut`, Movies only:** `{"ok":true,"result":true}` at
+   **2026-09-26T08:23:06Z**. It was called once and was the only Telegram write.
+3. **Gate:** only then was `TELEGRAM_BOT_API_LOCAL_BOTS=movie` set. On reload,
+   Movies is local and Series is refused.
+4. **Local identity:** the adapter's `checkIdentity`, through `127.0.0.1:8081`,
+   passed: exact configured id, `is_bot`, exactly `veloramovies_bot`. The server did
+   not restart.
+5. **Movies channel, read-only through the local server:**
+   - configured channel, bot is administrator with `can_post_messages`, not
+     content-protected;
+   - `checkRecoveryAccess` returned `ok`.
+6. **Recovery group, read-only through the local server:**
+   - configured private supergroup, no public username;
+   - bot is an ordinary member with no admin rights;
+   - members may send messages and documents, which is what forwarding and markers
+     need.
+7. **Session persistence, the test C2B.2A could not run:**
+   - One bot session was created at the first local login.
+   - After `compose restart`, and again after `up --force-recreate`, identity,
+     channel and recovery-group checks passed.
+   - Both times the same session was reused, not re-created: it is older than both
+     container starts, and its binlog kept growing.
+8. **Split routing:** Series calls through the adapter returned
+   `bot_not_on_local_server` with no request made. Every recorded request was a
+   Movies call to `127.0.0.1:8081`. The adapter has no cloud fallback.
+9. **Safety:**
+   - Series was never logged out and still answers on the cloud.
+   - No `sendDocument`, upload, marker, forward or delete.
+   - `REAL_TELEGRAM_UPLOADS_AUTHORIZED = false`.
+   - Hosted: 10 migrations, `private.telegram_channels` 0 rows, no checkpoints,
+     ingestion rows 0.
+
+## Current state
+
+| Item | State |
+| --- | --- |
+| Movies bot (`@veloramovies_bot`) | Local Bot API (`TELEGRAM_BOT_API_LOCAL_BOTS=movie`) |
+| Series bot (`@velora_series_bot`) | Cloud Bot API, on purpose; refused locally (`bot_not_on_local_server`) |
+| Real uploads | Disabled in code (`REAL_TELEGRAM_UPLOADS_AUTHORIZED = false`) |
+| Hosted channel allow-list (`private.telegram_channels`) | Empty; hosted uploads fail closed |
+| Channel checkpoints | None seeded |
+| Library mount (`G:\Movies`) | Not mounted |
+
+## Next boundary (each step needs its own authorization)
+
+The Movies path should be proven end to end before anything else changes. Series
+migration is **not** automatically next: it is a separate decision, best taken once
+the Movies path has passed its trial.
+
+1. Register the Movies channel in hosted `private.telegram_channels`, and seed its
+   checkpoint from a message id actually observed in that channel.
+2. Mount `G:\Movies`, then run the Movies trial in "C2B prerequisites" step 7:
+   - a scan;
+   - one explicit small upload, which needs `REAL_TELEGRAM_UPLOADS_AUTHORIZED`
+     enabled by a reviewed change;
+   - a crash drill with `resume`;
+   - a file near the ceiling.
+3. Only then migrate Series. Repeat the same sequence (preflight, `logOut`, gate,
+   identity, persistence), then register its channel.
