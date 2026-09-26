@@ -33,6 +33,7 @@ import { titleKey } from "@/lib/ingestion/duplicates";
 import { resolveVj } from "@/lib/ingestion/vj";
 import { buildUploadCaption, TELEGRAM_MAX_FILE_BYTES } from "@/lib/ingestion/telegram";
 import { createLocalBotApiClient, loadLocalBotApiConfig, type LocalBotApiConfig } from "@/lib/telegram/local-bot-api";
+import { longRunningFetch } from "@/lib/telegram/long-running-fetch";
 import { isTmdbConfigured } from "@/lib/tmdb/client";
 import { searchTmdbForIngestion } from "@/lib/tmdb/ingestion-search";
 import { JOURNAL_DIR_ENV, newJournalEntry, openJournal, resolveJournalDir, type Journal, type JournalEntry } from "@/lib/uploader/journal";
@@ -209,6 +210,8 @@ function uploaderDeps(store: Journal, config: LocalBotApiConfig, server: Ingesti
     store: server,
     telegram: createLocalBotApiClient(config, {
       fetch,
+      // sendDocument only: no 300 s header wait; UPLOAD_TIMEOUT_MS is its real, finite limit.
+      mediaFetch: longRunningFetch,
       stat: async (path) => {
         const facts = await stat(path);
         return { isFile: facts.isFile(), size: facts.size };
@@ -320,6 +323,7 @@ async function describeSelected(entry: JournalEntry, total: number, text: string
     }) as unknown as typeof fetch;
     const client = createLocalBotApiClient(config, {
       fetch: offline,
+      mediaFetch: offline,
       stat: async (path) => {
         const facts = await stat(path);
         return { isFile: facts.isFile(), size: facts.size };

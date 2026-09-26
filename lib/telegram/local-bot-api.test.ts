@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildRecoveryMarker, reconcileUpload } from "@/lib/ingestion/recovery";
@@ -13,6 +14,7 @@ import {
   type StatFile,
   type UploadRequest,
 } from "@/lib/telegram/local-bot-api";
+import { longRunningFetch } from "@/lib/telegram/long-running-fetch";
 import type { SourceFingerprint } from "@/types/ingestion";
 
 // Fake credentials: the right shape, never real.
@@ -85,7 +87,7 @@ function client(
     const getMe = /\/bot([^/]+)\/getMe$/.exec(url);
     return getMe ? identity(getMe[1]) : fetch(url, init);
   };
-  return { fetch, identity, api: createLocalBotApiClient(cfg, { fetch: routed as unknown as typeof globalThis.fetch, stat, uploadTimeoutMs: 1000, requestTimeoutMs: 1000 }) };
+  return { fetch, identity, api: createLocalBotApiClient(cfg, { fetch: routed as unknown as typeof globalThis.fetch, mediaFetch: routed as unknown as typeof globalThis.fetch, stat, uploadTimeoutMs: 1000, requestTimeoutMs: 1000 }) };
 }
 
 const noNetwork = () => Promise.reject(new Error("the network must not be reached"));
@@ -644,5 +646,118 @@ describe("upload caption", () => {
     expect(text.length).toBeLessThanOrEqual(TELEGRAM_CAPTION_MAX);
     expect(fingerprintFromCaption(text)).toBe(FP);
     expect(caption()).not.toMatch(/[\\/]|\.mkv/);
+  });
+});
+
+describe("media transport scope (C2B.2F)", () => {
+  /** Separate spies: which transport each Bot API method used. */
+  function split(sendDocumentReply: () => Promise<Response>) {
+    const ordinary = vi.fn(async (url: string) => {
+      if (url.endsWith("/getMe")) return json({ ok: true, result: { is_bot: true, ...IDENTITIES[MOVIE_TOKEN] } });
+      if (url.endsWith("/getChat")) return json({ ok: true, result: { id: url.includes("getChat") ? MOVIES : 0, has_protected_content: false } });
+      if (url.endsWith("/sendMessage")) return json({ ok: true, result: { message_id: 90, chat: { id: MOVIES }, text: "" } });
+      if (url.endsWith("/forwardMessage")) return json({ ok: false, error_code: 400, description: "Bad Request: message to forward not found" }, 400);
+      return json({ ok: true, result: true });
+    });
+    const media = vi.fn(sendDocumentReply);
+    const api = createLocalBotApiClient(config(), {
+      fetch: ordinary as unknown as typeof globalThis.fetch,
+      mediaFetch: media as unknown as typeof globalThis.fetch,
+      stat: regularFile,
+      uploadTimeoutMs: 1000,
+      requestTimeoutMs: 1000,
+    });
+    return { api, ordinary, media };
+  }
+  const methods = (spy: { mock: { calls: unknown[][] } }) => spy.mock.calls.map(([url]) => String(url).split("/").pop());
+
+  it("only sendDocument uses the media transport; every other call keeps the ordinary one", async () => {
+    const { api, ordinary, media } = split(async () => json({ ok: true, result: sentMessage() }));
+    expect((await api.sendDocument(request())).status).toBe("succeeded");
+    await api.postRecoveryMarker("movie", buildRecoveryMarker(FP, 1, new Date("2026-09-27T00:00:00Z")));
+    await api.probeChannelMessage("movie", 5);
+    expect(methods(media)).toEqual(["sendDocument"]);
+    expect(methods(ordinary)).toEqual(["getMe", "sendMessage", "forwardMessage"]);
+  });
+});
+
+describe("real adapter over longRunningFetch against a loopback Bot API (C2B.2F)", () => {
+  async function botApi(sendDocumentDelayMs: number, getMeDelayMs = 0) {
+    const seen: string[] = [];
+    const server = createServer((req, res) => {
+      req.resume();
+      const method = String(req.url).split("/").pop()!;
+      seen.push(method);
+      const reply = (payload: unknown) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(payload));
+      };
+      if (method === "getMe") {
+        const timer = setTimeout(() => reply({ ok: true, result: { is_bot: true, ...IDENTITIES[MOVIE_TOKEN] } }), getMeDelayMs);
+        res.on("close", () => clearTimeout(timer));
+        return;
+      }
+      if (method === "sendDocument") {
+        const timer = setTimeout(() => reply({ ok: true, result: sentMessage() }), sendDocumentDelayMs);
+        res.on("close", () => clearTimeout(timer));
+        return;
+      }
+      reply({ ok: false, error_code: 400, description: "unexpected" });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as { port: number };
+    const close = async () => {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    };
+    return { baseUrl: `http://127.0.0.1:${port}`, seen, close };
+  }
+
+  const adapter = (baseUrl: string, uploadTimeoutMs: number, requestTimeoutMs = 5_000) =>
+    createLocalBotApiClient(config({ ...ENV, TELEGRAM_BOT_API_URL: baseUrl }), { fetch, mediaFetch: longRunningFetch, stat: regularFile, uploadTimeoutMs, requestTimeoutMs });
+
+  it("a sendDocument reply that arrives late, but within the upload timeout, succeeds", async () => {
+    const server = await botApi(1500);
+    try {
+      const outcome = await adapter(server.baseUrl, 10_000).sendDocument(request());
+      expect(outcome).toMatchObject({ status: "succeeded", record: { messageId: 42, chatId: MOVIES } });
+      expect(server.seen).toEqual(["getMe", "sendDocument"]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("at the finite upload timeout the outcome is uncertain, never a definite failure, and nothing is retried", async () => {
+    const server = await botApi(10_000);
+    try {
+      const started = Date.now();
+      const outcome = await adapter(server.baseUrl, 400).sendDocument(request());
+      expect(Date.now() - started).toBeLessThan(5_000);
+      expect(outcome).toEqual({ status: "uncertain", code: "timeout" });
+      expect(server.seen).toEqual(["getMe", "sendDocument"]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("ordinary calls keep their own short timeout even when the upload timeout is long", async () => {
+    const server = await botApi(0, 2_000);
+    try {
+      const started = Date.now();
+      expect(await adapter(server.baseUrl, 4 * 60 * 60 * 1000, 300).checkIdentity("movie")).toEqual({ status: "transient", code: "get_me_timeout" });
+      expect(Date.now() - started).toBeLessThan(1_500);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("a Bot API server that is not listening is unreachable (definitely not sent)", async () => {
+    const server = await botApi(0);
+    const { baseUrl } = server;
+    const api = adapter(baseUrl, 5_000);
+    // Verify identity first, then take the server away before the upload.
+    expect(await api.checkIdentity("movie")).toEqual({ status: "ok" });
+    await server.close();
+    expect(await api.sendDocument(request())).toEqual({ status: "failed", code: "bot_api_unreachable", retryable: true, retryAfterSeconds: null });
   });
 });

@@ -2700,3 +2700,160 @@ Series: cloud, unregistered, untouched.
   - the near-ceiling test;
   - bulk ingestion;
   - the Series migration.
+
+# C2B.2F — Long-running local Bot API transport (PASS)
+
+Status: **PASS (2026-09-27).** This checkpoint changed code, tests and docs only.
+No Telegram media, marker or probe; no hosted write. It fixes the transport
+defect that made the C2B.2D upload `uncertain`. C2B.2E then recovered that upload
+correctly.
+
+## Cause (reproduced, not inferred)
+
+- **Reproduction:** a loopback server held back its response headers for 330 s.
+  Node 24.13.0 (bundled undici 7.18.2) was called with `fetch` and
+  `AbortSignal.timeout(4 h)`, the adapter's exact call shape.
+- **Failure:** at **306 s**, with this chain:
+
+  ```
+  TypeError: fetch failed
+    cause: HeadersTimeoutError (UND_ERR_HEADERS_TIMEOUT)
+  ```
+
+- **Why:** built-in `fetch` runs on undici's global dispatcher. Its
+  `headersTimeout` (300 s, checked on a coarse timer) fires however long the
+  caller's signal is. It also has a 300 s `bodyTimeout`. The adapter's
+  `uploadTimeoutMs` of 4 h was therefore never the effective limit for
+  `sendDocument`.
+- **Why an upload hits it:** the local Bot API server sends no headers until
+  Telegram has taken the whole file, so a large upload waits longer than 300 s
+  for headers.
+- **What went wrong in C2B.2D:** the adapter mapped the `TypeError` to
+  `uncertain` / `network_error`, while the server finished the upload (message 23
+  at 23:09:23Z).
+
+## Timeouts, before and after
+
+| Layer | Before | After |
+| --- | --- | --- |
+| Connect | undici default (10 s) | `sendDocument`: OS connect (loopback); others unchanged |
+| Response headers | undici `headersTimeout` 300 s, **the effective limit** | `sendDocument`: none of its own; others unchanged |
+| Response body | undici `bodyTimeout` 300 s | `sendDocument`: none of its own; others unchanged |
+| Application | `AbortSignal.timeout`: 4 h upload (ineffective past 300 s), 60 s for other calls | Same values, now **effective** for `sendDocument` |
+| TDLib/Telegram | Server-side; not bounded by the client | Unchanged |
+
+## Implementation
+
+- **`lib/telegram/long-running-fetch.ts`:** `longRunningFetch`, a
+  fetch-compatible POST built on `node:http`/`node:https`.
+  - Those client modules have no header or body timeout of their own, so the
+    caller's AbortSignal is the only limit.
+  - It opens a fresh connection per call (`agent: false`).
+  - It keeps no global state and does not touch `fetch`, the undici dispatcher
+    or TLS settings.
+  - It adds no dependency. The `undici` package is not installed, and reaching
+    Node's bundled copy would mean using internals.
+- **Adapter (`lib/telegram/local-bot-api.ts`):**
+  - `TransportDeps` gains a **required** `mediaFetch`, so production cannot
+    silently fall back to built-in fetch.
+  - `call()` takes a `via` selector, and **only `sendDocument`** passes
+    `"media"`.
+  - `getMe`, `getChat`, markers, forward probes and deletes keep built-in
+    `fetch` with their 60 s signal. TMDB, Supabase and the app are untouched.
+- **CLI:** the execution client passes `mediaFetch: longRunningFetch`, with
+  `UPLOAD_TIMEOUT_MS` still **4 h**. The dry-run client passes its offline stub
+  for both transports.
+- **Error shape is kept, and so is the classification:**
+  - an abort at the 4 h limit rejects with the signal's `TimeoutError`, which is
+    still `uncertain` / `timeout`, never "not sent";
+  - a refused connection is `TypeError` with an `ECONNREFUSED` cause, which is
+    `unreachable`, definitely not sent;
+  - a drop mid-reply is `TypeError`, which is `uncertain` / `network_error`;
+  - nothing retries on its own.
+
+**Recovery is unchanged and still required.** Floors, markers, forward probes,
+the `uncertain` state, server adoption and duplicate protection all remain. A
+network or process failure can still leave an upload unresolved.
+
+## Proof beyond 300 s (real adapter, loopback, no Telegram)
+
+- **Setup:** `createLocalBotApiClient`, wired exactly as the CLI wires it
+  (`fetch` plus `mediaFetch: longRunningFetch`, 4 h upload timeout, 60 s
+  requests). It ran against a loopback fake Bot API that answers `getMe` at once
+  and holds `sendDocument`'s headers for 330 s.
+- **Result:** the request was still open at 60, 120, 180, 240 and **300 s**, past the
+  306 s where built-in fetch failed. The server sent headers at 330.1 s, and
+  `sendDocument` returned `succeeded`: the reply was validated (message 99, size
+  1,004,462,878, caption token). The 4 h limit was not reached.
+- **Control:** the same hold with plain `fetch` failed at 306 s
+  (`UND_ERR_HEADERS_TIMEOUT`).
+
+## Automated tests (no 300 s waits in the suite)
+
+- **`lib/telegram/long-running-fetch.test.ts`** (8), on real loopback servers:
+  - a late reply succeeds, with the exact POST, headers and body;
+  - it never calls global fetch;
+  - the caller's signal aborts it at its deadline as a `TimeoutError` and tears
+    down the connection;
+  - an already-aborted signal sends nothing;
+  - `ECONNREFUSED` keeps fetch's shape;
+  - a mid-reply drop is a failure, not partial success;
+  - non-2xx replies are returned;
+  - non-http schemes are refused.
+- **`lib/telegram/local-bot-api.test.ts`** (+5):
+  - only `sendDocument` uses `mediaFetch`; `getMe`, `sendMessage` and
+    `forwardMessage` use `fetch`;
+  - the real adapter over `longRunningFetch` and a loopback Bot API:
+    - a late reply within the limit succeeds;
+    - at a small upload limit the result is `uncertain` / `timeout`, with no
+      second request;
+    - a slow `getMe` still times out at the short request limit when the upload
+      limit is 4 h;
+    - a stopped server is `bot_api_unreachable`.
+- **Mutation check.** Each of these made tests fail, and all were restored:
+  1. `sendDocument` on `fetch`;
+  2. `mediaFetch` used for every call;
+  3. a header timeout re-added (scaled to 300 ms);
+  4. delegating to global fetch;
+  5. no application timeout;
+  6. an ignored abort;
+  7. a timeout classified as "not sent";
+  8. an abort reshaped as `ECONNREFUSED`.
+- **Suites:** `npm test` 323, `npm run test:db` 339, `npm run test:catalogue` 30.
+  Lint, typecheck and build pass.
+
+## Recovered movie (regression, read-only)
+
+The C2B.2E result is unchanged:
+- `uploaded`, attempt 1;
+- media linked, 1 row;
+- 0 unresolved;
+- checkpoint 24.
+
+With the gate unset, `resume --server` has 0 entries to settle. The fingerprint
+dry run says it would not upload (`plan_skip, journal_uploaded`), and the plain
+upload dry run does not list it.
+
+## `upload_failure_code` (conclusion)
+
+It holds the **last recorded failure** (historical), not the current state:
+- only `ingest_upload_fail` writes it, together with `upload_failed_at`, and the
+  CHECK pairs the two;
+- neither a new start nor `ingest_upload_record` clears it;
+- the store reads it only for `blocked` rows.
+
+So `uploaded` with `network_error` is consistent with the schema: the attempt
+did hit a network error before recovery confirmed it. No cleanup migration is
+needed. If a "current failure" field is ever wanted, that is a separate schema
+decision.
+
+## State and next
+
+- **Nothing external:** no Telegram media upload, marker, probe or delete; no
+  hosted write.
+- **Gate:** `REAL_TELEGRAM_UPLOADS_AUTHORIZED` unset.
+- **Next:**
+  - a large upload now waits up to the real 4 h limit for its reply;
+  - reconciliation stays the path for any `uncertain` result;
+  - the crash drill, the near-ceiling test, bulk ingestion and the Series
+    migration each still need authorization.

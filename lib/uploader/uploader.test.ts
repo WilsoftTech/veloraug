@@ -570,7 +570,7 @@ describe("upload selection by fingerprint", () => {
     const run = async (candidate: JournalEntry, localBots: string) => {
       const loaded = loadLocalBotApiConfig({ ...env, TELEGRAM_BOT_API_LOCAL_BOTS: localBots });
       if (!loaded.ok) throw new Error(loaded.errors.join("; "));
-      const api = createLocalBotApiClient(loaded.config, { fetch: network as unknown as typeof globalThis.fetch, stat: async () => ({ isFile: true, size: SIZE }), uploadTimeoutMs: 1, requestTimeoutMs: 1 });
+      const api = createLocalBotApiClient(loaded.config, { fetch: network as unknown as typeof globalThis.fetch, mediaFetch: network as unknown as typeof globalThis.fetch, stat: async () => ({ isFile: true, size: SIZE }), uploadTimeoutMs: 1, requestTimeoutMs: 1 });
       const store = new FakeStore();
       const result = await uploadEntry(only([candidate], { fingerprints: [FP] }), episodeCaption, { journal, store, telegram: api, fingerprintSource: async () => FP, channelHighWater: async () => 0, now: () => T0, sleep: async () => {} });
       return { result, calls: store.calls };
@@ -679,6 +679,7 @@ describe("upload-time source fingerprint revalidation", () => {
     if (!loaded.ok) throw new Error(loaded.errors.join("; "));
     const api = createLocalBotApiClient(loaded.config, {
       fetch: network as unknown as typeof globalThis.fetch,
+      mediaFetch: network as unknown as typeof globalThis.fetch,
       stat: async (file) => {
         const facts = statSync(file);
         return { isFile: facts.isFile(), size: facts.size };

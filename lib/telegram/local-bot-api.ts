@@ -301,9 +301,20 @@ type Reply =
   | { kind: "uncertain"; code: string };
 
 export interface TransportDeps {
+  /** Every call except sendDocument: getMe, getChat, markers, probes, deletes. */
   fetch: typeof fetch;
+  /**
+   * sendDocument only. It must not impose its own wait for response headers:
+   * the local server sends none until Telegram has taken the whole file, and
+   * built-in fetch gives up after 300 s (C2B.2F). Production passes
+   * `longRunningFetch` (lib/telegram/long-running-fetch.ts).
+   */
+  mediaFetch: typeof fetch;
   stat: StatFile;
-  /** Per-call timeout for sendDocument. The local server copies then uploads the whole file. */
+  /**
+   * The finite limit for sendDocument, enforced by its AbortSignal. The local
+   * server copies then uploads the whole file.
+   */
   uploadTimeoutMs: number;
   requestTimeoutMs: number;
 }
@@ -315,10 +326,11 @@ function connectCode(error: unknown): string | null {
   return typeof cause?.code === "string" ? cause.code : null;
 }
 
-async function call(config: LocalBotApiConfig, deps: TransportDeps, token: string, method: string, body: object, timeoutMs: number): Promise<Reply> {
+async function call(config: LocalBotApiConfig, deps: TransportDeps, token: string, method: string, body: object, timeoutMs: number, via: "request" | "media" = "request"): Promise<Reply> {
+  const send = via === "media" ? deps.mediaFetch : deps.fetch;
   let response: Response;
   try {
-    response = await deps.fetch(`${config.baseUrl}/bot${token}/${method}`, {
+    response = await send(`${config.baseUrl}/bot${token}/${method}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -479,7 +491,7 @@ export function createLocalBotApiClient(config: LocalBotApiConfig, deps: Transpo
         // Keep the file a document: no server-side type guessing or conversion.
         disable_content_type_detection: true,
         disable_notification: true,
-      }, deps.uploadTimeoutMs);
+      }, deps.uploadTimeoutMs, "media");
       if (reply.kind === "unreachable") return { status: "failed", code: "bot_api_unreachable", retryable: true, retryAfterSeconds: null };
       if (reply.kind === "uncertain") return { status: "uncertain", code: reply.code };
       if (reply.kind === "error") return refusal(reply);
