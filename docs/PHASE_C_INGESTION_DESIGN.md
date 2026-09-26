@@ -1105,9 +1105,10 @@ Windows Node uploader (npm run ingest)
 
 - Publish the port on loopback only (`127.0.0.1:8081:8081`), never `0.0.0.0`. The
   adapter already refuses plain HTTP to any non-loopback host.
-- Persistent server state (`--dir`, the bot sessions) goes in a host directory
-  **outside the repository**, for example `C:\velora-ops\telegram-bot-api` mounted at
-  `/var/lib/telegram-bot-api`. It survives container restarts and is never committed.
+- Persistent server state (`--dir`, the bot sessions) goes in the Docker named volume
+  `velora-telegram-bot-api-state`, mounted at `/var/lib/telegram-bot-api`. It survives
+  container restarts and recreation and is never committed. It must not be a Windows
+  bind mount, where TDLib aborts on the first bot login (see "C2B.2B").
 - `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` go to the container only, not to the Next.js
   app.
 - Future media mapping, not yet in use: `G:\Movies` mounted read-only at
@@ -1513,10 +1514,11 @@ docker compose --env-file .env.local -f infra/telegram-bot-api/compose.yaml down
 - `--env-file .env.local` only supplies interpolation. The container receives
   exactly `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`, never tokens, Supabase keys or
   channel ids. Without it, compose refuses to start (`TELEGRAM_API_ID is required`).
-- The state directory defaults to `C:\velora-ops\telegram-bot-api`
-  (`VELORA_BOT_API_STATE_DIR` overrides it). It must exist beforehand, because Docker
-  never creates it. After `logOut` it will hold the bots' sessions, so treat it as a
-  secret: never commit it, copy it or share it.
+- State lives in the named volume `velora-telegram-bot-api-state` (C2B.2B replaced
+  the original `C:\velora-ops\telegram-bot-api` bind mount). It holds the bots'
+  sessions, and the server names each bot's directory **after its full token**. So
+  treat the volume as a secret: never list its directories into a log or chat,
+  copy it or share it. Never run `down -v`, which deletes it and every session.
 - Once `G:\Movies` is mounted, add `-f infra/telegram-bot-api/compose.media.yaml`
   (`VELORA_MEDIA_MOVIES_DIR` overrides the source). While the drive is absent, leave
   the override out: the base server runs without it, and Docker cannot invent an
@@ -1651,3 +1653,104 @@ directory. Nothing in this checkpoint used a bot token against the local server.
 3. Configure the hosted `private.telegram_channels` rows and seed each checkpoint
    from a message actually observed in that channel.
 4. Mount `G:\Movies`, then run the trial in "C2B prerequisites" step 7.
+
+# C2B.2B — Movies bot migration (BLOCKED, then recovery preparation)
+
+Status: **the Movies bot is logged out of the cloud and not yet running locally.**
+Series is untouched on the cloud. No upload, marker, forward or checkpoint.
+
+## Identities
+
+The numeric id is the primary assertion and the exact username the secondary one.
+
+| Bot | Telegram username | Note |
+| --- | --- | --- |
+| Movies | `@veloramovies_bot` | Its BotFather display name is `velora_movies_bot`; that is not its username |
+| Series | `@velora_series_bot` | |
+
+## Attempt (2026-09-26)
+
+- Preflight passed:
+  - cloud `getMe` returned the expected id and username;
+  - the bot is Movies-channel administrator with `can_post_messages`, and the
+    channel is unprotected;
+  - it is an ordinary member of the recovery group, which is private;
+  - no webhook on either bot;
+  - hosted is empty, and the flag is `false`.
+- Cloud `logOut` for Movies only: `{"ok":true,"result":true}` at
+  **2026-09-26T07:49:08Z**. It abandoned the 13 unacknowledged cloud updates, which
+  nothing consumes.
+- The first local `getMe` failed. TDLib aborted (SIGABRT) with `Failed to rename
+  binlog … Stat for file ".../td.binlog" failed`, and Docker restarted the server.
+- Stopped as required: no retry, no cloud fallback, Series untouched.
+
+## Cause and fix
+
+- The state directory was a Windows bind mount, and TDLib renames its binlog while
+  the file is still open. On Docker Desktop's Windows file sharing, a `stat` after
+  such a rename returns ENOENT, although the rename did happen on disk.
+- A probe in the same image, with no network and a synthetic token-shaped directory,
+  reproduced it: rename-then-stat with the file held open failed 5/5 on a bind mount
+  and succeeded 5/5 on a named volume. C2B.2A's restart test had covered only the
+  server's own empty binlogs, never a bot session, so it could not catch this.
+- Fix: `infra/telegram-bot-api/compose.yaml` now uses the named volume
+  `velora-telegram-bot-api-state`. After recreation:
+  - the server user owns the state directory;
+  - the probe passes 5/5 on the live volume;
+  - a sentinel survived `up --force-recreate` and was then removed;
+  - the container is healthy, loopback-only, `--local`, Bot API 10.3.
+- The old bind directory is no longer mounted. It still holds the failed session
+  (one 128-byte `td.binlog`, in a directory named after the old token). Delete it
+  only after the token is revoked.
+
+## Token exposure
+
+The Movies token was printed into an operator session: a listing of the state
+directory showed the token-named session directory. It is not in Git, a log file or
+any external service.
+
+**Rotated** in @BotFather, and `.env.local` was updated.
+- The old token is confirmed revoked: cloud `getMe` returns `401 Unauthorized`.
+- The new token returns the same numeric id and `veloramovies_bot`.
+- The failed session directory (named after the old token) was then deleted from the
+  old bind directory.
+- On Windows, Docker Desktop stores the `:` in such names as U+F03A (the Cygwin
+  convention). Node's `rmSync` reported success but did not remove it; Git Bash did.
+
+## Per-bot local gate
+
+Before this change, `TELEGRAM_BOT_API_URL` applied to both bots and the gate was only
+`REAL_TELEGRAM_UPLOADS_AUTHORIZED`. Once uploads were enabled, a Series command would
+have logged the Series bot in on the local server while it was still live on the
+cloud. Now:
+
+- `TELEGRAM_BOT_API_LOCAL_BOTS` lists the migrated kinds (`movie`, `series`). Unset
+  means none.
+- An unlisted bot is refused with `bot_not_on_local_server` before any request. This
+  covers preflight, `sendDocument`, access checks, markers and probes.
+- A listed bot needs `TELEGRAM_{MOVIES,SERIES}_BOT_ID` and
+  `TELEGRAM_{MOVIES,SERIES}_BOT_USERNAME`. The config refuses an id that is not the
+  one its token carries.
+- Before a bot's first call, the client runs `getMe` and requires the exact id,
+  `is_bot` and the exact username. Otherwise the result is `bot_identity_mismatch`,
+  and nothing is sent. Only a success is cached, once per client; a failed check is
+  retried on the next call.
+- The split state is therefore
+  `TELEGRAM_BOT_API_LOCAL_BOTS=movie`: Movies goes to the local server, and Series
+  is refused locally and stays on the cloud.
+- `.env.local` currently lists no bot, so both are refused.
+
+Five tests cover the gate. Each gate element was mutation-checked: disabled, the
+tests fail; restored, they pass.
+
+## Resuming the migration (needs authorization)
+
+1. ~~Rotate the Movies token, update `.env.local` and delete the old failed session
+   directory.~~ Done.
+2. With the new token, which is live on the cloud: cloud `getMe`, then `logOut`.
+3. Only after the `logOut`, set `TELEGRAM_BOT_API_LOCAL_BOTS=movie`. The list
+   records completed migrations, never intended ones. Then verify the bot through the
+   local server:
+   - local `getMe`;
+   - Movies channel and recovery group, read-only;
+   - session survival across a restart and an `up --force-recreate`.
