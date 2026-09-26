@@ -1556,6 +1556,25 @@ recovery chat differs from both catalogue channels.
   itself return null. Matching on a drive-letter map is case-insensitive.
 - A new test in `lib/telegram/local-bot-api.test.ts` covers this. Mutation check:
   disabling the guard fails the new test, and restoring it passes (52 of 52).
+- **Second defect found and fixed (closeout).** The map's roots were never
+  validated. A server root of `/` or empty turned
+  `G:\Movies\var\lib\telegram-bot-api\x` into `file:///var/lib/telegram-bot-api/x`,
+  and a local root of `G:` or empty widened the map to a whole drive. Both roots are
+  now structural checks, and unsafe roots are refused, never repaired.
+  `loadLocalBotApiConfig` fails on either one, and `toServerFileUri` refuses every
+  path under one:
+  - local (`isSafeLocalRoot`): a drive-letter absolute path with at least one
+    directory; no UNC, `\\?\` or `\\.\` path, bare drive, relative path, empty,
+    `.` or `..` segment, or `:` after the drive;
+  - server (`isSafeServerRoot`): an absolute POSIX path with at least one directory;
+    no `/`, relative path, empty, `.` or `..` segment, or backslash. It must not
+    equal, contain or sit inside the server's `--dir` (`/var/lib/telegram-bot-api`)
+    or `--temp-dir` (`/tmp/telegram-bot-api`).
+
+  Even without a map, a translated path never lands in either directory. One
+  trailing separator on a root is still accepted. Five new tests cover this; each
+  guard, and the earlier dot-segment guard, was mutation-checked (disabled: the
+  tests fail; restored: 57 of 57).
 
 ## Recovery group
 

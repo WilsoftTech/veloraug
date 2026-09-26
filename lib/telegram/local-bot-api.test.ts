@@ -218,6 +218,56 @@ describe("local-path upload: the file never passes through Node", () => {
     expect(toServerFileUri("/media/movies/../x.mkv", null)).toBeNull();
     expect(toServerFileUri("G:\\Movies\\A..B.mkv", map)).toBe("file:///media/movies/A..B.mkv");
   });
+
+  const UNSAFE_LOCAL_ROOTS = ["", " ", "G:", "G:\\", "G:/", "Movies", "\\Movies", "/media/movies", "\\\\nas\\share\\Movies", "//nas/share/Movies", "\\\\?\\G:\\Movies", "\\\\.\\G:\\Movies", "G:\\Movies\\..", "G:\\Movies\\..\\Other", "G:\\.\\Movies", "G:\\Movies\\\\Sub", "G:\\Movies:stream"];
+  const UNSAFE_SERVER_ROOTS = ["", " ", "/", "//", "media/movies", "./media", "/media/..", "/media/./movies", "/media//movies", "/media\\movies", "/var", "/var/lib", "/var/lib/telegram-bot-api", "/var/lib/telegram-bot-api/", "/var/lib/telegram-bot-api/bots", "/tmp", "/tmp/telegram-bot-api/x"];
+  const mapEnv = (value: string): Env => ({ ...ENV, TELEGRAM_BOT_API_PATH_MAP: value });
+
+  it("accepts a concrete library directory on each side of the map", () => {
+    expect(config(mapEnv("G:\\Movies=>/media/movies")).pathMap).toEqual({ local: "G:\\Movies", server: "/media/movies" });
+    expect(config(mapEnv(" D:/Media/Films/ => /srv/films/ ")).pathMap).toEqual({ local: "D:/Media/Films/", server: "/srv/films/" });
+  });
+
+  it("refuses a local root that is not a concrete directory on a drive", () => {
+    for (const local of UNSAFE_LOCAL_ROOTS) {
+      const loaded = loadLocalBotApiConfig(mapEnv(`${local}=>/media/movies`));
+      expect(loaded.ok, JSON.stringify(local)).toBe(false);
+      if (!loaded.ok) expect(loaded.errors.join(" ")).toContain("TELEGRAM_BOT_API_PATH_MAP");
+      expect(toServerFileUri("G:\\Movies\\A.mkv", { local, server: "/media/movies" }), JSON.stringify(local)).toBeNull();
+    }
+  });
+
+  it("refuses a server root that is not a concrete directory clear of the server's own state", () => {
+    for (const server of UNSAFE_SERVER_ROOTS) {
+      expect(loadLocalBotApiConfig(mapEnv(`G:\\Movies=>${server}`)).ok, JSON.stringify(server)).toBe(false);
+      expect(toServerFileUri("G:\\Movies\\A.mkv", { local: "G:\\Movies", server }), JSON.stringify(server)).toBeNull();
+    }
+  });
+
+  it("an unsafe root can never produce a file URI inside the Bot API state directory", () => {
+    const into = "G:\\Movies\\var\\lib\\telegram-bot-api\\bots\\x.mkv";
+    for (const server of ["", "/", "/var", "/var/lib", "/var/lib/telegram-bot-api"]) {
+      expect(toServerFileUri(into, { local: "G:\\Movies", server }), JSON.stringify(server)).toBeNull();
+    }
+    expect(toServerFileUri("/var/lib/telegram-bot-api/x", { local: "", server: "/media/movies" })).toBeNull();
+    expect(toServerFileUri("G:\\Anything\\x.mkv", { local: "G:", server: "/media/movies" })).toBeNull();
+    // Unmapped (server on the same host): the state directories are still out of reach.
+    expect(toServerFileUri("/var/lib/telegram-bot-api/bots/x", null)).toBeNull();
+    expect(toServerFileUri("/var/lib//telegram-bot-api/x", null)).toBeNull();
+    expect(toServerFileUri("/tmp/telegram-bot-api/x", null)).toBeNull();
+    expect(toServerFileUri("/var/lib/telegram-bot-api-archive/x.mkv", null)).toBe("file:///var/lib/telegram-bot-api-archive/x.mkv");
+  });
+
+  it("a safe map still translates only strict descendants, into strict descendants of the server root", () => {
+    const map = { local: "G:\\Movies\\", server: "/media/movies/" };
+    expect(toServerFileUri("G:\\Movies\\A.mkv", map)).toBe("file:///media/movies/A.mkv");
+    expect(toServerFileUri("g:/movies/Sub/B.mp4", map)).toBe("file:///media/movies/Sub/B.mp4");
+    expect(toServerFileUri("G:\\Movies\\", map)).toBeNull();
+    expect(toServerFileUri("G:\\Movies/..\\x.mkv", map)).toBeNull();
+    expect(toServerFileUri("\\\\?\\G:\\Movies\\A.mkv", map)).toBeNull();
+    expect(toServerFileUri("\\\\nas\\share\\Movies\\A.mkv", map)).toBeNull();
+    expect(toServerFileUri("/media/movies/A.mkv", map)).toBeNull();
+  });
 });
 
 describe("sendDocument reply handling", () => {

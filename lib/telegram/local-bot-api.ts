@@ -118,9 +118,11 @@ export function loadLocalBotApiConfig(env: Env): { ok: true; config: LocalBotApi
   let pathMap: LocalBotApiConfig["pathMap"] = null;
   const mapRaw = env[ENV.pathMap];
   if (mapRaw) {
-    const [local, server, ...rest] = mapRaw.split("=>");
+    const [local, server, ...rest] = mapRaw.split("=>").map((part) => part.trim());
     if (!local || !server || rest.length > 0) errors.push(`${ENV.pathMap} must look like <local prefix>=><server prefix>`);
-    else pathMap = { local: local.trim(), server: server.trim() };
+    else if (!isSafeLocalRoot(local)) errors.push(`${ENV.pathMap} local prefix must be a directory on a drive (not a drive root, UNC or device path; no . or .. segments)`);
+    else if (!isSafeServerRoot(server)) errors.push(`${ENV.pathMap} server prefix must be an absolute POSIX directory (not /; no . or .. segments; clear of the Bot API server's own directories)`);
+    else pathMap = { local, server };
   }
 
   if (errors.length > 0 || baseUrl === null) return { ok: false, errors };
@@ -159,6 +161,41 @@ export type PreflightResult =
 
 const reject = (code: string, permanent = false): PreflightResult => ({ ok: false, code, permanent });
 
+/**
+ * The Bot API server's own directories (--dir holds bot sessions, --temp-dir
+ * uploads in transit; infra/telegram-bot-api/compose.yaml). A media path must
+ * never reach them, and a server prefix must not contain or sit inside them.
+ */
+const PROTECTED_SERVER_DIRS = ["/var/lib/telegram-bot-api", "/tmp/telegram-bot-api"];
+
+/**
+ * The directory names of a configured root after its anchor, or null when any
+ * is empty, "." or "..". One trailing separator is allowed; the root itself
+ * (no names at all) is null, because it would map a whole drive or filesystem.
+ */
+function rootSegments(afterAnchor: string, separators: RegExp): string[] | null {
+  const segments = afterAnchor.split(separators);
+  if (segments.at(-1) === "") segments.pop();
+  const valid = segments.length > 0 && segments.every((segment) => segment !== "" && segment !== "." && segment !== "..");
+  return valid ? segments : null;
+}
+
+/** A concrete directory on a drive letter: not `G:`, `G:\`, UNC, `\\?\` or relative. */
+export function isSafeLocalRoot(root: string): boolean {
+  if (!/^[A-Za-z]:[\\/]/.test(root)) return false;
+  const segments = rootSegments(root.slice(3), /[\\/]/);
+  return segments !== null && segments.every((segment) => !segment.includes(":"));
+}
+
+/** A concrete absolute POSIX directory that does not overlap the server's own directories. */
+export function isSafeServerRoot(root: string): boolean {
+  if (!root.startsWith("/")) return false;
+  const segments = rootSegments(root.slice(1), /\//);
+  if (segments === null || segments.some((segment) => segment.includes("\\"))) return false;
+  const dir = `/${segments.join("/")}`;
+  return !PROTECTED_SERVER_DIRS.some((protectedDir) => dir === protectedDir || dir.startsWith(`${protectedDir}/`) || protectedDir.startsWith(`${dir}/`));
+}
+
 /** The path the Bot API server must open, as a file URI (`--local` mode). */
 export function toServerFileUri(absolutePath: string, pathMap: LocalBotApiConfig["pathMap"]): string | null {
   // A dot segment passes the prefix check, then the file URL resolves it outside
@@ -166,16 +203,22 @@ export function toServerFileUri(absolutePath: string, pathMap: LocalBotApiConfig
   if (absolutePath.split(/[\\/]/).some((segment) => segment === "." || segment === "..")) return null;
   let path = absolutePath;
   if (pathMap) {
+    // A root such as "G:" or "/" would widen the map to a whole drive or
+    // filesystem, so an unsafe root refuses every path instead of being repaired.
+    if (!isSafeLocalRoot(pathMap.local) || !isSafeServerRoot(pathMap.server)) return null;
     const normalize = (value: string) => value.split("\\").join("/").replace(/\/+$/, "");
     const local = normalize(pathMap.local);
     const current = normalize(path);
-    const insensitive = /^[A-Za-z]:/.test(pathMap.local);
-    const under = insensitive ? current.toLowerCase().startsWith(`${local.toLowerCase()}/`) : current.startsWith(`${local}/`);
-    if (!under) return null;
+    // Windows paths compare case-insensitively.
+    if (!current.toLowerCase().startsWith(`${local.toLowerCase()}/`)) return null;
     path = `${normalize(pathMap.server)}/${current.slice(local.length + 1)}`;
   }
   const windows = /^[A-Za-z]:[\\/]/.test(path);
   if (windows ? !win32.isAbsolute(path) : !posix.isAbsolute(path)) return null;
+  if (!windows) {
+    const resolved = posix.normalize(path);
+    if (PROTECTED_SERVER_DIRS.some((dir) => resolved === dir || resolved.startsWith(`${dir}/`))) return null;
+  }
   return pathToFileURL(path, { windows }).href;
 }
 
