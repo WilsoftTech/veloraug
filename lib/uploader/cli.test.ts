@@ -3,6 +3,8 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { computeFingerprint } from "@/lib/ingestion/fingerprint";
+import { parseFilename } from "@/lib/ingestion/parser";
 import { buildUploadCaption } from "@/lib/ingestion/telegram";
 import { newJournalEntry, openJournal } from "@/lib/uploader/journal";
 import type { SourceFingerprint } from "@/types/ingestion";
@@ -54,6 +56,17 @@ describe("ingest CLI on plain Node", () => {
   });
 });
 
+/**
+ * Selection fixture: each file's journal fingerprint is its real sf1 value (the
+ * CLI recomputes it before any upload), ordered A < B < C as the journal lists them.
+ */
+const FIXTURE = await (async () => {
+  const files = ["Alpha.2001.VJ.Junior.mkv", "Bravo.2002.VJ.Junior.mkv", "Charlie.2003.VJ.Junior.mkv"];
+  const sf1 = (content: string) => computeFingerprint(content.length, async (offset, length) => new TextEncoder().encode(content).subarray(offset, offset + length));
+  const pairs = await Promise.all(files.map(async (name) => [await sf1(name), name] as const));
+  return { ordered: pairs.map(([fingerprint]) => fingerprint).sort(), names: Object.fromEntries(pairs) as Record<string, string> };
+})();
+
 describe("upload --fingerprint on plain Node (C2B.2C.2)", () => {
   // Fake credentials: the right shape, never real.
   const MOVIE_TOKEN = "1111111:AAAAmovieFAKEtokenFAKEtokenFAKEtok";
@@ -68,12 +81,10 @@ describe("upload --fingerprint on plain Node (C2B.2C.2)", () => {
     TELEGRAM_MOVIES_BOT_ID: "1111111",
     TELEGRAM_MOVIES_BOT_USERNAME: "fake_movies_bot",
   };
-  const A = `sf1-${"a".repeat(64)}` as SourceFingerprint;
-  const B = `sf1-${"b".repeat(64)}` as SourceFingerprint;
-  const C = `sf1-${"c".repeat(64)}` as SourceFingerprint;
+  const [A, B, C] = FIXTURE.ordered;
+  const names = FIXTURE.names;
   const dir = mkdtempSync(join(tmpdir(), "velora-cli-select-"));
   const media = mkdtempSync(join(tmpdir(), "velora-cli-media-"));
-  const names: Record<string, string> = { [A]: "Alpha.2001.VJ.Junior.mkv", [B]: "Bravo.2002.VJ.Junior.mkv", [C]: "Charlie.2003.VJ.Junior.mkv" };
   const run = (env: Record<string, string>, ...args: string[]) => cliWith({ VELORA_INGEST_JOURNAL_DIR: dir, ...env }, "upload", ...args);
   const snapshot = () => readdirSync(dir).sort().map((name) => `${name}:${readFileSync(join(dir, name), "utf8")}`);
 
@@ -103,7 +114,9 @@ describe("upload --fingerprint on plain Node (C2B.2C.2)", () => {
     expect(result.stdout).not.toContain(names[C]);
     expect(result.stdout).toContain("destination  movie bot -> the configured movie channel (local Bot API)");
     expect(result.stdout).toContain("preflight    ok (sendDocument by local path)");
-    expect(result.stdout).toContain(buildUploadCaption({ kind: "movie", title: "Bravo", year: 2002, vjName: "Junior", season: null, episode: null, fingerprint: B }).split("\n").join(" | "));
+    expect(result.stdout).toContain("source       current bytes fingerprint to the selected value (exact match)");
+    const parse = parseFilename(names[B]);
+    expect(result.stdout).toContain(buildUploadCaption({ kind: "movie", title: parse.title, year: parse.year, vjName: parse.vjText, season: null, episode: null, fingerprint: B }).split("\n").join(" | "));
     expect(result.stdout).toContain("would upload this entry only");
     // Nothing identifying the bot or the channel, and no local directory.
     for (const secret of [MOVIE_TOKEN, "1111111", String(MOVIES), media]) expect(result.stdout + result.stderr).not.toContain(secret);
@@ -152,6 +165,24 @@ describe("upload --fingerprint on plain Node (C2B.2C.2)", () => {
         expect(result.stderr).not.toContain(secretPath);
         expect(result.stderr).not.toContain(MOVIE_TOKEN);
       }
+    }
+  });
+
+  it("a same-size change to the selected file is caught by the dry run's revalidation; the journal is not updated", () => {
+    const path = join(media, names[C]);
+    const original = readFileSync(path, "utf8");
+    const before = snapshot();
+    try {
+      writeFileSync(path, `X${original.slice(1)}`);
+      const result = run(TELEGRAM, "--fingerprint", C);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("preflight    ok (sendDocument by local path)");
+      expect(result.stdout).toContain("source       refused: source_fingerprint_changed");
+      expect(result.stdout).toContain("would not upload (source_fingerprint_changed)");
+      expect(result.stdout + result.stderr).not.toContain(media);
+      expect(snapshot()).toEqual(before);
+    } finally {
+      writeFileSync(path, original);
     }
   });
 

@@ -1,13 +1,15 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SAMPLE_BYTES } from "@/lib/ingestion/fingerprint";
 import { decideResume, DEFAULT_RECONCILE_GRACE_MS } from "@/lib/ingestion/recovery";
 import { buildUploadCaption } from "@/lib/ingestion/telegram";
 import { createLocalBotApiClient, loadLocalBotApiConfig, type LocalBotApiClient } from "@/lib/telegram/local-bot-api";
 import { newJournalEntry, openJournal, resolveJournalDir, type Journal, type JournalEntry } from "@/lib/uploader/journal";
+import { fingerprintFile } from "@/lib/uploader/scan";
 import { offlineStore, type IngestionStore } from "@/lib/uploader/store";
-import { planResume, REAL_TELEGRAM_UPLOADS_AUTHORIZED, resumeEntry, selectUploadEntries, uploadEntry, type UploaderDeps } from "@/lib/uploader/upload";
+import { planResume, REAL_TELEGRAM_UPLOADS_AUTHORIZED, resumeEntry, selectUploadEntries, uploadEntry, verifySourceFingerprint, type UploaderDeps } from "@/lib/uploader/upload";
 import type { ChannelProbeResult, ServerUploadStatus, SourceFingerprint, TelegramMediaRecord, UploadFailureOutcome, UploadOutcome } from "@/types/ingestion";
 
 const FP = `sf1-${"c".repeat(64)}` as SourceFingerprint;
@@ -224,10 +226,17 @@ function telegram(send: () => Promise<UploadOutcome>, probe = channel({}), marke
   };
 }
 
+/** What the fake file system fingerprints the source as; reset to the journal's FP before each test. */
+let sourceFingerprint: SourceFingerprint = FP;
+beforeEach(() => {
+  sourceFingerprint = FP;
+});
+
 function deps(store: IngestionStore, api: ReturnType<typeof telegram>, now = T0): UploaderDeps {
   // The fake database and the uploader share one clock here; skew is tested separately.
   if (store instanceof FakeStore) store.clock = () => now;
-  return { journal, store, telegram: api, telegramEnabled: true, channelHighWater: async () => 40, now: () => now, sleep: async () => {} };
+  // The source still has the scanned bytes unless a test says otherwise (see sourceFingerprint).
+  return { journal, store, telegram: api, telegramEnabled: true, fingerprintSource: async () => sourceFingerprint, channelHighWater: async () => 40, now: () => now, sleep: async () => {} };
 }
 
 describe("crash and recovery", () => {
@@ -560,7 +569,7 @@ describe("upload selection by fingerprint", () => {
       if (!loaded.ok) throw new Error(loaded.errors.join("; "));
       const api = createLocalBotApiClient(loaded.config, { fetch: network as unknown as typeof globalThis.fetch, stat: async () => ({ isFile: true, size: SIZE }), uploadTimeoutMs: 1, requestTimeoutMs: 1 });
       const store = new FakeStore();
-      const result = await uploadEntry(only([candidate], { fingerprints: [FP] }), episodeCaption, { journal, store, telegram: api, telegramEnabled: true, channelHighWater: async () => 0, now: () => T0, sleep: async () => {} });
+      const result = await uploadEntry(only([candidate], { fingerprints: [FP] }), episodeCaption, { journal, store, telegram: api, telegramEnabled: true, fingerprintSource: async () => FP, channelHighWater: async () => 0, now: () => T0, sleep: async () => {} });
       return { result, calls: store.calls };
     };
     // Series is still on the cloud: refused before any request or server start.
@@ -568,6 +577,192 @@ describe("upload selection by fingerprint", () => {
     // An episode planned for the Movies channel is refused even with both bots local.
     expect(await run(entry({ kind: "series", intendedChannelId: MOVIES }), "movie,series")).toEqual({ result: { result: "refused", code: "channel_changed_since_plan" }, calls: [] });
     expect(network).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Upload-time source revalidation (C2B.2C.3): real files, the real sf1 algorithm
+// ---------------------------------------------------------------------------
+
+describe("upload-time source fingerprint revalidation", () => {
+  // Just over three 4 MiB samples, so start, middle and end are separate sampled regions.
+  const BYTES = 3 * SAMPLE_BYTES + 1024 * 1024;
+  let folder: string;
+  let path: string;
+  let scanned: SourceFingerprint;
+
+  beforeEach(async () => {
+    folder = mkdtempSync(join(tmpdir(), "velora-source-"));
+    path = join(folder, "Revalidate.2026.VJ.Junior.mkv");
+    const bytes = new Uint8Array(BYTES);
+    for (let i = 0; i < BYTES; i += 1) bytes[i] = (i * 31 + 7) & 0xff;
+    writeFileSync(path, bytes);
+    scanned = await fingerprintFile(path, BYTES);
+  });
+  afterEach(() => rmSync(folder, { recursive: true, force: true }));
+
+  /** Flips one byte in place; the file keeps its size. */
+  function mutateAt(offset: number) {
+    const bytes = readFileSync(path);
+    bytes[offset] ^= 0xff;
+    writeFileSync(path, bytes);
+    expect(statSync(path).size).toBe(BYTES);
+  }
+
+  const source = (overrides: Partial<JournalEntry> = {}) => entry({ fingerprint: scanned, absolutePath: path, fileName: "Revalidate.2026.VJ.Junior.mkv", relativePath: "Revalidate.2026.VJ.Junior.mkv", sizeBytes: BYTES, ...overrides });
+  const caption = () => buildUploadCaption({ kind: "movie", title: "Revalidate", year: 2026, vjName: "Junior", season: null, episode: null, fingerprint: scanned });
+  const sent = (messageId: number) => media(messageId, scanned);
+  /** The real sf1 revalidation, wrapped only to count calls. */
+  const realFingerprint = () => vi.fn<UploaderDeps["fingerprintSource"]>((file, size) => fingerprintFile(file, size));
+
+  it("the unchanged file fingerprints to the journal's value, and the upload proceeds in order", async () => {
+    const store = new FakeStore();
+    const api = telegram(async () => ({ status: "succeeded", record: sent(41) }));
+    const fingerprintSource = realFingerprint();
+    expect(await verifySourceFingerprint(source(), fingerprintFile)).toEqual({ ok: true });
+    expect(await uploadEntry(source(), caption(), { ...deps(store, api), fingerprintSource })).toEqual({ result: "uploaded", acknowledged: true });
+    expect(fingerprintSource).toHaveBeenCalledExactlyOnceWith(path, BYTES);
+    expect(store.calls).toEqual(["markUploadStarted", "recordUploadSucceeded"]);
+    // Revalidation ran after preflight and before the server start and the send.
+    expect(fingerprintSource.mock.invocationCallOrder[0]).toBeGreaterThan(api.preflight.mock.invocationCallOrder[0]);
+    expect(fingerprintSource.mock.invocationCallOrder[0]).toBeLessThan(api.sendDocument.mock.invocationCallOrder[0]);
+  });
+
+  it("same name, same size, one byte changed in any sampled region: refused before the journal, the server and Telegram", async () => {
+    for (const offset of [0, Math.floor((BYTES - SAMPLE_BYTES) / 2) + 17, BYTES - 1]) {
+      const pristine = readFileSync(path);
+      mutateAt(offset);
+      const store = new FakeStore();
+      const api = telegram(async () => ({ status: "succeeded", record: sent(41) }));
+      expect(await uploadEntry(source(), caption(), { ...deps(store, api), fingerprintSource: fingerprintFile })).toEqual({ result: "refused", code: "source_fingerprint_changed" });
+      expect(store.calls).toEqual([]);
+      expect(api.preflight).toHaveBeenCalledTimes(1);
+      expect(api.sendDocument).not.toHaveBeenCalled();
+      // No attempt was journaled and the journal's fingerprint was not replaced.
+      expect(await journal.get(scanned)).toBeNull();
+      expect(await journal.list()).toEqual([]);
+      writeFileSync(path, pristine);
+    }
+  });
+
+  it("a journaled entry is left exactly as it was: no attempt, no new fingerprint, no rescan", async () => {
+    await journal.put(source());
+    const before = await journal.get(scanned);
+    mutateAt(BYTES - 1);
+    const store = new FakeStore();
+    const api = telegram(async () => ({ status: "succeeded", record: sent(41) }));
+    expect(await uploadEntry(source(), caption(), { ...deps(store, api), fingerprintSource: fingerprintFile })).toEqual({ result: "refused", code: "source_fingerprint_changed" });
+    expect(await journal.list()).toEqual([before]);
+    expect(store.calls).toEqual([]);
+  });
+
+  it("the check is on sampled content: a change outside the samples is not visible to sf1 (documented limit)", async () => {
+    mutateAt(SAMPLE_BYTES + 10);
+    expect(await verifySourceFingerprint(source(), fingerprintFile)).toEqual({ ok: true });
+  });
+
+  it("a size change and a missing file are refused by the real preflight, before revalidation", async () => {
+    const network = vi.fn(() => Promise.reject(new Error("no network in tests")));
+    const loaded = loadLocalBotApiConfig({
+      TELEGRAM_BOT_API_URL: "http://127.0.0.1:8081",
+      TELEGRAM_MOVIES_BOT_TOKEN: "1111111:AAAAmovieFAKEtokenFAKEtokenFAKEtok",
+      TELEGRAM_SERIES_BOT_TOKEN: "2222222:BBBBseriesFAKEtokenFAKEtokenFAKEto",
+      TELEGRAM_MOVIES_CHANNEL_ID: String(MOVIES),
+      TELEGRAM_SERIES_CHANNEL_ID: "-1002222222222",
+      TELEGRAM_BOT_API_LOCAL_BOTS: "movie",
+      TELEGRAM_MOVIES_BOT_ID: "1111111",
+      TELEGRAM_MOVIES_BOT_USERNAME: "fake_movies_bot",
+    });
+    if (!loaded.ok) throw new Error(loaded.errors.join("; "));
+    const api = createLocalBotApiClient(loaded.config, {
+      fetch: network as unknown as typeof globalThis.fetch,
+      stat: async (file) => {
+        const facts = statSync(file);
+        return { isFile: facts.isFile(), size: facts.size };
+      },
+      uploadTimeoutMs: 1,
+      requestTimeoutMs: 1,
+    });
+    const attempt = async () => {
+      const store = new FakeStore();
+      const fingerprintSource = realFingerprint();
+      const result = await uploadEntry(source(), caption(), { journal, store, telegram: api, telegramEnabled: true, fingerprintSource, channelHighWater: async () => 0, now: () => T0, sleep: async () => {} });
+      return { result, calls: store.calls, fingerprinted: fingerprintSource.mock.calls.length };
+    };
+
+    writeFileSync(path, new Uint8Array(BYTES + 1));
+    expect(await attempt()).toEqual({ result: { result: "refused", code: "source_changed_since_scan" }, calls: [], fingerprinted: 0 });
+    rmSync(path);
+    expect(await attempt()).toEqual({ result: { result: "refused", code: "source_unreadable" }, calls: [], fingerprinted: 0 });
+    expect(network).not.toHaveBeenCalled();
+  });
+
+  it("a fingerprint read failure refuses with its own code: no attempt, no send", async () => {
+    const store = new FakeStore();
+    const api = telegram(async () => ({ status: "succeeded", record: sent(41) }));
+    const failing = vi.fn<UploaderDeps["fingerprintSource"]>(async () => {
+      throw Object.assign(new Error(`EBUSY: resource busy or locked, open '${path}'`), { code: "EBUSY" });
+    });
+    expect(await uploadEntry(source(), caption(), { ...deps(store, api), fingerprintSource: failing })).toEqual({ result: "refused", code: "source_fingerprint_unreadable" });
+    // A file that shrank after preflight is a short read: the same refusal, never a partial fingerprint.
+    writeFileSync(path, new Uint8Array(BYTES - 1));
+    expect(await verifySourceFingerprint(source(), fingerprintFile)).toEqual({ ok: false, code: "source_fingerprint_unreadable" });
+    rmSync(path);
+    expect(await verifySourceFingerprint(source(), fingerprintFile)).toEqual({ ok: false, code: "source_fingerprint_unreadable" });
+    expect(store.calls).toEqual([]);
+    expect(api.sendDocument).not.toHaveBeenCalled();
+  });
+
+  it("the comparison is exact: a fingerprint differing only in its last hex digit is a change", async () => {
+    const last = scanned.at(-1) === "0" ? "1" : "0";
+    const neighbour = `${scanned.slice(0, -1)}${last}` as SourceFingerprint;
+    expect(await verifySourceFingerprint(source(), async () => neighbour)).toEqual({ ok: false, code: "source_fingerprint_changed" });
+    expect(await verifySourceFingerprint(source(), async () => scanned.toUpperCase() as SourceFingerprint)).toEqual({ ok: false, code: "source_fingerprint_changed" });
+  });
+
+  it("ordinary, --limit and --fingerprint selections all reach the same check", async () => {
+    mutateAt(0);
+    const other = `sf1-${"9".repeat(64)}` as SourceFingerprint;
+    const entries = [source(), entry({ fingerprint: other, plan: { action: "hold", stopReasons: ["duplicate_same_title_same_vj"] } })];
+    for (const options of [{}, { limit: "1" }, { fingerprints: [scanned] }]) {
+      const selected = selectUploadEntries(entries, options);
+      if (!selected.ok) throw new Error(selected.code);
+      expect(selected.entries.map((item) => item.fingerprint)).toEqual([scanned]);
+      const store = new FakeStore();
+      const api = telegram(async () => ({ status: "succeeded", record: sent(41) }));
+      expect(await uploadEntry(selected.entries[0], caption(), { ...deps(store, api), fingerprintSource: fingerprintFile })).toEqual({ result: "refused", code: "source_fingerprint_changed" });
+      expect(store.calls).toEqual([]);
+      expect(api.sendDocument).not.toHaveBeenCalled();
+    }
+  });
+
+  it("an unresolved attempt is reconciled, never revalidated into a resend; resume never reads the source", async () => {
+    mutateAt(0);
+    const fingerprintSource = realFingerprint();
+    const api = telegram(async () => ({ status: "succeeded", record: sent(42) }));
+    const uncertain = new FakeStore();
+    uncertain.status = { status: "uncertain" };
+    uncertain.floor = 40;
+    expect(await uploadEntry(source(), caption(), { ...deps(uncertain, api), fingerprintSource })).toEqual({ result: "resume", action: { action: "reconcile" } });
+    const interrupted = source({ state: { ...entry().state, upload: "uploading", uploadAttempts: 1 } });
+    expect(await uploadEntry(interrupted, caption(), { ...deps(new FakeStore(), api), fingerprintSource })).toEqual({ result: "resume", action: { action: "reconcile" } });
+    // Replaying a journaled reply sends nothing, so it needs no source read.
+    const unacknowledged = source({ state: { ...entry().state, upload: "uploaded", uploadAttempts: 1, telegram: { chatId: MOVIES, messageId: 41 } }, telegram: sent(41) });
+    const pending = new FakeStore();
+    pending.status = { status: "uploading" };
+    pending.floor = 40;
+    expect(await resumeEntry(unacknowledged, { ...deps(pending, api), fingerprintSource })).toEqual({ result: "uploaded", acknowledged: true });
+    expect(fingerprintSource).not.toHaveBeenCalled();
+    expect(api.sendDocument).not.toHaveBeenCalled();
+  });
+
+  it("with the code gate off, nothing runs at all, the revalidation included", async () => {
+    const fingerprintSource = realFingerprint();
+    const store = new FakeStore();
+    const api = telegram(async () => ({ status: "succeeded", record: sent(41) }));
+    expect(await uploadEntry(source(), caption(), { ...deps(store, api), fingerprintSource, telegramEnabled: REAL_TELEGRAM_UPLOADS_AUTHORIZED })).toEqual({ result: "refused", code: "telegram_uploads_not_authorized" });
+    expect(fingerprintSource).not.toHaveBeenCalled();
+    expect(store.calls).toEqual([]);
   });
 });
 

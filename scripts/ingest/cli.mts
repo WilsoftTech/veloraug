@@ -37,7 +37,7 @@ import { searchTmdbForIngestion } from "@/lib/tmdb/ingestion-search";
 import { JOURNAL_DIR_ENV, newJournalEntry, openJournal, resolveJournalDir, type Journal, type JournalEntry } from "@/lib/uploader/journal";
 import { fingerprintFile, hashFile, toSourceFile, walkMedia, type DiscoveredFile } from "@/lib/uploader/scan";
 import { createRpcIngestionStore, offlineStore, supabaseRpcTransport, type IngestionStore } from "@/lib/uploader/store";
-import { isUploadPlanned, planResume, REAL_TELEGRAM_UPLOADS_AUTHORIZED, resumeEntry, selectUploadEntries, uploadEntry, type UploaderDeps, type UploadSelectionError } from "@/lib/uploader/upload";
+import { isUploadPlanned, planResume, REAL_TELEGRAM_UPLOADS_AUTHORIZED, resumeEntry, selectUploadEntries, uploadEntry, verifySourceFingerprint, type UploaderDeps, type UploadSelectionError } from "@/lib/uploader/upload";
 import type { CatalogueKind } from "@/types/catalogue";
 import type { DuplicateSubject, KnownVj, MatchOutcome } from "@/types/ingestion";
 
@@ -216,6 +216,7 @@ function uploaderDeps(store: Journal, config: LocalBotApiConfig, server: Ingesti
       uploadTimeoutMs: UPLOAD_TIMEOUT_MS,
       requestTimeoutMs: REQUEST_TIMEOUT_MS,
     }),
+    fingerprintSource: fingerprintFile,
     async channelHighWater(kind) {
       const entries = await store.list();
       return Math.max(0, ...entries.filter((entry) => entry.kind === kind && entry.telegram).map((entry) => entry.telegram!.messageId));
@@ -331,6 +332,10 @@ async function describeSelected(entry: JournalEntry, total: number, text: string
     console.log(`preflight    ${preflight === null ? "not run" : preflight.ok ? "ok (sendDocument by local path)" : `refused: ${preflight.code}`}`);
     if (preflight !== null && !preflight.ok) reasons.push(preflight.code);
   }
+  // The same check uploadEntry runs before any start: current bytes, one sf1 algorithm, exact equality.
+  const source = await verifySourceFingerprint(entry, fingerprintFile);
+  console.log(`source       ${source.ok ? "current bytes fingerprint to the selected value (exact match)" : `refused: ${source.code}`}`);
+  if (!source.ok) reasons.push(source.code);
   console.log(`caption      ${text.split("\n").join(" | ")}`);
   console.log(`\ndry run: ${reasons.length === 0 ? "would upload this entry only" : `would not upload (${reasons.join(", ")})`}. Server status is checked at execution. Nothing was sent.`);
 }

@@ -89,7 +89,8 @@ async function machine() {
 
 function deps(journal: UploaderDeps["journal"], api: ReturnType<typeof telegram>): UploaderDeps {
   // channelHighWater 0: the journal knows nothing; only the server floor may bound the scan.
-  return { journal, store, telegram: api, telegramEnabled: true, channelHighWater: async () => 0, now: () => new Date(), sleep: async () => {} };
+  // The source is the scanned file: its fingerprint is unchanged (revalidation is unit-tested).
+  return { journal, store, telegram: api, telegramEnabled: true, fingerprintSource: async () => FP, channelHighWater: async () => 0, now: () => new Date(), sleep: async () => {} };
 }
 
 beforeAll(() => {

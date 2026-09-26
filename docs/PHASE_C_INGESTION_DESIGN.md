@@ -2192,3 +2192,149 @@ recheck mtime or the sampled content.
    - ingestion events, media and candidates: 0;
    - the Movies checkpoint is unchanged;
    - 1 VJ.
+
+# C2B.2C.3 — Upload-time source fingerprint revalidation (PASS)
+
+Status: **PASS (2026-09-27).** This checkpoint changed code, tests and docs only.
+No Telegram call, no hosted write, no upload. `REAL_TELEGRAM_UPLOADS_AUTHORIZED`
+is still `false`. It closes the C2B.2C.2 finding.
+
+## Rule
+
+Immediately before a **new** upload attempt starts, the journal's fingerprint is
+recomputed from the file's current bytes and must equal the journal's value
+exactly.
+
+- **One algorithm.** `fingerprintFile` (`lib/uploader/scan.ts`, over
+  `computeFingerprint`) is the same code `scan` and `inspect` use. The uploader
+  receives it as the `fingerprintSource` dependency, and the CLI passes the real
+  function. There is no upload-specific implementation, and the `sf1` format and
+  sampling are unchanged.
+- **Exact equality.** `current === entry.fingerprint`. No prefix, partial,
+  case-insensitive, name, size or mtime fallback.
+- **Codes.** Neither code carries a path or a fingerprint.
+
+| Case | Refused by | Code |
+| --- | --- | --- |
+| File missing | Preflight stat | `source_unreadable` |
+| Size changed | Preflight size check | `source_changed_since_scan` |
+| Same size, sampled bytes changed | Revalidation | `source_fingerprint_changed` |
+| Read fails (locked, deleted, or shrank after preflight: a short read) | Revalidation | `source_fingerprint_unreadable` |
+
+- **Nothing is repaired.** A mismatch returns `refused`. The journal is not
+  touched: no attempt is recorded, and its fingerprint is not replaced. A
+  changed file needs an explicit rescan and a new operator decision.
+
+## Position in `uploadEntry` (the one shared upload path)
+
+1. Code gate (`telegramEnabled`).
+2. Plan gate, planned channel, server boundary available.
+3. `planResume` against the server. An uploaded, uncertain or interrupted
+   source leaves here (`none`, `adopt_server`, `reconcile`, …) **before** any
+   source read, so revalidation can never turn an unresolved attempt into a
+   resend.
+4. `preflight`: routing, caption, extension, ceiling, stat, size, path map.
+5. **`verifySourceFingerprint`**, the new step.
+6. Journal `upload_started`, then `ingest_upload_start` (the floor), then
+   `sendDocument`, then validation, then `ingest_upload_record`.
+
+- **Every caller is covered.** `upload`, `upload --limit` and
+  `upload --fingerprint` differ only in selection, and all of them call
+  `uploadEntry`. `fingerprintSource` is a required dependency, so no caller can
+  omit it.
+- **Resume is unaffected.** `resumeEntry` never sends a file and never reads the
+  source.
+- **The dry run uses the same function.** `upload --fingerprint` without
+  `--execute` calls `verifySourceFingerprint` and prints the result on its
+  `source` line.
+- **Gate ordering.** In the CLI, `--execute` is refused by
+  `REAL_TELEGRAM_UPLOADS_AUTHORIZED` before any configuration or file read. In
+  `uploadEntry`, the code gate is step 1. So no upload can start without both the
+  authorization and a passing revalidation.
+
+## Remaining boundary (TOCTOU; documented, not closed)
+
+The local Bot API server opens the file itself: `file://` through the read-only
+`/media/movies` mount, when `sendDocument` arrives. Between revalidation and that
+open, two things still happen:
+- the `ingest_upload_start` round trip;
+- a second adapter preflight inside `sendDocument`, which re-stats the size just
+  before the request.
+
+The server then reads the whole file while it uploads. So a change timed into
+that window (seconds before the send, or during the upload), or a same-size edit
+**outside** the three sampled 4 MiB regions, is still not detected here.
+
+- **Out of scope:** closing it would need a snapshot, a lock, or a full-content
+  hash compared after the upload, which changes the architecture.
+- **Not blind:** the caption token and the recorded `file_size` are still
+  checked against the reply, and `--full-hash` in `inspect` can confirm a
+  specific file.
+- **What this does close** is the practical gap: a stale journal entry whose
+  file was replaced at the same size after the scan. That includes a replacement
+  that kept the file's mtime, which a rescan's `discoveryKey` cache would reuse.
+
+## Cost
+
+- **Fixed read:** three 4 MiB samples, 12,582,912 bytes, whatever the file size.
+- **Trial movie (958 MiB):** about 30 ms to recompute, with the file probably in
+  the OS cache after the scan. A cold read on the library drive is a few seeks
+  more, still a fixed 12 MiB.
+
+## Tests
+
+- **`lib/uploader/uploader.test.ts`:** 10 new cases on a real 13 MiB file with
+  the real `fingerprintFile`.
+  - An unchanged source passes, with the check ordered after `preflight` and
+    before `sendDocument`.
+  - One byte flipped in the start, middle and end samples (same name, same size)
+    is refused, with:
+    - no server call;
+    - no `sendDocument`;
+    - no journal attempt, and an existing entry left byte-identical.
+  - A byte outside the samples passes: the documented limit.
+  - Through the real adapter, a size change and a missing file are refused by
+    preflight, before revalidation, with no request.
+  - An I/O error, a short read and a deleted file each return
+    `source_fingerprint_unreadable`.
+  - A value differing only in its last hex digit, or only in case, is a change.
+  - Ordinary, `--limit` and `--fingerprint` selections all reach the check.
+  - Uncertain and interrupted attempts go to `reconcile`, and resume replays
+    without reading the source.
+  - With the gate off, nothing runs, revalidation included.
+- **`lib/uploader/cli.test.ts`:**
+  - fixtures carry their real `sf1` values;
+  - the dry run shows the exact match;
+  - a same-size edit of the selected file is reported as
+    `source_fingerprint_changed`, and the journal is left unchanged.
+- **Mutation check.** Each of these made tests fail, and all were restored:
+  - skipping the recompute;
+  - prefix-only comparison;
+  - case-insensitive comparison;
+  - not refusing a mismatch;
+  - moving the check after `ingest_upload_start`;
+  - treating a read failure as a match.
+- **Suites:** `npm test` 303, `npm run test:db` 339, `npm run test:catalogue` 30
+  (including the recovery integration test). Lint, typecheck and build pass.
+
+## Real trial proof (read only)
+
+1. A fresh `scan G:\Movies --kind movie --match` into a scratch journal
+   reproduced the trial fingerprint `sf1-a9a1b20b…` with plan `upload`.
+2. `upload --fingerprint <it>` (dry run):
+   - selected 1 of 14 entries;
+   - preflight ok;
+   - `source`: the current bytes fingerprint to the selected value (exact
+     match).
+
+   The journal was byte-identical afterwards, and `--execute` was refused by the
+   gate.
+3. `inspect` showed:
+   - "On The Hunt" (2026);
+   - VJ resolved to `vj-ice-p`;
+   - duplicate `none`;
+   - action `upload`, with no stop reasons.
+4. A same-size copy in the scratchpad (outside the library), with one byte
+   flipped in the middle sample, returned `source_fingerprint_changed`. The
+   unmodified copy passed first. The copy was deleted afterwards.
+5. The real movie's size, mtime and fingerprint are unchanged. It was only read.

@@ -6,7 +6,7 @@ import type { LocalBotApiClient } from "@/lib/telegram/local-bot-api";
 import type { Journal, JournalEntry, UploadAttempt } from "@/lib/uploader/journal";
 import type { IngestionStore } from "@/lib/uploader/store";
 import type { CatalogueKind } from "@/types/catalogue";
-import type { IngestionEvent, ReconcileDecision, ReconciliationResult, ResumeAction, ServerUploadStatus, TelegramMediaRecord, UploadFailureOutcome } from "@/types/ingestion";
+import type { IngestionEvent, ReconcileDecision, ReconciliationResult, ResumeAction, ServerUploadStatus, SourceFingerprint, TelegramMediaRecord, UploadFailureOutcome } from "@/types/ingestion";
 
 /**
  * Upload and resume for one journal entry (C2). Order of evidence for an
@@ -32,6 +32,12 @@ export interface UploaderDeps {
   telegram: Pick<LocalBotApiClient, "preflight" | "sendDocument" | "checkRecoveryAccess" | "postRecoveryMarker" | "probeChannelMessage">;
   /** Must be true for any Telegram call; see REAL_TELEGRAM_UPLOADS_AUTHORIZED. */
   telegramEnabled: boolean;
+  /**
+   * Recomputes a file's sf1 fingerprint from its current bytes: the same
+   * computeFingerprint scan and inspect use (lib/uploader/scan.ts,
+   * fingerprintFile). Tests inject a fake.
+   */
+  fingerprintSource(absolutePath: string, sizeBytes: number): Promise<SourceFingerprint>;
   /** Highest message id the journal knows in this kind's channel; 0 when none. */
   channelHighWater(kind: CatalogueKind): Promise<number>;
   now(): Date;
@@ -50,6 +56,23 @@ export type StepResult =
   | { result: "resume"; action: ResumeAction | ReconcileDecision };
 
 const UPLOADABLE = new Set(["upload", "upload_then_review", "retry_upload"]);
+
+/**
+ * The journal's fingerprint describes the bytes seen at scan time; preflight
+ * only rechecks the size. So the current bytes are fingerprinted again, with
+ * the one sf1 algorithm, and must equal the journal's value exactly. A
+ * changed file is never re-journaled here: the operator rescans it.
+ */
+export async function verifySourceFingerprint(entry: Pick<JournalEntry, "absolutePath" | "sizeBytes" | "fingerprint">, fingerprintSource: UploaderDeps["fingerprintSource"]): Promise<{ ok: true } | { ok: false; code: "source_fingerprint_unreadable" | "source_fingerprint_changed" }> {
+  let current: SourceFingerprint;
+  try {
+    current = await fingerprintSource(entry.absolutePath, entry.sizeBytes);
+  } catch {
+    // Missing, locked, or shorter than the scanned size: never a path in the code.
+    return { ok: false, code: "source_fingerprint_unreadable" };
+  }
+  return current === entry.fingerprint ? { ok: true } : { ok: false, code: "source_fingerprint_changed" };
+}
 
 /** Whether an entry's scan plan lets `upload` hand it to uploadEntry (which checks again). */
 export const isUploadPlanned = (entry: JournalEntry) => entry.plan !== null && UPLOADABLE.has(entry.plan.action);
@@ -197,6 +220,9 @@ export async function uploadEntry(entry: JournalEntry, caption: string, deps: Up
   };
   const preflight = await deps.telegram.preflight(request);
   if (!preflight.ok) return { result: "refused", code: preflight.code };
+  // Last check before anything irreversible: no journal attempt, server start or Telegram call yet.
+  const source = await verifySourceFingerprint(entry, deps.fingerprintSource);
+  if (!source.ok) return { result: "refused", code: source.code };
 
   const startedAt = deps.now();
   let current = apply(entry, { type: "upload_started" });
