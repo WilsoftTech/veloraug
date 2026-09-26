@@ -43,9 +43,34 @@ describe("ingest CLI on plain Node", () => {
     for (const command of ["upload", "resume"]) {
       const run = cli(command, "--execute");
       expect(run.status).toBe(1);
-      expect(run.stderr).toContain("real Telegram uploads are disabled in code until C2B");
+      expect(run.stderr).toContain("real Telegram uploads are not authorized for this process");
     }
   });
+
+  it("the runtime gate: only REAL_TELEGRAM_UPLOADS_AUTHORIZED=true passes, and its raw value is never printed", () => {
+    for (const value of ["", "false", "FALSE", "0", "1", "yes", "TRUE", " true ", "enabled-by-mistake"]) {
+      for (const command of ["upload", "resume"]) {
+        const run = cliWith({ REAL_TELEGRAM_UPLOADS_AUTHORIZED: value }, command, "--execute");
+        expect(run.status).toBe(1);
+        expect(run.stderr).toContain("real Telegram uploads are not authorized for this process");
+        expect(run.stderr).toContain("Nothing was sent.");
+        if (value.trim().length > 4) expect(run.stdout + run.stderr).not.toContain(value.trim());
+      }
+    }
+    // Exact "true" passes the gate and stops at the next boundary: configuration (none here, so no network).
+    const allowed = cliWith({ REAL_TELEGRAM_UPLOADS_AUTHORIZED: "true" }, "upload", "--execute");
+    expect(allowed.status).toBe(1);
+    expect(allowed.stderr).not.toContain("real Telegram uploads are not authorized for this process");
+    expect(allowed.stderr).toContain("--execute needs the local Bot API configuration");
+  }, 120_000);
+
+  it("status and dry runs show the sanitized state, never the raw value", () => {
+    expect(cli("status").stdout).toContain("Real Telegram uploads: disabled");
+    expect(cliWith({ REAL_TELEGRAM_UPLOADS_AUTHORIZED: "enabled-by-mistake" }, "status").stdout).toContain("Real Telegram uploads: disabled");
+    expect(cliWith({ REAL_TELEGRAM_UPLOADS_AUTHORIZED: "enabled-by-mistake" }, "status").stdout).not.toContain("enabled-by-mistake");
+    expect(cliWith({ REAL_TELEGRAM_UPLOADS_AUTHORIZED: "true" }, "status").stdout).toContain("Real Telegram uploads: ENABLED");
+    expect(cli("upload").stdout).toContain("Nothing was sent. Real Telegram uploads: disabled.");
+  }, 60_000);
 
   it("checkpoint validates its input and needs the channel configuration; it never calls Telegram", () => {
     expect(cli("checkpoint", "--kind", "movie", "--message-id", "0").stderr).toContain("--message-id must be a positive message id");
@@ -141,7 +166,7 @@ describe("upload --fingerprint on plain Node (C2B.2C.2)", () => {
     const before = snapshot();
     const result = run(TELEGRAM, "--fingerprint", B, "--execute");
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("real Telegram uploads are disabled in code until C2B");
+    expect(result.stderr).toContain("real Telegram uploads are not authorized for this process");
     expect(snapshot()).toEqual(before);
   });
 

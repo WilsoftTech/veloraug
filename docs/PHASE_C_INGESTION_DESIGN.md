@@ -2338,3 +2338,155 @@ that window (seconds before the send, or during the upload), or a same-size edit
    flipped in the middle sample, returned `source_fingerprint_changed`. The
    unmodified copy passed first. The copy was deleted afterwards.
 5. The real movie's size, mtime and fingerprint are unchanged. It was only read.
+
+# C2B.2D — First controlled Movies upload: stopped before sending (2026-09-27)
+
+Status: **BLOCKED, confirmed not sent** (a pre-send authorization block). This is
+not a PASS, and C2B.2D is still open.
+
+- **Preconditions passed:**
+  - Git in sync;
+  - the local Bot API healthy, with `G:\Movies` mounted read-only at
+    `/media/movies`;
+  - the Movies identity, channel and recovery group verified, and Series isolated;
+  - hosted empty, with the checkpoint unchanged;
+  - a fresh scan reproduced the authorized fingerprint;
+  - the `--fingerprint` dry run selected 1 of 14 entries, preflight and source
+    revalidation passed.
+- **Why it stopped:** "enable" then meant editing the source constant
+  `REAL_TELEGRAM_UPLOADS_AUTHORIZED` in `lib/uploader/upload.ts`. The agent's
+  permission policy refused that edit, and it was not worked around.
+- **Nothing happened:** no upload attempt, no Telegram write, no hosted write.
+  The constant stayed `false`.
+- **The media mount** was left in place: it is read-only.
+
+C2B.2C.4 (below) replaces the source constant with a runtime gate, so the
+retry never edits code.
+
+# C2B.2C.4 — Runtime real-upload authorization gate (PASS)
+
+Status: **PASS (2026-09-27).** This checkpoint changed code, tests and docs only.
+No Telegram call, no hosted write, no upload.
+
+## Semantics
+
+Real Telegram traffic is a runtime, fail-closed operational gate:
+
+```ts
+isRealTelegramUploadAuthorized() // process.env.REAL_TELEGRAM_UPLOADS_AUTHORIZED === "true"
+```
+
+- **Only the exact string `true` enables.** Unset, empty and every other value
+  deny: `false`, `FALSE`, `0`, `1`, `yes`, `TRUE`, `True`, `" true "`,
+  `"true\n"`, quoted values.
+- **Read on every call**, from the process environment, never cached at import.
+  So it can be enabled for one command, and a build cannot bake it in.
+- **Server and CLI only.** No `NEXT_PUBLIC_` variant; no reference in `app/`,
+  `components/` or the client bundle; never logged. The CLI prints only
+  `Real Telegram uploads: disabled|ENABLED`, in `status` and in `upload` dry
+  runs, never the raw value.
+- **Committed default: deny.** The source constant is gone. `.env.example`
+  documents `REAL_TELEGRAM_UPLOADS_AUTHORIZED=false` as the kill switch. No
+  committed file enables it.
+
+## Enforcement (the shared path)
+
+- **`uploadEntry`** checks the gate as its first statement, before:
+  - the plan gate;
+  - server status;
+  - preflight and source revalidation;
+  - the journal attempt;
+  - `ingest_upload_start`;
+  - `sendDocument`.
+- **`resumeEntry`** checks it first too: recovery posts markers and forwards
+  messages.
+- **No caller can pass authorization in.** The injectable `telegramEnabled`
+  boolean was removed from `UploaderDeps`, so a future caller of the uploader is
+  still blocked unless the process environment says exactly `true`.
+- **The CLI refuses early too** (`executionDeps`), before any configuration or
+  store is loaded, with a stable message: "real Telegram uploads are not
+  authorized for this process … Nothing was sent."
+
+## Authorization is not selection
+
+- The gate enables the uploader. It does not choose a file.
+- A controlled production upload needs **both**:
+  - `REAL_TELEGRAM_UPLOADS_AUTHORIZED=true`, in that command's environment only;
+  - `upload --fingerprint <exact authorized sf1>`.
+- Nothing else is relaxed:
+  - plan, VJ and match gates;
+  - duplicate and state rules;
+  - routing and the registered channel;
+  - source revalidation;
+  - the recovery floor;
+  - reply validation.
+
+## Operator procedure (process-scoped)
+
+Never put `true` in `.env.local`, in source code, or in a commit. Node's
+`--env-file` does not override a variable already in the environment, so the
+command's own environment decides.
+
+PowerShell:
+
+```powershell
+$env:REAL_TELEGRAM_UPLOADS_AUTHORIZED = "true"
+try {
+    npm run ingest -- upload --fingerprint <AUTHORIZED_FINGERPRINT> --kind movie --execute
+}
+finally {
+    Remove-Item Env:REAL_TELEGRAM_UPLOADS_AUTHORIZED -ErrorAction SilentlyContinue
+}
+```
+
+- The value lives in that PowerShell session only for the `try` block.
+- A child-only variant (for example `cmd /c "set …&& npm …"`) was considered and
+  not adopted. It adds quoting pitfalls for no real gain, and `finally` already
+  removes the value even when the command fails.
+- In a POSIX shell, `REAL_TELEGRAM_UPLOADS_AUTHORIZED=true npm run ingest -- …`
+  scopes it to the one child.
+
+## Tests
+
+- `lib/uploader/uploader.test.ts` runs against the real environment gate:
+  - every test sets it with `vi.stubEnv`;
+  - after each test, `vi.unstubAllEnvs()` runs and the original process value is
+    asserted to be back.
+
+  It covers:
+  - the matrix: 17 denied values (including unset, empty, `false`, `FALSE`,
+    `0`, `1`, `yes`, `TRUE`, and padded and quoted forms) and the exact `true`;
+  - every denied value refuses `uploadEntry` and `resumeEntry` with no server
+    call, no journal write, no source read and no Telegram call;
+  - exact `true` reaches the fake `markUploadStarted`, then the fake
+    `sendDocument`;
+  - the value is read per call: the same deps are refused, then allowed, then
+    refused again.
+- `lib/uploader/cli.test.ts`, as real child processes with an explicit
+  environment:
+  - nine denied values refuse `upload` and `resume --execute` without echoing
+    the value;
+  - exact `true` passes the gate and stops at the missing configuration (no
+    network);
+  - `status` and the dry run show only the sanitized state.
+- The recovery integration test enables the gate for its suite and restores it
+  afterwards.
+- **Mutation check.** Each of these made tests fail, and all were restored:
+  - unset authorizes;
+  - any truthy string authorizes;
+  - case-insensitive comparison;
+  - trimmed comparison;
+  - the gate moved after `ingest_upload_start`;
+  - the gate removed from `uploadEntry`;
+  - the gate removed from `resumeEntry`;
+  - the value read once at import.
+- **Suites:** `npm test` 310, `npm run test:db` 339, `npm run test:catalogue` 30.
+  Lint, typecheck and build pass.
+
+## State after this checkpoint
+
+- The operator shell has the variable unset, and `.env.local` does not set it.
+- `npm run ingest -- status` reports `Real Telegram uploads: disabled`.
+- Hosted is unchanged: ingestion rows 0, and the Movies checkpoint is unchanged.
+- C2B.2D is **not** complete. Its retry uses the procedure above with the
+  authorized fingerprint.

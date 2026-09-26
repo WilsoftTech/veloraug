@@ -9,7 +9,7 @@ import { createLocalBotApiClient, loadLocalBotApiConfig, type LocalBotApiClient 
 import { newJournalEntry, openJournal, resolveJournalDir, type Journal, type JournalEntry } from "@/lib/uploader/journal";
 import { fingerprintFile } from "@/lib/uploader/scan";
 import { offlineStore, type IngestionStore } from "@/lib/uploader/store";
-import { planResume, REAL_TELEGRAM_UPLOADS_AUTHORIZED, resumeEntry, selectUploadEntries, uploadEntry, verifySourceFingerprint, type UploaderDeps } from "@/lib/uploader/upload";
+import { isRealTelegramUploadAuthorized, planResume, REAL_UPLOADS_ENV, resumeEntry, selectUploadEntries, uploadEntry, verifySourceFingerprint, type UploaderDeps } from "@/lib/uploader/upload";
 import type { ChannelProbeResult, ServerUploadStatus, SourceFingerprint, TelegramMediaRecord, UploadFailureOutcome, UploadOutcome } from "@/types/ingestion";
 
 const FP = `sf1-${"c".repeat(64)}` as SourceFingerprint;
@@ -86,6 +86,17 @@ beforeEach(async () => {
   journal = await openJournal(dir);
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+// Fakes only: every test runs with real-upload authorization unless it sets
+// otherwise, and the real process environment is restored after each one.
+const ORIGINAL_AUTHORIZATION = process.env[REAL_UPLOADS_ENV];
+beforeEach(() => {
+  vi.stubEnv(REAL_UPLOADS_ENV, "true");
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+  expect(process.env[REAL_UPLOADS_ENV]).toBe(ORIGINAL_AUTHORIZATION);
+});
 
 function entry(overrides: Partial<JournalEntry> = {}): JournalEntry {
   const fresh = newJournalEntry({
@@ -236,7 +247,7 @@ function deps(store: IngestionStore, api: ReturnType<typeof telegram>, now = T0)
   // The fake database and the uploader share one clock here; skew is tested separately.
   if (store instanceof FakeStore) store.clock = () => now;
   // The source still has the scanned bytes unless a test says otherwise (see sourceFingerprint).
-  return { journal, store, telegram: api, telegramEnabled: true, fingerprintSource: async () => sourceFingerprint, channelHighWater: async () => 40, now: () => now, sleep: async () => {} };
+  return { journal, store, telegram: api, fingerprintSource: async () => sourceFingerprint, channelHighWater: async () => 40, now: () => now, sleep: async () => {} };
 }
 
 describe("crash and recovery", () => {
@@ -378,20 +389,11 @@ describe("crash and recovery", () => {
     expect((await journal.get(FP))!.state.review).toBe("discovered");
   });
 
-  it("C2A.1 gate: real uploads are not authorized in code, and nothing is sent without it", async () => {
-    expect(REAL_TELEGRAM_UPLOADS_AUTHORIZED).toBe(false);
+  it("authorized, but with no server boundary, nothing is sent", async () => {
     const api = telegram(async () => ({ status: "succeeded", record: media(41) }));
-    const store = new FakeStore();
-    const disabled = { ...deps(store, api), telegramEnabled: false };
-    expect(await uploadEntry(entry(), CAPTION, disabled)).toEqual({ result: "refused", code: "telegram_uploads_not_authorized" });
-    expect(await resumeEntry(entry({ state: { ...entry().state, upload: "uploading", uploadAttempts: 1 } }), disabled)).toEqual({ result: "refused", code: "telegram_uploads_not_authorized" });
     expect(await uploadEntry(entry(), CAPTION, deps(offlineStore, api))).toEqual({ result: "refused", code: "server_boundary_unavailable" });
-    expect(store.calls).toEqual([]);
     expect(api.preflight).not.toHaveBeenCalled();
     expect(api.sendDocument).not.toHaveBeenCalled();
-    expect(api.checkRecoveryAccess).not.toHaveBeenCalled();
-    expect(api.postRecoveryMarker).not.toHaveBeenCalled();
-    expect(api.probeChannelMessage).not.toHaveBeenCalled();
   });
 
   it("an uncertain upload is recorded on the server, which then refuses a blind start even if the journal is lost", async () => {
@@ -544,7 +546,8 @@ describe("upload selection by fingerprint", () => {
     const api = telegram(async () => ({ status: "succeeded", record: media(41) }));
     const store = new FakeStore();
     const selected = only([named(A), entry()], { fingerprints: [FP] });
-    expect(await uploadEntry(selected, CAPTION, { ...deps(store, api), telegramEnabled: REAL_TELEGRAM_UPLOADS_AUTHORIZED })).toEqual({ result: "refused", code: "telegram_uploads_not_authorized" });
+    vi.stubEnv(REAL_UPLOADS_ENV, undefined);
+    expect(await uploadEntry(selected, CAPTION, deps(store, api))).toEqual({ result: "refused", code: "telegram_uploads_not_authorized" });
     expect(store.calls).toEqual([]);
     expect(api.preflight).not.toHaveBeenCalled();
   });
@@ -569,7 +572,7 @@ describe("upload selection by fingerprint", () => {
       if (!loaded.ok) throw new Error(loaded.errors.join("; "));
       const api = createLocalBotApiClient(loaded.config, { fetch: network as unknown as typeof globalThis.fetch, stat: async () => ({ isFile: true, size: SIZE }), uploadTimeoutMs: 1, requestTimeoutMs: 1 });
       const store = new FakeStore();
-      const result = await uploadEntry(only([candidate], { fingerprints: [FP] }), episodeCaption, { journal, store, telegram: api, telegramEnabled: true, fingerprintSource: async () => FP, channelHighWater: async () => 0, now: () => T0, sleep: async () => {} });
+      const result = await uploadEntry(only([candidate], { fingerprints: [FP] }), episodeCaption, { journal, store, telegram: api, fingerprintSource: async () => FP, channelHighWater: async () => 0, now: () => T0, sleep: async () => {} });
       return { result, calls: store.calls };
     };
     // Series is still on the cloud: refused before any request or server start.
@@ -686,7 +689,7 @@ describe("upload-time source fingerprint revalidation", () => {
     const attempt = async () => {
       const store = new FakeStore();
       const fingerprintSource = realFingerprint();
-      const result = await uploadEntry(source(), caption(), { journal, store, telegram: api, telegramEnabled: true, fingerprintSource, channelHighWater: async () => 0, now: () => T0, sleep: async () => {} });
+      const result = await uploadEntry(source(), caption(), { journal, store, telegram: api, fingerprintSource, channelHighWater: async () => 0, now: () => T0, sleep: async () => {} });
       return { result, calls: store.calls, fingerprinted: fingerprintSource.mock.calls.length };
     };
 
@@ -760,9 +763,73 @@ describe("upload-time source fingerprint revalidation", () => {
     const fingerprintSource = realFingerprint();
     const store = new FakeStore();
     const api = telegram(async () => ({ status: "succeeded", record: sent(41) }));
-    expect(await uploadEntry(source(), caption(), { ...deps(store, api), fingerprintSource, telegramEnabled: REAL_TELEGRAM_UPLOADS_AUTHORIZED })).toEqual({ result: "refused", code: "telegram_uploads_not_authorized" });
+    vi.stubEnv(REAL_UPLOADS_ENV, undefined);
+    expect(await uploadEntry(source(), caption(), { ...deps(store, api), fingerprintSource })).toEqual({ result: "refused", code: "telegram_uploads_not_authorized" });
     expect(fingerprintSource).not.toHaveBeenCalled();
     expect(store.calls).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Runtime real-upload authorization (C2B.2C.4): the real environment gate
+// ---------------------------------------------------------------------------
+
+describe("runtime real-upload authorization", () => {
+  const DENIED: Array<string | undefined> = [undefined, "", "false", "FALSE", "0", "1", "yes", "TRUE", "True", " true ", "true ", " true", "true\n", "on", "enabled", "'true'", "\"true\""];
+  const REFUSED = { result: "refused", code: "telegram_uploads_not_authorized" };
+
+  it("only the exact string \"true\" authorizes; unset and every other value deny", () => {
+    for (const value of DENIED) expect(isRealTelegramUploadAuthorized({ [REAL_UPLOADS_ENV]: value })).toBe(false);
+    expect(isRealTelegramUploadAuthorized({})).toBe(false);
+    expect(isRealTelegramUploadAuthorized({ REAL_TELEGRAM_UPLOADS: "true", NEXT_PUBLIC_REAL_TELEGRAM_UPLOADS_AUTHORIZED: "true" })).toBe(false);
+    expect(isRealTelegramUploadAuthorized({ [REAL_UPLOADS_ENV]: "true" })).toBe(true);
+  });
+
+  it("every denied value refuses upload and resume before the server, the journal, the source and Telegram", async () => {
+    for (const value of DENIED) {
+      vi.stubEnv(REAL_UPLOADS_ENV, value);
+      const api = telegram(async () => ({ status: "succeeded", record: media(41) }));
+      const store = new FakeStore();
+      const fingerprintSource = vi.fn<UploaderDeps["fingerprintSource"]>(async () => FP);
+      const denied = { ...deps(store, api), fingerprintSource };
+      expect(await uploadEntry(entry(), CAPTION, denied)).toEqual(REFUSED);
+      expect(await resumeEntry(entry({ state: { ...entry().state, upload: "uploading", uploadAttempts: 1 } }), denied)).toEqual(REFUSED);
+      expect(store.calls).toEqual([]);
+      expect(store.attempts).toBe(0);
+      expect(fingerprintSource).not.toHaveBeenCalled();
+      expect(await journal.list()).toEqual([]);
+      for (const call of [api.preflight, api.sendDocument, api.checkRecoveryAccess, api.postRecoveryMarker, api.probeChannelMessage]) expect(call).not.toHaveBeenCalled();
+    }
+  });
+
+  it("exact \"true\" lets the same path reach its next boundaries: the (fake) server start, then the (fake) sendDocument", async () => {
+    vi.stubEnv(REAL_UPLOADS_ENV, "true");
+    const api = telegram(async () => ({ status: "succeeded", record: media(41) }));
+    const store = new FakeStore();
+    expect(await uploadEntry(entry(), CAPTION, deps(store, api))).toEqual({ result: "uploaded", acknowledged: true });
+    expect(store.calls).toEqual(["markUploadStarted", "recordUploadSucceeded"]);
+    expect(api.sendDocument).toHaveBeenCalledTimes(1);
+    expect(store.calls.indexOf("markUploadStarted")).toBe(0);
+  });
+
+  it("is read on every call, not at import: the same deps are refused, then allowed, then refused again", async () => {
+    const api = telegram(async () => ({ status: "succeeded", record: media(41) }));
+    const store = new FakeStore();
+    vi.stubEnv(REAL_UPLOADS_ENV, "false");
+    expect(await uploadEntry(entry(), CAPTION, deps(store, api))).toEqual(REFUSED);
+    expect(store.calls).toEqual([]);
+    vi.stubEnv(REAL_UPLOADS_ENV, "true");
+    expect(await uploadEntry(entry(), CAPTION, deps(store, api))).toEqual({ result: "uploaded", acknowledged: true });
+    vi.stubEnv(REAL_UPLOADS_ENV, undefined);
+    expect(await resumeEntry((await journal.get(FP))!, deps(store, api))).toEqual(REFUSED);
+    expect(api.sendDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("a stubbed value never leaks into the next test (checked after every test in this file)", () => {
+    // beforeEach set "true"; this test changes it, and the file's afterEach
+    // asserts the original process value is back once it ends.
+    vi.stubEnv(REAL_UPLOADS_ENV, "1");
+    expect(isRealTelegramUploadAuthorized()).toBe(false);
   });
 });
 

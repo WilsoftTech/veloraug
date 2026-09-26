@@ -7,7 +7,7 @@ import { buildUploadCaption } from "@/lib/ingestion/telegram";
 import type { LocalBotApiClient } from "@/lib/telegram/local-bot-api";
 import { newJournalEntry, openJournal, type JournalEntry } from "@/lib/uploader/journal";
 import { createRpcIngestionStore, supabaseRpcTransport } from "@/lib/uploader/store";
-import { resumeEntry, uploadEntry, type UploaderDeps } from "@/lib/uploader/upload";
+import { REAL_UPLOADS_ENV, resumeEntry, uploadEntry, type UploaderDeps } from "@/lib/uploader/upload";
 import type { ChannelProbeResult, SourceFingerprint, TelegramMediaRecord, UploadOutcome } from "@/types/ingestion";
 
 /**
@@ -90,15 +90,18 @@ async function machine() {
 function deps(journal: UploaderDeps["journal"], api: ReturnType<typeof telegram>): UploaderDeps {
   // channelHighWater 0: the journal knows nothing; only the server floor may bound the scan.
   // The source is the scanned file: its fingerprint is unchanged (revalidation is unit-tested).
-  return { journal, store, telegram: api, telegramEnabled: true, fingerprintSource: async () => FP, channelHighWater: async () => 0, now: () => new Date(), sleep: async () => {} };
+  return { journal, store, telegram: api, fingerprintSource: async () => FP, channelHighWater: async () => 0, now: () => new Date(), sleep: async () => {} };
 }
 
 beforeAll(() => {
+  // Fake Telegram only: the runtime gate is enabled for this suite and restored after it.
+  vi.stubEnv(REAL_UPLOADS_ENV, "true");
   cleanup();
   psql(`insert into private.telegram_channels (bot_type, chat_id) values ('movie', ${MOVIES})
         on conflict (bot_type) do update set chat_id = excluded.chat_id;`);
 });
 afterAll(() => {
+  vi.unstubAllEnvs();
   cleanup();
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });

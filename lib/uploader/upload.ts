@@ -19,19 +19,26 @@ import type { IngestionEvent, ReconcileDecision, ReconciliationResult, ResumeAct
  */
 
 /**
- * Hard gate for real Telegram traffic (C2A.1). While false, the CLI refuses
- * `upload --execute` and `resume --execute`, and uploadEntry/resumeEntry refuse
- * whenever the caller has not explicitly enabled Telegram (tests do, against
- * fakes). C2B flips this only after the first real upload is authorized.
+ * Operational kill switch for real Telegram traffic (C2B.2C.4). A server/CLI
+ * environment variable, never NEXT_PUBLIC_ and never committed enabled.
  */
-export const REAL_TELEGRAM_UPLOADS_AUTHORIZED = false;
+export const REAL_UPLOADS_ENV = "REAL_TELEGRAM_UPLOADS_AUTHORIZED";
+
+/**
+ * Whether this process may make real Telegram calls. Only the exact string
+ * "true" enables; unset, empty and every other value (TRUE, 1, yes, " true ")
+ * deny. Read from the environment on every call, never cached at import, so
+ * the operator can set it for one command only. uploadEntry and resumeEntry
+ * check it themselves: no caller can enable Telegram by passing a flag.
+ */
+export function isRealTelegramUploadAuthorized(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
+  return env[REAL_UPLOADS_ENV] === "true";
+}
 
 export interface UploaderDeps {
   journal: Journal;
   store: IngestionStore;
   telegram: Pick<LocalBotApiClient, "preflight" | "sendDocument" | "checkRecoveryAccess" | "postRecoveryMarker" | "probeChannelMessage">;
-  /** Must be true for any Telegram call; see REAL_TELEGRAM_UPLOADS_AUTHORIZED. */
-  telegramEnabled: boolean;
   /**
    * Recomputes a file's sf1 fingerprint from its current bytes: the same
    * computeFingerprint scan and inspect use (lib/uploader/scan.ts,
@@ -196,7 +203,8 @@ export async function planResume(entry: JournalEntry, store: IngestionStore): Pr
 }
 
 export async function uploadEntry(entry: JournalEntry, caption: string, deps: UploaderDeps): Promise<StepResult> {
-  if (!deps.telegramEnabled) return { result: "refused", code: "telegram_uploads_not_authorized" };
+  // First, before any server read, journal write, upload start or Telegram call.
+  if (!isRealTelegramUploadAuthorized()) return { result: "refused", code: "telegram_uploads_not_authorized" };
   if (!isUploadPlanned(entry)) return { result: "refused", code: `plan_${entry.plan?.action ?? "missing"}` };
   if (entry.intendedChannelId === null) return { result: "refused", code: "channel_not_planned" };
   if (!deps.store.available) return { result: "refused", code: "server_boundary_unavailable" };
@@ -276,7 +284,8 @@ export async function uploadEntry(entry: JournalEntry, caption: string, deps: Up
 
 /** Settles one entry without uploading: it never sends a file. */
 export async function resumeEntry(entry: JournalEntry, deps: UploaderDeps): Promise<StepResult> {
-  if (!deps.telegramEnabled) return { result: "refused", code: "telegram_uploads_not_authorized" };
+  // Recovery posts markers and forwards messages, so it needs the same authorization.
+  if (!isRealTelegramUploadAuthorized()) return { result: "refused", code: "telegram_uploads_not_authorized" };
   const server = await readServerStatus(entry, deps.store);
   // Read after the reply: a later instant makes the derived attempt start later, never earlier.
   const statusReadAt = deps.now();

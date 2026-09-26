@@ -8,9 +8,10 @@
 //   checkpoint --kind movie|series --message-id <n> [--execute]
 //   status
 //
-// Dry run is the default. `upload`/`resume --execute` need the code-level
-// authorization (REAL_TELEGRAM_UPLOADS_AUTHORIZED, false until C2B), the local
-// Bot API configuration and the Supabase worker store (service-role key).
+// Dry run is the default. `upload`/`resume --execute` need the runtime
+// authorization (REAL_TELEGRAM_UPLOADS_AUTHORIZED exactly "true", set for that
+// one command only; unset or any other value denies), the local Bot API
+// configuration and the Supabase worker store (service-role key).
 // `resume --server` reads upload status through the worker RPC; it never
 // writes. It checks every journal entry, because after a lost journal only
 // the server knows which uploads are unresolved. `checkpoint --execute`
@@ -37,7 +38,7 @@ import { searchTmdbForIngestion } from "@/lib/tmdb/ingestion-search";
 import { JOURNAL_DIR_ENV, newJournalEntry, openJournal, resolveJournalDir, type Journal, type JournalEntry } from "@/lib/uploader/journal";
 import { fingerprintFile, hashFile, toSourceFile, walkMedia, type DiscoveredFile } from "@/lib/uploader/scan";
 import { createRpcIngestionStore, offlineStore, supabaseRpcTransport, type IngestionStore } from "@/lib/uploader/store";
-import { isUploadPlanned, planResume, REAL_TELEGRAM_UPLOADS_AUTHORIZED, resumeEntry, selectUploadEntries, uploadEntry, verifySourceFingerprint, type UploaderDeps, type UploadSelectionError } from "@/lib/uploader/upload";
+import { isRealTelegramUploadAuthorized, isUploadPlanned, planResume, REAL_UPLOADS_ENV, resumeEntry, selectUploadEntries, uploadEntry, verifySourceFingerprint, type UploaderDeps, type UploadSelectionError } from "@/lib/uploader/upload";
 import type { CatalogueKind } from "@/types/catalogue";
 import type { DuplicateSubject, KnownVj, MatchOutcome } from "@/types/ingestion";
 
@@ -206,7 +207,6 @@ function uploaderDeps(store: Journal, config: LocalBotApiConfig, server: Ingesti
   return {
     journal: store,
     store: server,
-    telegramEnabled: REAL_TELEGRAM_UPLOADS_AUTHORIZED,
     telegram: createLocalBotApiClient(config, {
       fetch,
       stat: async (path) => {
@@ -232,10 +232,16 @@ function workerStore(): IngestionStore {
   return createRpcIngestionStore(transport.rpc);
 }
 
-/** Gate for every command that could reach Telegram or write to Supabase. */
+/** Sanitized: whether real uploads are enabled for this process, never the raw value. */
+const realUploadsState = () => `Real Telegram uploads: ${isRealTelegramUploadAuthorized() ? "ENABLED" : "disabled"}`;
+
+/**
+ * Gate for every command that could reach Telegram or write to Supabase. This
+ * refuses early; uploadEntry and resumeEntry check the same gate again.
+ */
 function executionDeps(store: Journal): UploaderDeps {
-  if (!REAL_TELEGRAM_UPLOADS_AUTHORIZED) {
-    fail("real Telegram uploads are disabled in code until C2B is authorized (REAL_TELEGRAM_UPLOADS_AUTHORIZED). Nothing was sent.");
+  if (!isRealTelegramUploadAuthorized()) {
+    fail(`real Telegram uploads are not authorized for this process (${REAL_UPLOADS_ENV} must be exactly "true", set for this command only). Nothing was sent.`);
   }
   const loaded = loadLocalBotApiConfig(process.env);
   if (!loaded.ok) fail(`--execute needs the local Bot API configuration:\n  ${loaded.errors.join("\n  ")}`);
@@ -268,7 +274,7 @@ async function upload() {
   }
   if (!values.execute) {
     for (const entry of candidates) console.log(`${entry.intendedChannelId === null ? "blocked (rescan with Telegram config)" : "would upload"}  ${entry.kind.padEnd(6)} ${mib(entry.sizeBytes).padStart(12)}  ${entry.relativePath}\n  caption: ${caption(entry).split("\n").join(" | ")}`);
-    console.log(`\ndry run: ${candidates.length} file(s). Nothing was sent.`);
+    console.log(`\ndry run: ${candidates.length} file(s). Nothing was sent. ${realUploadsState()}.`);
     return;
   }
 
@@ -338,6 +344,7 @@ async function describeSelected(entry: JournalEntry, total: number, text: string
   if (!source.ok) reasons.push(source.code);
   console.log(`caption      ${text.split("\n").join(" | ")}`);
   console.log(`\ndry run: ${reasons.length === 0 ? "would upload this entry only" : `would not upload (${reasons.join(", ")})`}. Server status is checked at execution. Nothing was sent.`);
+  console.log(realUploadsState());
 }
 
 /** Nothing to settle: a fresh or definitely failed source, or one already recorded on both sides. */
@@ -389,6 +396,7 @@ async function checkpoint() {
 
 async function status() {
   const entries = await (await journal()).list();
+  console.log(realUploadsState());
   const tally = (key: (entry: JournalEntry) => string) => {
     const counts = new Map<string, number>();
     for (const entry of entries) counts.set(key(entry), (counts.get(key(entry)) ?? 0) + 1);
