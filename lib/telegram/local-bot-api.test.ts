@@ -31,6 +31,17 @@ const ENV: Env = {
   TELEGRAM_MOVIES_CHANNEL_ID: String(MOVIES),
   TELEGRAM_SERIES_CHANNEL_ID: String(SERIES),
   TELEGRAM_RECONCILE_CHAT_ID: String(OPS),
+  TELEGRAM_BOT_API_LOCAL_BOTS: "movie,series",
+  TELEGRAM_MOVIES_BOT_ID: "1111111",
+  TELEGRAM_MOVIES_BOT_USERNAME: "fake_movies_bot",
+  TELEGRAM_SERIES_BOT_ID: "2222222",
+  TELEGRAM_SERIES_BOT_USERNAME: "fake_series_bot",
+};
+
+/** What getMe answers for each fake token: the configured identities. */
+const IDENTITIES: Record<string, { id: number; username: string }> = {
+  [MOVIE_TOKEN]: { id: 1111111, username: "fake_movies_bot" },
+  [SERIES_TOKEN]: { id: 2222222, username: "fake_series_bot" },
 };
 
 function config(env: Env = ENV): LocalBotApiConfig {
@@ -59,9 +70,22 @@ function sentMessage(overrides: Record<string, unknown> = {}) {
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 const regularFile: StatFile = async () => ({ isFile: true, size: SIZE });
 
-function client(fetchImpl: (url: string, init: RequestInit) => Promise<Response>, stat: StatFile = regularFile, cfg = config()) {
+const trueIdentity = async (token: string) => json({ ok: true, result: { is_bot: true, ...IDENTITIES[token] } });
+
+/** getMe goes to `identity`, every other method to `fetch`, so call counts show only real operations. */
+function client(
+  fetchImpl: (url: string, init: RequestInit) => Promise<Response>,
+  stat: StatFile = regularFile,
+  cfg = config(),
+  identityImpl: (token: string) => Promise<Response> = trueIdentity,
+) {
   const fetch = vi.fn(fetchImpl);
-  return { fetch, api: createLocalBotApiClient(cfg, { fetch: fetch as unknown as typeof globalThis.fetch, stat, uploadTimeoutMs: 1000, requestTimeoutMs: 1000 }) };
+  const identity = vi.fn(identityImpl);
+  const routed = (url: string, init: RequestInit) => {
+    const getMe = /\/bot([^/]+)\/getMe$/.exec(url);
+    return getMe ? identity(getMe[1]) : fetch(url, init);
+  };
+  return { fetch, identity, api: createLocalBotApiClient(cfg, { fetch: routed as unknown as typeof globalThis.fetch, stat, uploadTimeoutMs: 1000, requestTimeoutMs: 1000 }) };
 }
 
 const noNetwork = () => Promise.reject(new Error("the network must not be reached"));
@@ -110,6 +134,99 @@ describe("local Bot API configuration: fail closed", () => {
     expect(loadLocalBotApiConfig({ ...ENV, TELEGRAM_SERIES_BOT_TOKEN: MOVIE_TOKEN }).ok).toBe(false);
     expect(loadLocalBotApiConfig({ ...ENV, TELEGRAM_SERIES_CHANNEL_ID: String(MOVIES) }).ok).toBe(false);
     expect(loadLocalBotApiConfig({ ...ENV, TELEGRAM_RECONCILE_CHAT_ID: String(MOVIES) }).ok).toBe(false);
+  });
+});
+
+describe("per-bot local migration gate", () => {
+  const UNLISTED: Env = { ...ENV, TELEGRAM_BOT_API_LOCAL_BOTS: undefined };
+  const moviesOnly: Env = { ...ENV, TELEGRAM_BOT_API_LOCAL_BOTS: "movie" };
+  const marker = buildRecoveryMarker(FP, 1, new Date("2026-09-26T10:00:00Z"));
+
+  it("loads with no bot listed, and then refuses every call for both bots without the network", async () => {
+    const cfg = config(UNLISTED);
+    expect(cfg.bots.movie.local).toBeNull();
+    expect(cfg.bots.series.local).toBeNull();
+    const { fetch, identity, api } = client(noNetwork, regularFile, cfg, noNetwork);
+    expect(await api.preflight(request())).toEqual({ ok: false, code: "bot_not_on_local_server", permanent: false });
+    expect(await api.sendDocument(request())).toEqual({ status: "rejected", code: "bot_not_on_local_server", permanent: false });
+    for (const kind of ["movie", "series"] as const) {
+      const blocked = { status: "blocked", code: "bot_not_on_local_server" };
+      expect(await api.checkIdentity(kind)).toEqual(blocked);
+      expect(await api.checkRecoveryAccess(kind)).toEqual(blocked);
+      expect(await api.postRecoveryMarker(kind, marker)).toEqual(blocked);
+      expect(await api.probeChannelMessage(kind, 7)).toEqual(blocked);
+    }
+    expect(fetch).not.toHaveBeenCalled();
+    expect(identity).not.toHaveBeenCalled();
+  });
+
+  it("represents the split: Movies local, Series never reaches the local server", async () => {
+    const { fetch, identity, api } = client(async () => json({ ok: true, result: sentMessage() }), regularFile, config(moviesOnly));
+    expect((await api.sendDocument(request())).status).toBe("succeeded");
+    const series = request({ transport: "series", kind: "series", intendedChannelId: SERIES, caption: caption() });
+    expect(await api.sendDocument(series)).toEqual({ status: "rejected", code: "bot_not_on_local_server", permanent: false });
+    expect(await api.checkRecoveryAccess("series")).toEqual({ status: "blocked", code: "bot_not_on_local_server" });
+    expect(await api.probeChannelMessage("series", 7)).toEqual({ status: "blocked", code: "bot_not_on_local_server" });
+    for (const [url] of [...fetch.mock.calls]) expect(String(url)).not.toContain(SERIES_TOKEN);
+    expect(identity.mock.calls.map(([token]) => token)).toEqual([MOVIE_TOKEN]);
+  });
+
+  it("requires the numeric id (matching the token) and exact username for each listed bot, and reports names only", () => {
+    const cases: Env[] = [
+      { ...ENV, TELEGRAM_BOT_API_LOCAL_BOTS: "movie,cloud" },
+      { ...moviesOnly, TELEGRAM_MOVIES_BOT_ID: undefined },
+      { ...moviesOnly, TELEGRAM_MOVIES_BOT_ID: "2222222" },
+      { ...moviesOnly, TELEGRAM_MOVIES_BOT_ID: "1111111x" },
+      { ...moviesOnly, TELEGRAM_MOVIES_BOT_USERNAME: undefined },
+      { ...moviesOnly, TELEGRAM_MOVIES_BOT_USERNAME: "@fake_movies_bot" },
+      { ...ENV, TELEGRAM_SERIES_BOT_ID: "1111111" },
+    ];
+    for (const env of cases) {
+      const loaded = loadLocalBotApiConfig(env);
+      expect(loaded.ok, JSON.stringify(env)).toBe(false);
+      if (!loaded.ok) {
+        expect(loaded.errors.join(" ")).toMatch(/TELEGRAM_(BOT_API_LOCAL_BOTS|MOVIES_BOT_ID|MOVIES_BOT_USERNAME|SERIES_BOT_ID)/);
+        expect(loaded.errors.join(" ")).not.toContain(MOVIE_TOKEN);
+      }
+    }
+    // An unlisted bot needs neither: Series stays unconfigured while only Movies moves.
+    const seriesUnset: Env = { ...moviesOnly, TELEGRAM_SERIES_BOT_ID: undefined, TELEGRAM_SERIES_BOT_USERNAME: undefined };
+    expect(config(seriesUnset).bots.series.local).toBeNull();
+    expect(config(seriesUnset).bots.movie.local).toEqual({ id: 1111111, username: "fake_movies_bot" });
+  });
+
+  it("sends nothing when getMe names a different bot (id is primary, username exact)", async () => {
+    const wrong = [
+      { is_bot: true, id: 9999999, username: "fake_movies_bot" },
+      { is_bot: true, id: 1111111, username: "other_movies_bot" },
+      { is_bot: true, id: 1111111, username: "Fake_Movies_Bot" },
+      { is_bot: false, id: 1111111, username: "fake_movies_bot" },
+      { is_bot: true, id: 1111111 },
+    ];
+    for (const result of wrong) {
+      const { fetch, api } = client(noNetwork, regularFile, config(), async () => json({ ok: true, result }));
+      expect(await api.checkIdentity("movie"), JSON.stringify(result)).toEqual({ status: "blocked", code: "bot_identity_mismatch" });
+      expect(await api.sendDocument(request())).toEqual({ status: "rejected", code: "bot_identity_mismatch", permanent: false });
+      expect(await api.postRecoveryMarker("movie", marker)).toEqual({ status: "blocked", code: "bot_identity_mismatch" });
+      expect(await api.probeChannelMessage("movie", 7)).toEqual({ status: "blocked", code: "bot_identity_mismatch" });
+      expect(fetch).not.toHaveBeenCalled();
+    }
+  });
+
+  it("verifies once per bot, and does not cache a failed check", async () => {
+    let up = false;
+    const { fetch, identity, api } = client(async () => json({ ok: true, result: sentMessage() }), regularFile, config(), async (token) => {
+      if (!up) throw Object.assign(new Error("down"), { cause: { code: "ECONNREFUSED" } });
+      return trueIdentity(token);
+    });
+    expect(await api.sendDocument(request())).toEqual({ status: "rejected", code: "bot_api_unreachable", permanent: false });
+    expect(fetch).not.toHaveBeenCalled();
+    up = true;
+    expect((await api.sendDocument(request())).status).toBe("succeeded");
+    expect((await api.sendDocument(request())).status).toBe("succeeded");
+    expect(await api.checkIdentity("movie")).toEqual({ status: "ok" });
+    expect(identity).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 });
 

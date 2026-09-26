@@ -29,6 +29,12 @@ import type { ChannelProbeResult, MarkerPostResult, RecoveryAccessResult, Recove
 export interface BotTarget {
   token: string;
   channelId: number;
+  /**
+   * The identity this bot must prove (getMe) on the local server. Null until
+   * the bot is listed in TELEGRAM_BOT_API_LOCAL_BOTS, i.e. has been logged out
+   * of the cloud and moved; until then every call for it is refused offline.
+   */
+  local: { id: number; username: string } | null;
 }
 
 export interface LocalBotApiConfig {
@@ -51,9 +57,16 @@ export const ENV = {
   seriesChannel: "TELEGRAM_SERIES_CHANNEL_ID",
   reconcileChat: "TELEGRAM_RECONCILE_CHAT_ID",
   pathMap: "TELEGRAM_BOT_API_PATH_MAP",
+  localBots: "TELEGRAM_BOT_API_LOCAL_BOTS",
+  movieBotId: "TELEGRAM_MOVIES_BOT_ID",
+  seriesBotId: "TELEGRAM_SERIES_BOT_ID",
+  movieUsername: "TELEGRAM_MOVIES_BOT_USERNAME",
+  seriesUsername: "TELEGRAM_SERIES_BOT_USERNAME",
 } as const;
 
 const BOT_TOKEN = /^\d{5,15}:[A-Za-z0-9_-]{30,64}$/;
+const BOT_ID = /^\d{5,15}$/;
+const BOT_USERNAME = /^[A-Za-z][A-Za-z0-9_]{3,31}$/;
 const CHANNEL_ID = /^-100\d{5,13}$/;
 const CHAT_ID = /^-?\d{5,16}$/;
 
@@ -101,9 +114,24 @@ export function loadLocalBotApiConfig(env: Env): { ok: true; config: LocalBotApi
     if (!value || !CHANNEL_ID.test(value)) errors.push(`${name} is missing or not a channel id (-100…)`);
     return Number(value);
   };
+  // Bots migrate one at a time, so the split (one bot local, the other still
+  // on the cloud) must be representable: only listed bots may reach the server.
+  const localKinds = (env[ENV.localBots] ?? "").split(",").map((part) => part.trim()).filter(Boolean);
+  if (localKinds.some((kind) => kind !== "movie" && kind !== "series")) errors.push(`${ENV.localBots} may list only movie and/or series`);
+  const identity = (kind: CatalogueKind, botToken: string, idName: string, usernameName: string): BotTarget["local"] => {
+    if (!localKinds.includes(kind)) return null;
+    const id = env[idName];
+    const username = env[usernameName];
+    // The numeric id is the primary assertion: it must be the id the token itself carries.
+    if (!id || !BOT_ID.test(id) || id !== botToken.split(":")[0]) errors.push(`${idName} must be the bot's numeric id, matching its token, while ${ENV.localBots} lists ${kind}`);
+    if (!username || !BOT_USERNAME.test(username)) errors.push(`${usernameName} must be the bot's exact username (without @) while ${ENV.localBots} lists ${kind}`);
+    return { id: Number(id), username: username ?? "" };
+  };
+  const movieToken = token(ENV.movieToken);
+  const seriesToken = token(ENV.seriesToken);
   const bots = {
-    movie: { token: token(ENV.movieToken), channelId: channel(ENV.movieChannel) },
-    series: { token: token(ENV.seriesToken), channelId: channel(ENV.seriesChannel) },
+    movie: { token: movieToken, channelId: channel(ENV.movieChannel), local: identity("movie", movieToken, ENV.movieBotId, ENV.movieUsername) },
+    series: { token: seriesToken, channelId: channel(ENV.seriesChannel), local: identity("series", seriesToken, ENV.seriesBotId, ENV.seriesUsername) },
   };
   if (bots.movie.token && bots.movie.token === bots.series.token) errors.push(`${ENV.movieToken} and ${ENV.seriesToken} must be different bots`);
   if (bots.movie.channelId === bots.series.channelId && Number.isFinite(bots.movie.channelId)) errors.push(`${ENV.movieChannel} and ${ENV.seriesChannel} must be different channels`);
@@ -225,6 +253,7 @@ export function toServerFileUri(absolutePath: string, pathMap: LocalBotApiConfig
 export async function preflightUpload(request: UploadRequest, config: LocalBotApiConfig, stat: StatFile): Promise<PreflightResult> {
   if (request.transport !== request.kind) return reject("transport_kind_mismatch", true);
   const target = config.bots[request.transport];
+  if (target.local === null) return reject("bot_not_on_local_server");
   if (request.intendedChannelId !== target.channelId) return reject("channel_changed_since_plan");
   if (!isFingerprint(request.fingerprint)) return reject("invalid_fingerprint", true);
   if (fingerprintFromCaption(request.caption) !== request.fingerprint) return reject("caption_token_mismatch", true);
@@ -378,6 +407,7 @@ function recoveryFailure(reply: Exclude<Reply, { kind: "ok" }>, prefix: string):
 const MESSAGE_NOT_FOUND = /^Bad Request: message to forward not found$/i;
 
 const chatInfo = z.object({ id: z.number().int(), has_protected_content: z.boolean().optional() });
+const botIdentity = z.object({ id: z.number().int(), is_bot: z.literal(true), username: z.string() });
 const sentText = z.object({ message_id: z.number().int().positive(), chat: z.object({ id: z.number().int() }), text: z.string() });
 
 const forwardOrigin = z.object({
@@ -391,6 +421,8 @@ const forwardOrigin = z.object({
 });
 
 export interface LocalBotApiClient {
+  /** Read-only (getMe): the kind's bot is listed as local and is exactly the configured id and username. */
+  checkIdentity(kind: CatalogueKind): Promise<RecoveryAccessResult>;
   /** Every check sendDocument makes before the network, without sending. */
   preflight(request: UploadRequest): Promise<{ ok: true; channelId: number } | { ok: false; code: string; permanent: boolean }>;
   sendDocument(request: UploadRequest): Promise<UploadOutcome | { status: "rejected"; code: string; permanent: boolean }>;
@@ -403,7 +435,31 @@ export interface LocalBotApiClient {
 }
 
 export function createLocalBotApiClient(config: LocalBotApiConfig, deps: TransportDeps): LocalBotApiClient {
+  const verified = new Set<CatalogueKind>();
+
+  /**
+   * Runs before any other call for a kind. An unlisted bot is refused without
+   * the network: a first request would log it in on the local server while it
+   * may still be live on the cloud. A listed bot must then prove, once per
+   * client, that it is the configured id and username. Only success is cached.
+   */
+  async function verifyLocalBot(kind: CatalogueKind): Promise<RecoveryCallFailure | null> {
+    const target = config.bots[kind];
+    if (target.local === null) return { status: "blocked", code: "bot_not_on_local_server" };
+    if (verified.has(kind)) return null;
+    const reply = await call(config, deps, target.token, "getMe", {}, deps.requestTimeoutMs);
+    if (reply.kind !== "ok") return recoveryFailure(reply, "get_me");
+    const me = botIdentity.safeParse(reply.result);
+    if (!me.success || me.data.id !== target.local.id || me.data.username !== target.local.username) return { status: "blocked", code: "bot_identity_mismatch" };
+    verified.add(kind);
+    return null;
+  }
+
   return {
+    async checkIdentity(kind) {
+      return (await verifyLocalBot(kind)) ?? { status: "ok" };
+    },
+
     async preflight(request) {
       const result = await preflightUpload(request, config, deps.stat);
       // The target carries the token; callers only need to know where it goes.
@@ -413,6 +469,9 @@ export function createLocalBotApiClient(config: LocalBotApiConfig, deps: Transpo
     async sendDocument(request) {
       const preflight = await preflightUpload(request, config, deps.stat);
       if (!preflight.ok) return { status: "rejected", code: preflight.code, permanent: preflight.permanent };
+      // getMe is read-only, so a failed identity check means nothing was sent.
+      const unverified = await verifyLocalBot(request.transport);
+      if (unverified) return { status: "rejected", code: unverified.status === "rate_limited" ? "telegram_rate_limited" : unverified.code, permanent: false };
       const reply = await call(config, deps, preflight.target.token, "sendDocument", {
         chat_id: preflight.target.channelId,
         document: preflight.serverFileUri,
@@ -433,6 +492,8 @@ export function createLocalBotApiClient(config: LocalBotApiConfig, deps: Transpo
      */
     async checkRecoveryAccess(kind) {
       if (config.reconcileChatId === null) return { status: "blocked", code: "reconcile_chat_not_configured" };
+      const unverified = await verifyLocalBot(kind);
+      if (unverified) return unverified;
       const target = config.bots[kind];
       for (const chatId of [target.channelId, config.reconcileChatId]) {
         const reply = await call(config, deps, target.token, "getChat", { chat_id: chatId }, deps.requestTimeoutMs);
@@ -451,6 +512,8 @@ export function createLocalBotApiClient(config: LocalBotApiConfig, deps: Transpo
      */
     async postRecoveryMarker(kind, text) {
       if (!isRecoveryMarker(text)) return { status: "blocked", code: "marker_text_invalid" };
+      const unverified = await verifyLocalBot(kind);
+      if (unverified) return unverified;
       const target = config.bots[kind];
       const reply = await call(config, deps, target.token, "sendMessage", {
         chat_id: target.channelId,
@@ -474,6 +537,8 @@ export function createLocalBotApiClient(config: LocalBotApiConfig, deps: Transpo
      */
     async probeChannelMessage(kind, messageId) {
       if (config.reconcileChatId === null) return { status: "blocked", code: "reconcile_chat_not_configured" };
+      const unverified = await verifyLocalBot(kind);
+      if (unverified) return unverified;
       const target = config.bots[kind];
       const reply = await call(config, deps, target.token, "forwardMessage", {
         chat_id: config.reconcileChatId,
