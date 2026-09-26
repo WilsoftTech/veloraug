@@ -2589,3 +2589,114 @@ Reconciliation must stay the recovery path for this attempt.
    - record the message if it is found;
    - otherwise the source stays held until the grace period ends.
 3. Only then continue C2B.2D.
+
+# C2B.2E — Reconciliation of the uncertain C2B.2D upload (PASS)
+
+Status: **PASS (2026-09-27).** The uncertain attempt from C2B.2D was resolved by
+the existing bounded marker protocol. Nothing was re-sent: there was no second
+`sendDocument` and no new attempt. So C2B.2D's one authorized upload is now a
+**confirmed, durably recorded** upload. The operator also saw the movie in the
+channel; that was treated only as supporting evidence.
+
+## Baseline (verified before recovery)
+
+- Hosted: one uploader row:
+  - `movie`, `uncertain`;
+  - attempt 1, floor 22, `network_error`;
+  - media 0, candidates 0;
+  - checkpoint 22;
+  - catalogue 0.
+- Journal: the entry is `uploading`, attempt 1 `uncertain`, floor 22, with no
+  Telegram record.
+- Movies local and verified; Series on the cloud, refused locally. The gate was
+  unset.
+
+## Recovery
+
+1. `resume --server` (dry run, read-only status RPC): exactly one entry to
+   settle, `{"action":"reconcile"}`. The other 13 were settled and skipped.
+2. One `resume --execute`, with `REAL_TELEGRAM_UPLOADS_AUTHORIZED=true` set only
+   inside a PowerShell `try` and removed in `finally`. It ran 23:16:03–23:16:24Z
+   and returned `{"result":"uploaded","acknowledged":true}`.
+3. Protocol path (existing code, unchanged):
+   1. the floor came from the server (22), and the journal copy agreed;
+   2. access checks;
+   3. one recovery marker (`velora-recovery:v1`) posted to the Movies channel by
+      the Movies bot, message **24**;
+   4. the bounded interval `(22, 24)` = {23} was inspected with a forward probe
+      into the recovery group;
+   5. the forwarded copy was deleted, best effort;
+   6. the match was on the exact `velora-src:<authorized sf1>` token and size;
+   7. it was recorded through `ingest_upload_record`;
+   8. the marker was offered as the channel checkpoint.
+4. `sendDocument` calls: **0**. `resumeEntry` has no send path.
+
+## Result (read back independently)
+
+| Check | Result |
+| --- | --- |
+| Ingestion row | The same single row (no new one): `upload_state = uploaded`, `upload_attempt_count = 1`, floor 22, `status = received` |
+| Media | Exactly 1 row, linked from the row (`telegram_media_id`): message **23** in the configured Movies channel, `document`, `On The Hunt.VJ ICE P.2026.mkv`, `video/x-matroska`, 1,004,462,878 bytes (= source), `telegram_date` 23:09:23Z |
+| Caption | `On The Hunt (2026) / VJ ICE P / Movie / velora-src:<authorized sf1>`: exact token |
+| Duplicates | 1 row for its `file_unique_id` |
+| Invariant | bootstrap checkpoint 22 ≤ floor 22 < message 23 < marker 24 |
+| Channel checkpoint | **24**, advanced by the protocol's own offer after the recorded resolution (not manually) |
+| Journal | `uploaded`, attempt 1 `confirmed`, floor 22, Telegram record message 23 with a matching fingerprint, DB acknowledged |
+| Candidates / review | 0 match candidates; review `discovered`; not approved |
+| Catalogue | 0 movies and versions: nothing published |
+
+**Stale failure code.** `upload_failure_code` still reads `network_error` on the
+now-`uploaded` row. `ingest_upload_record` does not clear it, so it stands as a
+historical code. Worth tidying in a later migration; it does not affect behavior.
+
+**Timing.** Telegram dated the message 23:09:23Z, about 3 min after the client's
+300 s cutoff. This matches the outbound traffic levelling off, and the upload
+finishing server-side.
+
+## Duplicate safety (the gate unset)
+
+- **Existing journal:**
+  - a rescan plans `skip` (`already_uploaded`);
+  - `upload --fingerprint` (dry run) says "would not upload (plan_skip,
+    journal_uploaded)";
+  - a plain `upload` dry run does not list it;
+  - `resume --server` finds 0 entries to settle.
+- **Lost journal** (a fresh scratch journal):
+  - the offline planner plans `upload`, since it sees only local state;
+  - `resume --server` returns `adopt_server` with message 23, and `uploadEntry`
+    runs that status check before any start. So the server's record prevents a
+    second send.
+  - The scratch journal was deleted afterwards.
+
+## Telegram read-back
+
+The Bot API cannot read channel history read-only. The protocol's forward probe
+(recovery group) was the independent read-back of message 23: document, caption
+token and size, all validated. No further forward was made.
+
+## Telegram writes by recovery (Movies bot, local server)
+
+| Kind | Count |
+| --- | --- |
+| Recovery marker (`sendMessage`, Movies channel) | 1 (message 24, retained) |
+| Forward probe (Movies channel → recovery group) | 1 (message 23) |
+| Deletion of the forwarded copy (recovery group, best effort) | 1 |
+| `sendDocument` | 0 |
+
+Series: cloud, unregistered, untouched.
+
+## State and next
+
+- **Real uploads:** disabled (shell unset, not in `.env.local`).
+- **C2B.2D:** its first controlled upload is now confirmed. It was completed
+  through reconciliation, not the direct reply, because of the transport
+  timeout.
+- **Next defect to fix:** Node's `fetch` default `headersTimeout` of 300 s cuts
+  off local Bot API replies for uploads longer than 300 s ("C2B.2D … retry",
+  Cause). The fix needs its own checkpoint. Until it lands, every upload over
+  about 5 min will end `uncertain` and need reconciliation.
+- **Still outstanding:**
+  - the crash/reconciliation drill;
+  - the near-ceiling test;
+  - bulk ingestion;
+  - the Series migration.
