@@ -1,7 +1,8 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
-// Unit tests for framework-free and server/CLI modules. Mirrors the tsconfig
+// Unit tests for framework-free and server/CLI modules, plus server-rendered
+// component markup (react-dom/server, no DOM). Mirrors the tsconfig
 // "@/*" alias; `server-only` throws outside a React Server Components bundle.
 export default defineConfig({
   resolve: {
@@ -10,5 +11,5 @@ export default defineConfig({
       "server-only": fileURLToPath(new URL("./tests/integration/server-only-stub.ts", import.meta.url)),
     },
   },
-  test: { include: ["lib/**/*.test.ts"], environment: "node" },
+  test: { include: ["lib/**/*.test.ts", "components/**/*.test.tsx"], environment: "node" },
 });

@@ -17,8 +17,9 @@ const ROW_POSTER_SIZES = "(min-width: 1024px) 176px, (min-width: 640px) 160px, 1
 
 /** The one poster card, used by scroll rows and grids. Links to the title's Velora page. */
 export function MovieCard({ item, sizes = ROW_POSTER_SIZES, eager, className }: MovieCardProps) {
+  const [firstVj, ...otherVjs] = item.vjs;
   return (
-    <Link href={titleHref(item.kind, item.slug)} className={cn("group block", className)}>
+    <Link href={titleHref(item.kind, item.slug)} className={cn("group relative block", className)}>
       <PosterImage
         path={item.posterPath}
         title={item.title}
@@ -31,6 +32,14 @@ export function MovieCard({ item, sizes = ROW_POSTER_SIZES, eager, className }: 
         {item.releaseYear && <span>{item.releaseYear}</span>}
         <Rating value={item.rating} />
       </p>
+      {/* After the title in reading order; drawn over the poster's top-left corner. */}
+      {firstVj && (
+        <span className="absolute left-2 top-2 flex max-w-[calc(100%-1rem)] items-center gap-1 rounded-full border border-highlight/30 bg-background/85 px-2 py-0.5 text-label-tag uppercase text-highlight backdrop-blur-sm transition duration-200 group-hover:-translate-y-0.5">
+          <span aria-hidden className="truncate">{firstVj.name}</span>
+          {otherVjs.length > 0 && <span aria-hidden className="shrink-0">+{otherVjs.length}</span>}
+          <span className="sr-only">Available from {item.vjs.map((vj) => vj.name).join(", ")}</span>
+        </span>
+      )}
     </Link>
   );
 }
