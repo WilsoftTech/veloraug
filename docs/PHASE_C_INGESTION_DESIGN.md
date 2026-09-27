@@ -3328,3 +3328,123 @@ or credential-bearing paths are recorded anywhere.
    - Reads: `getMe`, `getChat`, `getChatMember`.
    - Hosted: 0.
    - `REAL_TELEGRAM_UPLOADS_AUTHORIZED`: unset.
+
+---
+
+# E1 — MTProto media delivery feasibility spike: BLOCKED — SESSION ARCHITECTURE
+
+Date: 2026-09-27. **E1 MTProto feasibility: BLOCKED — SESSION ARCHITECTURE.** It
+stopped after research, **before any MTProto login**. There was no dependency
+install, code change or Telegram call (not even a read), and no hosted write. The
+ingestion bot session was not touched.
+
+## 1. The protocol primitive can serve HTTP ranges (official documentation)
+
+- `upload.getFile(location, offset, limit, precise?, cdn_supported?)` is usable
+  by **both users and bots**
+  ([method](https://core.telegram.org/method/upload.getFile)).
+- **Rules** ([files](https://core.telegram.org/api/files)):
+  - Without `precise`, offset and limit must be divisible by 4 KiB, and 1 MiB must
+    be divisible by the limit.
+  - With `precise` ("useful for example to stream videos by keyframes"), offset
+    and limit must be divisible by 1 KiB, and the limit must be ≤ 1 MiB.
+  - Always, each request must lie within one 1 MiB-aligned window:
+    `offset / 2^20 == (offset + limit − 1) / 2^20`.
+- **Errors and redirects.**
+  - `FILE_MIGRATE_X`: the file lives on DC X. It needs an exported/imported
+    authorization for that DC.
+  - `FILE_REFERENCE_EXPIRED`/`INVALID`: refetch the message for a fresh
+    `file_reference`.
+  - `FLOOD_WAIT`/`FLOOD_PREMIUM_WAIT` (420): wait.
+  - CDN: `upload.fileCdnRedirect` is returned only when the client passes
+    `cdn_supported`. A spike can omit it; a production gateway that opts in must
+    implement `upload.getCdnFile` and hash checks.
+- **Range mapping (to be proven).** An arbitrary HTTP range `[a, b]` maps to
+  aligned reads:
+  1. start at `floor(a / 1024) * 1024`;
+  2. never cross a 1 MiB boundary, with each `limit` rounded up to a 1 KiB
+     multiple and ≤ 1 MiB;
+  3. trim the prefix `a − start` and cut at `b`.
+
+  No protocol blocker exists, so the documentation does not force a stop.
+- **Resolving the document** needs `InputDocumentFileLocation` (id, access_hash,
+  file_reference). A bot resolves it read-only with `channels.getMessages`
+  ("Both users and bots can use this method";
+  [method](https://core.telegram.org/method/channels.getMessages)) on the Movies
+  channel, message 23. It uses `inputChannel(id, access_hash = 0)`, which bots
+  must use when no full hash is known locally
+  ([peers](https://core.telegram.org/api/peers)).
+- **Login** is `auth.importBotAuthorization(api_id, api_hash, bot_auth_token)`
+  ([method](https://core.telegram.org/method/auth.importBotAuthorization)). That
+  page says nothing about coexisting sessions.
+
+## 2. Session safety: credible risk, so no login with the ingestion bot
+
+- The official Local Bot API README
+  ([tdlib/telegram-bot-api](https://github.com/tdlib/telegram-bot-api)) says: *"If
+  the bot is logged in on more than one server simultaneously, there is no
+  guarantee that it will receive all updates."* It prescribes `logOut`/`close`
+  before a bot changes servers.
+- An MTProto `importBotAuthorization` with the Movies token is such a second
+  login.
+- No official source (the Bot API reference, the method pages, or the Telethon
+  and Pyrogram docs consulted) states that a second MTProto authorization is
+  harmless to a bot already on a Local Bot API server.
+- **Risk.** Update delivery to the ingestion bot is explicitly unguaranteed, and
+  roadmap C1/C2 webhook ingestion depends on updates. Any other interaction is
+  undocumented. The ingestion session was proven only hours ago and has already
+  needed a rotation.
+- Per the brief, that is credible risk, so **no login was attempted.**
+
+## Recommended architecture: a dedicated media-reader identity
+
+- **A separate bot used only by the media service over MTProto**, never on any
+  Bot API server:
+  - it is added to the Movies channel as an administrator with **all rights
+    off** (bots join channels only as administrators);
+  - it resolves message 23 read-only with `channels.getMessages`;
+  - it reads with `upload.getFile` using its own `file_reference`.
+- **Why it is safe.** The ingestion bot (uploads, markers, recovery) never gets a
+  second login, and the reader bot's own updates are irrelevant. It can be
+  revoked without touching ingestion, and it can never post (no rights).
+- **Credential types needed.** The operator configures them; values must never
+  be pasted into chat:
+  1. **A new bot token** from @BotFather for the reader bot. Its numeric id and
+     exact username are also needed, for an identity assertion like
+     `TELEGRAM_BOT_API_LOCAL_BOTS`'s.
+  2. **`api_id` / `api_hash`.** The existing `TELEGRAM_API_ID`/`TELEGRAM_API_HASH`
+     (the app credentials the local Bot API server uses) can be reused: they
+     identify the developer app, not a session. The operator may prefer a
+     dedicated app entry at my.telegram.org.
+  3. **Channel membership.** The operator adds the reader bot to the Movies
+     channel with no admin rights enabled. This is a Telegram action that only
+     the operator performs.
+- **Proposed server-only variable names** (never `NEXT_PUBLIC_`):
+  - `TELEGRAM_MEDIA_BOT_TOKEN`
+  - `TELEGRAM_MEDIA_BOT_ID`
+  - `TELEGRAM_MEDIA_BOT_USERNAME`
+  - optionally `TELEGRAM_MEDIA_API_ID`/`_HASH`
+
+## Dependency evaluation (npm registry metadata only; nothing installed)
+
+| | GramJS (`telegram`) | mtcute (`@mtcute/node`) |
+| --- | --- | --- |
+| Latest | 2.26.22 (2026-07-14) | 0.32.3 (2026-09-25) |
+| Unpacked size | about 2.0 MB | about 64 KB, plus `@mtcute/core`/`wasm` |
+| Dependencies | 14, pure JS (includes browser shims: `buffer`, `path-browserify`, `websocket`, `node-localstorage`) | includes **`better-sqlite3` (native build)** |
+| Bot login, raw `upload.getFile` with `precise`/offset/limit | Yes (`client.invoke(new Api.upload.GetFile(...))`) | Yes (raw `tl` calls) |
+
+- **Recommendation for the spike: GramJS.** It has no native build on this
+  Windows machine and gives direct raw-method control.
+- **Isolation.** Keep it isolated: a spike script under `.velora-ingest/`, plus
+  the dependency in a separate throwaway package or `--no-save`. Never in the
+  Next.js bundle.
+- **Revisit** the choice (mtcute, or TDLib) for a persistent production gateway.
+  Neither choice changes the hosting fact from C2B.2I: MTProto needs a
+  long-running server, not Vercel functions.
+
+## Writes
+
+Telegram 0 (not even reads), hosted 0, catalogue 0, repository code unchanged.
+No MTProto session was created. On The Hunt stays published and unchanged, and Fuze
+unpublished; the Movies checkpoint is 26; Series is untouched.

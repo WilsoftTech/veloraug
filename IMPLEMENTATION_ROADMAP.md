@@ -77,6 +77,11 @@ The first Velora UG task is reconciliation, not feature construction.
     - the session survived a restart, and no stale state remained;
     - hosted and media references are unchanged, Series untouched, and Telegram writes 0.
   - Record: `docs/PHASE_C_INGESTION_DESIGN.md`, "C2B.2I".
+- E1 MTProto feasibility spike (2026-09-27): **BLOCKED — SESSION ARCHITECTURE** (stopped after research, before any login).
+  - The protocol fits HTTP ranges: bots may call `upload.getFile`, with `precise` 1 KiB alignment, ≤ 1 MiB, inside one 1 MiB window. The document resolves read-only through `channels.getMessages`.
+  - The official Local Bot API README gives no guarantee of updates when a bot is logged in on more than one server, so the ingestion bot must not get a second MTProto login.
+  - Recommendation: a dedicated media-reader bot (channel admin, all rights off) configured by the operator; GramJS for the spike.
+  - Nothing installed; Telegram 0; hosted 0. Record: `docs/PHASE_C_INGESTION_DESIGN.md`, "E1".
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules
