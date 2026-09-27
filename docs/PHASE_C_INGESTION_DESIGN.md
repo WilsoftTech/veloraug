@@ -2862,11 +2862,11 @@ decision.
 
 # C2B.2H — Uploaded movie → catalogue: publication foundation
 
-Date: 2026-09-27. **HOSTED PUBLICATION FOUNDATION: PASS — AWAITING RIGHTS
-CONFIRMATION.** Migration 11 is `20260927090650_ingestion_movie_publication.sql`,
-deployed. On The Hunt's match is recorded and pending. Approval, the rights
-attestation and publication are **not authorized yet** and were not done.
-Telegram writes: 0.
+Date: 2026-09-27. **C2B.2H FIRST MOVIE CATALOGUE PUBLICATION: PASS.**
+Migration 11, `20260927090650_ingestion_movie_publication.sql`, is deployed.
+On The Hunt (VJ Ice P) was evaluated, approved and published through the
+owner-only lifecycle after the operator's explicit rights confirmation. It
+appears on the real UI from the hosted catalogue. Telegram writes: 0.
 
 ## Why On The Hunt is not visible (hosted, read-only audit)
 
@@ -3047,3 +3047,155 @@ revalidate every 300 s, and `/movies`, details and search are dynamic.
 
 Telegram writes: 0. `REAL_TELEGRAM_UPLOADS_AUTHORIZED` is unset in the shell and absent from
 `.env.local`.
+
+## Publication (PASS)
+
+### Authorization and baseline
+
+- **Operator confirmation.** Rights are cleared for the VJ Ice P version of
+  "On The Hunt (2026)", **this title only**. It was not extended to Fuze, Series
+  or future ingestion.
+- **Baseline re-verified read-only before any write.**
+  - Migration 11: installed, 11 migrations, function MD5s unchanged.
+  - On The Hunt: event 1 `matched/uploaded/attempt 1`, media 1 (message 23).
+  - Candidates: 20, all pending; the only score-1 is 1428857. VJ 1 is active.
+  - Catalogue: 0 movies, 0 versions, 0 genres.
+  - Unchanged elsewhere: Fuze `received` with 0 candidates; checkpoint 26;
+    Series unregistered.
+  - The runtime upload gate was unset. HEAD `b2e82a6` was synced.
+
+### Owner script
+
+- **New script.** Generated with `publication-sql … --tmdb-id 1428857
+  --rights-cleared` as `.velora-ingest/c2b2h-on-the-hunt-publish-RIGHTS-CLEARED.sql`
+  (Git-ignored). **SHA-256 `F4D978A65E856AEA312B8F0A86B69DF61CAD90F393CC52F1AC530E7252093733`**.
+  The earlier `…RIGHTS-NOT-ASSERTED.sql` was neither edited nor run; its hash is
+  unchanged.
+- **Review.**
+  - It contains exactly two calls, both keyed by On The Hunt's fingerprint:
+    `private.catalogue_approve_movie_match(…, 1428857)` and
+    `private.catalogue_publish_movie(…, <snapshot>, true)`. `true` appears only in
+    that call.
+  - It runs in one transaction with `ON_ERROR_STOP`, followed by a readback.
+  - It has no table writes, no Fuze or Series reference, no Telegram
+    operation and no secret.
+  - The snapshot is TMDB 1428857: "On the Hunt", 2026-02-27, poster and backdrop
+    TMDB paths, genres Action (28) and Thriller (53). TMDB has no runtime, so
+    it is null.
+- **Preflight, read-only.** The MCP role is `supabase_read_only_user`, which is
+  itself denied the owner-only slug helper. Every predicate held:
+  - uploaded, with media from the movie bot;
+  - `matched`, with a unique pending 1428857 and none approved;
+  - VJ resolved and active;
+  - computed slug `on-the-hunt-2026`, with no slug, title, media or version
+    conflict.
+
+  A write-then-rollback rehearsal on hosted was deliberately not run, because it
+  would consume identity-sequence values.
+
+### Execution (once, as `postgres`, over the session pooler; URL never printed)
+
+- The hash was re-checked immediately before the run.
+- `psql -X -v ON_ERROR_STOP=1 -f` exited 0 with: `BEGIN`, approval `approved`,
+  publication `published`, **movie 1 `on-the-hunt-2026`, version 1**, the readback,
+  then `COMMIT`.
+
+### Hosted lifecycle (read-only after commit)
+
+| Area | State |
+| --- | --- |
+| Ingestion | 2 events (no new one). Event 1 `published/uploaded/attempt 1`, media 1 = message 23. 2 media rows |
+| Candidates | `approved: 1` (TMDB 1428857), `superseded: 19`. No other approval anywhere |
+| Movie | Exactly 1: id 1, `on-the-hunt-2026`, "On the Hunt", release 2026-02-27, overview set, poster `/gkscq…jpg`, backdrop `/9gBWv…jpg`, TMDB 1428857, rating 4.7 (17 votes), `metadata_status = reviewed`, `published`, `published_at` set, not featured |
+| Version | Exactly 1: id 1, VJ 1 `vj-ice-p`, `ready`, `cleared` (rights recorded), `available_at` set, `telegram_media_id = 1` (bot `movie`), private link |
+| Genres | Action, Thriller (2 genres, 2 links) |
+| Unchanged | Fuze `received/uploaded/attempt 1`, 0 candidates. Movies checkpoint 26. Series: 0 channel rows, 0 series |
+
+### Public read (real PostgREST path, publishable key)
+
+- **Readable.** Exactly the display fields: id, slug, title, original title,
+  overview, release date, runtime, poster/backdrop, TMDB id and rating,
+  `published_at`. Also the version (`id`, `title_override`, `available_at`), VJ
+  (id, slug, name, badge variant) and genres. The list returns 1 row, and a
+  title search finds it. The payload has no Telegram, fingerprint, path or
+  floor text.
+- **Denied.**
+  - Columns (401): `telegram_media_id`, `telegram_media_bot_type`,
+    `availability_status`, `rights_status`, `publication_status`,
+    `metadata_status`, `vjs.is_active`, and `select=*`.
+  - Private tables (406): `telegram_media`, `ingestion_events`,
+    `metadata_match_candidates`, `telegram_channels`.
+  - RPCs (404): `ingest_upload_status`, `ingest_record_evaluation`,
+    `catalogue_publish_movie`.
+
+### Real UI (`npm run build`, then `next start` against the hosted catalogue; no fixtures)
+
+| Route | Result |
+| --- | --- |
+| `/` | 200. Hero (newest title with a backdrop) and the Latest Movies card with badge |
+| `/movies` | 200. Newest-first grid card with badge; genre and VJ filters present |
+| `/movies/on-the-hunt-2026` | 200. Title, 2026, Movie, rating, Action/Thriller, "Available from VJ Ice P", overview, backdrop |
+| `/search?q=On%20The%20Hunt` | 200. Found through the Supabase search, as a `MovieListItem` row |
+| `/vjs/vj-ice-p` | 200. VJ page, Movies row card with badge |
+
+- **Badge.** It renders from `TitleSummary.vjs` on every `MovieCard`: visible
+  `VJ Ice P` (uppercase, top-left, inside the poster) and the screen-reader text
+  "Available from VJ Ice P". A grep of `app`, `components` and the catalogue
+  layer finds no title-specific code.
+- **Search rows.** The search row (`MovieListItem`) shows no VJ. It never did,
+  and it was left unchanged as out of scope; this is noted for Phase D.
+- **Rendered-page leak scan.** No `sf1-`, `velora-src`, file ids, chat or
+  message ids, `-100…` ids, floor/recovery text, `.mkv` source names or local
+  paths appear in the HTML or RSC payloads of any tested route.
+
+### Cache
+
+- `/` and `/vjs` use ISR: an `x-nextjs-cache: HIT`, with `s-maxage=300`.
+- `/movies`, details and search are dynamic (`no-store`).
+- The build ran after publication, so visibility was **immediate**.
+- A server that was already running would show it on dynamic routes at once,
+  and on `/` and `/vjs` within one 300 s revalidation. Caching was not changed.
+- There is no deployed site to observe: `NEXT_PUBLIC_SITE_URL` is localhost.
+
+### Responsive
+
+- Chrome DevTools device emulation (Edge over CDP; no new dependency) at 360,
+  390 and 430 px (mobile, DPR 2) and at 1280 px, on `/`, `/movies`, the detail
+  page and the VJ page.
+- **No horizontal overflow** at any width (`scrollWidth` = viewport).
+- The badge sits inside the poster everywhere, and card titles are not
+  truncated. Cards measured 128–187 px wide on phones.
+- At 360 px the detail hero wraps cleanly: title, genres, VJ line, overview
+  and button. This replaces the earlier ~500 px `--window-size` limitation.
+
+### Idempotency
+
+- **Replay.** As `postgres`, inside a transaction that was always rolled back:
+  approval → `already_approved`; publication → `already_published` (movie 1,
+  version 1). Every count was identical: movies 1, versions 1, media 2, events
+  2, approved 1, genres 2, links 2, attempts 1, max movie id 1.
+- **Evaluation replay** (service role): `already_recorded`.
+- The reviewed owner script was not run a second time.
+
+### Regression
+
+- **Fuze:** uploaded, `received`, 0 candidates, unpublished.
+- **Telegram writes: 0** (`sendDocument` 0, marker 0, forward 0, delete 0).
+- **Movies checkpoint:** 26.
+- **Series:** unregistered and untouched.
+- **Runtime upload authorization:** unset.
+- Normal browsing reads only the Supabase catalogue.
+  `lib/catalogue-boundary.test.ts` passes, and TMDB serves only as the image CDN.
+
+### Tests
+
+- `npm test`: 336/336.
+- `npm run test:db`: 416/416 (7 files).
+- `npm run test:catalogue`: 30/30.
+- Lint, typecheck and the production build pass.
+- Mutation checks: **11/11 killed**:
+  - approval: unique match, active VJ;
+  - publication: rights, version conflict, approved candidate, artwork path,
+    slug conflict;
+  - evaluation: ambiguity, caller score, evidence replacement, non-uploaded
+    source.
