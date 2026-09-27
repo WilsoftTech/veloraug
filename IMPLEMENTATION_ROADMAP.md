@@ -82,6 +82,13 @@ The first Velora UG task is reconciliation, not feature construction.
   - The official Local Bot API README gives no guarantee of updates when a bot is logged in on more than one server, so the ingestion bot must not get a second MTProto login.
   - Recommendation: a dedicated media-reader bot (channel admin, all rights off) configured by the operator; GramJS for the spike.
   - Nothing installed; Telegram 0; hosted 0. Record: `docs/PHASE_C_INGESTION_DESIGN.md`, "E1".
+- E1.1 dedicated MTProto range proof (2026-09-27): **PASS.**
+  - A separate reader bot (never on the Bot API) logs in over MTProto, resolves Movies message 23 read-only, and reads bounded ranges with `upload.getFile` (`precise`, one read per 1 MiB window).
+  - Beginning, middle, tail, EOF clamp and the unaligned range `123456789-124505364` all match the local source byte for byte.
+  - 17 calls; about 5.5 MiB received for a 958 MiB file. Concurrency is fine; there is no per-RPC cancel. The ingestion bot is unaffected.
+  - Pure mapper `lib/telegram/mtproto-range.ts`. GramJS was spike-only (npm marks it archived, so not for production).
+  - **Operator action:** remove the reader's default channel rights (post, edit, delete, other).
+  - Record: `docs/PHASE_C_INGESTION_DESIGN.md`, "E1.1".
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules

@@ -3448,3 +3448,157 @@ ingestion bot session was not touched.
 Telegram 0 (not even reads), hosted 0, catalogue 0, repository code unchanged.
 No MTProto session was created. On The Hunt stays published and unchanged, and Fuze
 unpublished; the Movies checkpoint is 26; Series is untouched.
+
+---
+
+# E1.1 — Dedicated MTProto media-reader range proof: PASS (reader rights to remove)
+
+Date: 2026-09-27. **E1.1 DEDICATED MTProto RANGE PROOF: PASS** on all 14 criteria.
+**Open item:** the reader bot currently holds channel write rights. Section 4 of
+the brief requires none, so the operator must remove them ("Reader rights"). No
+production gateway, route, player or dependency was added to the application.
+
+## Isolation (configuration only, before any login)
+
+- The reader `@media_reader_bot` differs from the Movies ingestion bot
+  (`@veloramovies_bot`) and from Series:
+  - by id and by username;
+  - by token, compared by hash in-process and never printed.
+- Its token's id prefix matches `TELEGRAM_MEDIA_BOT_ID`.
+- The Local Bot API adapter reads no `TELEGRAM_MEDIA_*` variable, and
+  `TELEGRAM_BOT_API_LOCAL_BOTS` is `movie` only.
+- API credentials: the existing app credentials, `TELEGRAM_API_ID`/`HASH`.
+- **Afterwards:** the Local Bot API still holds exactly one per-bot session (the
+  Movies token's).
+
+## Library and session
+
+- **GramJS `telegram` 2.26.22** (it reports itself as 2.26.21).
+  - It was installed **only** in the Git-ignored `.velora-ingest/mtproto-spike/`,
+    with `--ignore-scripts` and an exact version. The application's
+    `package.json` and lockfile are unchanged, and nothing in
+    `app`/`components`/`lib`/`scripts` imports it.
+- **npm marks it archived and unmaintained**, with development moved to the fork
+  `teleproto`. That is fine for the spike, but it **disqualifies GramJS for a
+  production gateway**. Re-evaluate teleproto, mtcute or TDLib there.
+- **Session.** A GramJS `StringSession` holding the reader's MTProto auth key,
+  stored only in Git-ignored `.velora-ingest/mtproto/reader.session`. It is never
+  printed. Deleting it just forces a fresh bot login.
+
+## Authentication and resolution
+
+- `auth.importBotAuthorization`: `getMe` returns the configured id and username,
+  `bot: true`, and it is not the ingestion bot. Home DC 4.
+- **Channel.** `channels.getParticipant` with a zero access hash returned
+  `CHANNEL_INVALID`. The documented bot pattern works:
+  1. `channels.getChannels` with `access_hash = 0` returns the full (non-min)
+     channel;
+  2. the reader is a member of the broadcast channel;
+  3. that hash is used for later calls and kept in memory only.
+- **Message 23** via `channels.getMessages`:
+  - document, `video/x-matroska`, **1,004,462,878 bytes**, with a filename
+    attribute;
+  - the caption's source token matches On The Hunt's fingerprint (compared
+    in-process);
+  - the document lives on DC 4 (the home DC), so there was no `FILE_MIGRATE`.
+  - `InputDocumentFileLocation` is built in memory only.
+
+## Reader rights (operator action required)
+
+- The reader is `ChannelParticipantAdmin` with **`postMessages`,
+  `editMessages`, `deleteMessages` and `other`**. These are Telegram's defaults
+  when a bot is added to a channel as an administrator.
+- It holds no invite, change-info, ban, pin or add-admin rights.
+- Read access does not depend on these rights: `getChannels`, `getMessages` and
+  `upload.getFile` are reads. So this is not a READER PERMISSION MODEL block.
+- They were **not changed** here. **The operator should switch off every right
+  in the channel's administrator settings for the reader, then re-run the
+  read-only check.**
+
+## Range primitive (`lib/telegram/mtproto-range.ts`, pure, 12 unit tests, 8/8 mutants killed)
+
+- **HTTP semantics.** The range is inclusive, an end past EOF is clamped
+  (RFC 9110), and a start at or past EOF is unsatisfiable. A per-caller maximum
+  length applies; the spike used 4 MiB.
+- **Algorithm.** For each 1 MiB window the range touches, the mapper issues one
+  read:
+  - `offset = floor(position / 1 KiB) × 1 KiB`;
+  - `limit = ceil((min(last, windowEnd) + 1 − offset) / 1 KiB) × 1 KiB`, which is
+    ≤ 1 MiB and never crosses the window, because window ends are 1 KiB-aligned;
+  - it keeps `[position − offset, …)` of the reply.
+
+  That is the minimum possible number of reads. `assembleRange` refuses a short
+  reply (`range_reply_truncated`) rather than returning short output.
+- **The spike used `upload.getFile`** with `precise: true`, `cdnSupported: false`
+  (no CDN redirect is possible), one read per planned request, and
+  `FILE_MIGRATE_X` handling (never triggered).
+
+## Results (every range compared with the local source: length, first and last byte, SHA-256)
+
+| Test | Range | Length | `getFile` calls | Telegram payload | First byte | Equal |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| Beginning | 0–1048575 | 1,048,576 | 1 | 1,048,576 | 2,142 ms (includes sender warm-up) | yes |
+| Middle, unaligned (~500 MiB) | 524288333–524812620 | 524,288 | 1 | 525,312 | 519 ms | yes |
+| Tail (last 64 KiB, cues region) | 1004397342–1004462877 | 65,536 | 1 | 66,334 | 337 ms | yes |
+| EOF clamp (end past EOF) | 1004461878–(EOF+4096) → 1004462877 | 1,000 | 1 | 1,822 | 300 ms | yes |
+| **Arbitrary HTTP range** | **123456789–124505364** | **1,048,576** | **2** (window split) | 1,049,600 | 446 ms | **yes** |
+| Seek pattern, 256 KiB each | beginning, tail/index (the exact cues range), 400 MiB, 800 MiB, 100 MiB | 5 reads | 5 | about 1.08 MiB | 346–436 ms | yes, all |
+| After abandonment | 300 MiB | 131,072 | 1 | 132,096 | 447 ms | yes |
+| After a forced-reference run | 50 MiB | 65,536 | 1 | 66,560 | 375 ms | yes |
+
+- **Arbitrary-range proof.** The first byte, last byte, exact length
+  (1,048,576) and SHA-256 all equal the local source.
+- **Concurrency.** Three 256 KiB reads ran at once: all fulfilled and
+  byte-equal, in 633 ms wall time against 1,510 ms summed. GramJS pipelined
+  them over one sender; it did not serialize them. There was no flood wait and
+  no migration.
+- **Abandonment.** GramJS has **no per-RPC cancellation** (no AbortSignal). One
+  1 MiB read was abandoned after 30 ms. It settled in the background, bounded
+  to exactly its 1 MiB, and the next read succeeded. A gateway must therefore
+  bound in-flight reads per client (each is ≤ 1 MiB), not rely on cancellation.
+- **File-reference refresh.**
+  - **Implemented but not exercised live.** On `FILE_REFERENCE_EXPIRED`/`INVALID`
+    the reader refetches message 23 once and retries once, with no loop.
+  - Telegram **accepted every reference** for this reader and document: the
+    fresh 33-byte one, an XOR-corrupted one, a random 20-byte one and an empty
+    one. So the error could not be provoked. Keep the bounded path; it cannot
+    be proven here.
+- **Volume.**
+  - The whole experiment: 15 ranges, **17 `upload.getFile` calls**, 5.54 MiB of
+    Telegram payload, and **5.55 MiB received by all sockets in the process**
+    (0.01 MiB sent). The file is 957.9 MiB.
+  - Each range's socket bytes tracked its aligned request (for example, the
+    tail read received 66 KiB).
+  - Peak RSS was 126 MiB. **No full-file retrieval.**
+
+## Ingestion and application invariants (after the spike)
+
+- The ingestion bot on the Local Bot API is healthy:
+  - local `getMe` gives the exact id and username;
+  - channel `administrator` with can-post, and recovery-group `member`;
+  - `getChat` succeeds; the server is healthy with no restart.
+  - Series is refused locally.
+- Hosted, read-only, unchanged:
+  - On The Hunt `published`, attempt 1, media 1;
+  - Fuze `received`, media 2;
+  - media rows last updated before the spike;
+  - checkpoint 26, Series 0.
+- **Writes.** Telegram content 0 (no post, edit, forward, delete or upload), and
+  the Bot API was not used for the reader. Hosted 0.
+
+## Security audit
+
+- **Spike artifacts and the new module:** 0 secret values (every token, the API
+  hash and the service key checked) and 0 token-shaped strings.
+- **Output:** all printed output was filtered, and none contained a token, hash,
+  access hash, file reference, channel id, fingerprint or path.
+- **Session material** is Git-ignored and outside every committed path.
+
+## Next (not started)
+
+The source primitive works. A production gateway still needs:
+- a long-running host (not Vercel functions);
+- a maintained MTProto library;
+- publication-checked, Range-serving HTTP;
+- per-client in-flight bounds;
+- the reader's rights removed.
