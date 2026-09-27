@@ -1,0 +1,19 @@
+{
+  "name": "velora-media-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Velora UG media gateway (E1.2): published-only HTTP byte ranges from Telegram over MTProto. Not part of the Next.js application.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node --import ../../scripts/ingest/register.mjs main.mts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@mtcute/file-id": "0.32.0",
+    "@mtcute/node": "0.32.3",
+    "postgres": "3.4.9"
+  }
+}

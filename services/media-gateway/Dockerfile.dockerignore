@@ -1,0 +1,10 @@
+# Allow-list for the media gateway image (BuildKit reads <Dockerfile>.dockerignore).
+*
+!scripts/ingest/register.mjs
+!lib/telegram/mtproto-range.ts
+!lib/media-gateway/
+lib/media-gateway/*.test.ts
+lib/media-gateway/test-fakes.ts
+!services/media-gateway/package.json
+!services/media-gateway/package-lock.json
+!services/media-gateway/*.mts

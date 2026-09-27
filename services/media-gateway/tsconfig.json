@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["esnext"],
+    "types": ["node"],
+    "typeRoots": ["../../node_modules/@types"],
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "incremental": false,
+    "plugins": []
+  },
+  "include": ["*.mts", "../../lib/media-gateway/*.ts", "../../lib/telegram/mtproto-range.ts"],
+  "exclude": ["node_modules", "../../lib/**/*.test.ts", "../../lib/media-gateway/test-fakes.ts"]
+}
