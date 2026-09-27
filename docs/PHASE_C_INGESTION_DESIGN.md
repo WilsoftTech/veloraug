@@ -3641,3 +3641,443 @@ The source primitive works. A production gateway still needs:
 - publication-checked, Range-serving HTTP;
 - per-client in-flight bounds;
 - the reader's rights removed.
+
+---
+
+# E1.2 — Media gateway foundation: PASS
+
+Date: 2026-09-27. **E1.2 MEDIA GATEWAY FOUNDATION: PASS.** A long-running,
+published-only HTTP byte-range gateway serves On The Hunt (VJ Ice P) from the
+Movies channel over MTProto through the dedicated media reader. It holds one
+warm connection and bounded upstream work. No player, download, HLS, transcoding
+or Series work. Starting HEAD `c66cb2c`.
+
+## 1. MTProto client selection: mtcute 0.32.3
+
+Criteria: maintenance, persistent sessions, per-request cancellation,
+reconnect and DC migration, native dependencies, Docker/Linux cost, and fit for
+a long-running gateway. Registry metadata and source were read on 2026-09-27.
+
+| | mtcute (`@mtcute/node`) | teleproto | tdl + TDLib | GramJS (`telegram`) |
+| --- | --- | --- | --- | --- |
+| Latest | 0.32.3 (2026-09-25) | 1.229.0 (2026-08-25) | tdl 8.1.0 (2026-03-10); prebuilt-tdlib 2026-08-26 | 2.26.22 (2026-07-14) |
+| Releases | 117 since 2023-11; 12 in the last 6 months | 55 since 2025-05; 21 in the last 6 months | tdl: 1 in the last year | npm marks it **archived, unmaintained** |
+| Maintainers (npm) | 1 | 1 | 1 (binding); TDLib itself is Telegram's | 2 |
+| Per-RPC cancellation | **Yes**: `abortSignal` on every call; local reject plus `rpc_drop_answer` to Telegram | **No**: `invoke(request, dcId)`; the only `abortSignal` is for QR login | `cancelDownloadFile` (TDLib's own file manager) | No (E1.1) |
+| File reads | Raw `upload.getFile` with `precise` on the document's DC | Raw invoke (GramJS model) | `downloadFile`/`readFilePart` into TDLib's **disk cache** only; no raw ranged `getFile` | Raw invoke |
+| Session | `exportSession`/`importSession` string, any storage | StringSession/StoreSession | TDLib database directory (binlog and files) | StringSession |
+| Reconnect, DC | Built in: reconnect strategy, per-DC pools, `FILE_MIGRATE` surfaced as a typed error | GramJS model | Fully internal | GramJS model |
+| Native code | None when storage is in memory (`better-sqlite3` installs, but its addon is never built or loaded: `--ignore-scripts`) | None | **~60 MB native TDLib per platform** (glibc/musl builds) | None |
+
+**Decision: mtcute 0.32.3**, pinned exactly with `@mtcute/file-id` 0.32.0.
+- It is the only maintained candidate with real per-RPC cancellation, which a
+  gateway needs when a browser goes away.
+- teleproto inherits GramJS's call model: no cancellation, and a young fork (since
+  2025-05) with high churn.
+- TDLib is the most battle-tested MTProto client but the wrong model here. It
+  streams through its own on-disk file cache, and C2B.2I already showed that
+  model forces the full-file problem. It adds a large native binary and a full
+  client database.
+- **Risks accepted:** mtcute is pre-1.0 with a single maintainer. Mitigations:
+  an exact pin; one small adapter (`services/media-gateway/mtcute-reader.mts`)
+  behind a port the HTTP core owns; the range planner stays ours.
+
+**Why GramJS is rejected for production.** npm marks it archived and
+unmaintained (development moved to teleproto), and it has no per-RPC
+cancellation (E1.1). It remains only as the E1.1 spike record.
+
+**`downloadChunk` source finding, verified in the installed 0.32.3:**
+- it aligns the offset down to 1 KiB and the limit up to 1 KiB;
+- it refuses an aligned limit above 1 MiB (`MtArgumentError`);
+- it calls `upload.getFile` with `precise: true`;
+- it trims the aligned reply;
+- it passes `abortSignal` through.
+
+Two defects follow from that code, both reproduced offline against the real
+function with a stub that answers like Telegram (short replies at EOF):
+1. **It does not keep a read inside one 1 MiB window.** For offset 1,048,000,
+   limit 2,000 it requested `offset 1047552, limit 3072`, which crosses a window
+   and is illegal per the files documentation.
+2. **It trims by the requested length, not the reply length.** For the last
+   1,000 bytes it returned **774 bytes**, silently truncated at EOF.
+
+So the gateway does not use `downloadChunk`. It calls `upload.getFile` directly
+with the E1.1 planner's legal, window-local reads (`lib/telegram/mtproto-range.ts`),
+does its own trimming, and refuses a short reply (`document_resolution_failed`).
+
+## 2. Runtime and container architecture
+
+- **Core (`lib/media-gateway/`).** Node built-ins plus the E1.1 planner only;
+  a boundary test enforces this:
+  - `range.ts`: Range parsing;
+  - `token.ts`: authorization tokens;
+  - `pump.ts`: bounded streaming;
+  - `limits.ts`;
+  - `errors.ts`;
+  - `log.ts`;
+  - `config.ts`;
+  - `resolver-sql.ts`;
+  - `server.ts`: `node:http`.
+- **Service (`services/media-gateway/`).** A separate npm package, excluded from
+  the root tsconfig and never imported by the application (boundary test). It
+  holds `mtcute-reader.mts`, `pg-resolver.mts`, `main.mts`, its own lockfile,
+  tsconfig (`erasableSyntaxOnly`), `Dockerfile` and an allow-list
+  `Dockerfile.dockerignore`.
+- **It runs on plain Node 24** with native type stripping and the existing
+  `scripts/ingest/register.mjs` hooks, so there is no build step.
+- **Not in the app.** The Next.js production build contains no gateway code (a
+  scan of `.next` finds 0 matches), and the application's `package.json` is
+  unchanged.
+- **Image:** `node:24.13.0-bookworm-slim@sha256:4660b1ca…`, `npm ci --omit=dev
+  --ignore-scripts`.
+  - Only 17 application files; no session, `.env` or journal file (verified
+    inside the image).
+  - Runs as `node` (uid 1000); 375 MB, mostly the Node base image.
+  - Health check on `/healthz`; `STOPSIGNAL SIGTERM`.
+- **Proof container:** `--read-only`, tmpfs `/tmp`, `--cap-drop ALL`,
+  `no-new-privileges`, `--memory 256m`, `--cpus 1`, `--pids-limit 64`, bound to
+  `127.0.0.1` only. The session directory is a mounted volume.
+- **Host.** It needs a long-running host (a container or VM), not Vercel
+  functions, as C2B.2I established.
+
+## 3. Persistent session
+
+- **One mtcute client for the life of the process.** Updates are disabled and
+  library logs are off.
+- **Storage.** `MemoryStorage`, plus an exported session string in
+  `MEDIA_GATEWAY_SESSION_FILE`:
+  - written atomically (temporary file, then rename), mode 0600;
+  - re-persisted after startup and on shutdown.
+- **No new authorization.** The E1.1 reader's GramJS session was converted
+  offline (`@mtcute/convert`, in a throwaway directory since removed): the same
+  256-byte auth key on home DC 4. A bot login (`MEDIA_GATEWAY_ALLOW_BOT_LOGIN=true`
+  plus `TELEGRAM_MEDIA_BOT_TOKEN`) is possible only when explicitly enabled and
+  no session exists; the token must belong to the reader id.
+- **Startup, fail closed:**
+  1. connect;
+  2. `getMe` equals the configured reader id and username, is a bot, and is not
+     an ingestion bot;
+  3. the Movies channel resolves (access hash 0 → full channel), the reader is a
+     member, and its admin rights are exactly `other`. Any write right fails
+     readiness (`rights_too_broad`).
+  - The rights check repeats every 5 minutes.
+- **Reconnect.** mtcute's strategy (immediate, then up to 5 s apart). Readiness
+  requires `connected`.
+- **Shutdown (SIGTERM/SIGINT):**
+  1. readiness drops and new streams are refused;
+  2. running streams get 15 s;
+  3. the session is persisted and connections close.
+- **Transient startup failures retry** with backoff. Identity, rights and
+  missing-session failures stay not ready.
+
+## 4. Authorization tokens
+
+- **Format.** `v1.<base64url claims>.<HMAC-SHA256>`. Claims:
+  `{aud: "velora-media-gateway", op: "stream" | "download", mv, sub, iat, exp, jti}`,
+  where `mv` is the internal movie-version id.
+- **No Telegram identifier** can be expressed. Any extra claim is refused.
+- **Verification order.** The MAC is compared in constant time before parsing.
+  Then:
+  1. strict claims;
+  2. a lifetime cap (`exp − iat` ≤ 3,600 s by default);
+  3. `iat` skew ≤ 30 s;
+  4. expiry;
+  5. operation;
+  6. version.
+- **Stream and download are separate.** A `stream` token never authorizes
+  `/download`, and the reverse. `/download` recognizes a download token and still
+  serves no bytes (501).
+- **Transport.** `?token=` for media elements, or `Authorization: Bearer`; both
+  together are refused. Responses carry `Cache-Control: private, no-store` and
+  `Referrer-Policy: no-referrer`. The token is never logged.
+- **Issuer.** `signMediaToken` is server-only. In E1.2 only the proof harness
+  issues tokens; the entitled issuer is roadmap E2.
+
+## 5. Catalogue and private-media resolution
+
+- **One fixed statement** (`RESOLVE_MOVIE_VERSION_SQL`). It returns the private
+  media of a movie version only when all of these hold:
+  - the movie is `published` with `published_at`;
+  - the version is `ready` and rights `cleared`;
+  - the VJ is active;
+  - the media belongs to the movie bot, sits in the **registered** Movies
+    channel, and has a recorded size.
+- **Fail closed.** Anything else, including Fuze-style media with no version and
+  unknown ids, returns no row → 404, identical for every cause.
+- **Read-only, one round trip.** It runs as `set transaction read only; set local
+  statement_timeout = 3000; <statement>`, one simple-protocol batch, which
+  PostgreSQL runs as one implicit transaction. On the hosted pooler:
+  - **~233 ms warm** (four round trips took ~1,150 ms);
+  - a write inside such a batch is refused (SQLSTATE 25006, nothing created);
+  - nothing carries over to the next query.
+- **Why not the alternatives.** Startup parameters cannot carry the read-only
+  default through the Supabase pooler (measured: dropped). postgres.js refuses a
+  textual `BEGIN` on a pool. Readiness verifies `transaction_read_only = on`. The
+  version id is interpolated only as a validated positive safe integer.
+- **Credential (debt).** `MEDIA_GATEWAY_DATABASE_URL` is the owner connection
+  the ingestion tooling already uses. `private.telegram_media` grants nothing to
+  any API role, and this checkpoint changes nothing hosted. A dedicated
+  least-privilege role or a narrow SECURITY DEFINER function is the follow-up.
+- **Document integrity.** The reader fetches the message read-only
+  (`channels.getMessages`) and checks the document against the catalogue before
+  any byte is served:
+  - the Bot API `file_unique_id` parsed to the same document id;
+  - the exact size;
+  - the MIME type.
+- **Caching and retries.** The resolved location is cached for 10 minutes per
+  media id. `FILE_REFERENCE_*` gets one refresh and one retry, `FILE_MIGRATE_X`
+  one retry on DC X.
+
+## 6. Endpoint and Range semantics
+
+`GET /v1/movie-versions/{id}/stream?token=…`, `GET /v1/movie-versions/{id}/download`
+(reserved), `GET /healthz`, `GET /readyz`, and a CORS preflight (`OPTIONS`) on
+the media routes.
+
+- **Order, each step failing closed:**
+  1. route;
+  2. only the `token` parameter (anything else, for example `message_id` or
+     `chat_id`, gets 400);
+  3. token;
+  4. rate and stream limits;
+  5. reader readiness;
+  6. catalogue;
+  7. Range;
+  8. bytes.
+- **Range.** One `bytes` range: `a-b`, `a-` or `-n`.
+  - An end past EOF is clamped.
+  - A range longer than `maxResponseBytes` (8 MiB) or open-ended is shortened
+    to it: a valid 206 with a smaller `Content-Range`, and the client asks again.
+  - A missing Range gets 400 `range_required`, so **the whole movie is never one
+    response**.
+  - Malformed, multi-range or repeated headers get 400.
+  - A start ≥ size, or `-0`, gets 416 with `Content-Range: bytes */size`.
+- **Headers go out only after the first upstream read succeeds.** An early
+  Telegram failure is therefore still a clean status. A mid-body failure cuts
+  the connection.
+- **CORS** is allow-listed per origin. A suffix range is not CORS-safelisted, so
+  Chrome preflights it (found in the browser proof, then implemented). The
+  preflight never touches the catalogue or Telegram.
+
+## 7. Streaming, backpressure and limits
+
+- **Bounded pump.**
+  - At most `readAheadPerStream` (2) reads in flight per stream, each ≤ 1 MiB,
+    plus a gateway-wide semaphore of `maxReadsInFlight` (8).
+  - Every reply is trimmed and written at once; no response is assembled.
+  - When `write()` returns false, nothing new is scheduled until `drain`.
+- **On disconnect or timeout:**
+  - scheduling stops immediately (including an abort observed during a write);
+  - in-flight reads are aborted through mtcute's signal;
+  - their semaphore slots are awaited and returned.
+  - With a non-cancellable client, only already-issued reads would finish
+    (tested with a fake).
+- **Limits (defaults; configurable only within hard bounds, and fail closed on
+  bad values):**
+
+| Limit | Default |
+| --- | --- |
+| Active streams, global / per subject / per IP | 32 / 3 / 6 |
+| Reads in flight | 8 gateway-wide, 2 per stream |
+| Response size | 8 MiB |
+| Timeouts | request 120 s, idle 30 s, per read 30 s |
+| Token lifetime cap | 3,600 s |
+| Range requests per 60 s window | 120 per subject, 240 per IP (bounded key table) |
+
+- Pooler connections are pre-opened at startup, because a pooler connect costs
+  about 2 s.
+
+## 8. Errors, logging, health
+
+- **Internal codes** (closed set). Among them:
+  - authorization missing, invalid, expired, wrong operation, wrong version;
+  - version unavailable; invalid request; range required, invalid,
+    unsatisfiable;
+  - rate limited; too many streams; not ready; catalogue unavailable;
+  - Telegram unavailable; flood wait (with `Retry-After`, capped); MTProto
+    disconnected;
+  - document resolution failed; upstream timeout; internal.
+- **Public output.** Each code maps to a fixed status and a one-field JSON body.
+  Raw Telegram, MTProto and driver errors never leave their adapter; anything
+  unclassified is `internal_error`.
+- **Logs are JSON lines by allow-list:** request id, internal version id, route,
+  requested and served bytes, reads planned and issued, RPC count, status,
+  latency, first byte, safe code, outcome and state. Any other field, and any
+  non-identifier-like string, is dropped.
+- **Health.**
+  - `/healthz` answers `{"status":"ok"}` and calls nothing.
+  - `/readyz` answers 200 only when the reader is `ready`, MTProto is connected,
+    the read-only catalogue probe passes and the gateway is not shutting down.
+    Otherwise it answers 503 with a safe state label only.
+
+## 9. On The Hunt HTTP proof (through the gateway's HTTP boundary)
+
+Every range was compared with the local source `G:\Movies` (length, first and
+last byte, SHA-256). The table is the final **local-process** run, the same code
+as the image. The container run executed the same steps, but its per-range lines
+were filtered out of the saved console log and its summary file was never
+written (the harness stopped at the reconnect step), so the table claims nothing
+for the container. In the container, byte-equality is proven by the browser
+proof (§10: beginning, tail, middle and unaligned ranges) plus the 416 and 400
+cases.
+
+| Proof | Request | Result |
+| --- | --- | --- |
+| A beginning | `bytes=0-1048575` | 206, `bytes 0-1048575/1004462878`, length 1,048,576, **byte-equal** |
+| B middle | `bytes=524288333-524812620` | 206, 524,288 bytes, **byte-equal** |
+| C final 64 KiB | `bytes=-65536` | 206, `bytes 1004397342-1004462877/1004462878`, **byte-equal** |
+| D arbitrary unaligned | `bytes=123456789-124505364` | 206, 1,048,576 bytes, 2 reads (window split), **byte-equal** |
+| Open-ended | `bytes=0-` | 206, `bytes 0-8388607/…` (bounded, not the movie), byte-equal |
+| EOF clamp | end past EOF | 206, 1,000 bytes, byte-equal |
+| E unsatisfiable | `bytes=1004462878-`, `bytes=-0` | **416**, `Content-Range: bytes */1004462878` |
+| No Range | none | 400 `range_required` |
+| F missing, tampered, foreign-key, expired | | 401 (expired: `authorization_expired`) |
+| G wrong operation | download token on stream; stream token on download; version 1 token on version 2 | 403 |
+| G download endpoint | download token | 501, no bytes |
+| H Fuze | version 2 (Fuze has no version row); unknown id | 404 |
+| H Telegram ids from the client | `message_id=25`, `chat_id=…`, a Telegram-shaped path | 400 / 400 / 404 |
+
+- Every 206 carried `Accept-Ranges: bytes`, an exact `Content-Range` and
+  `Content-Length`, and `Content-Type: video/x-matroska`.
+- **Every denial made 0 MTProto RPCs and served 0 bytes** (gateway logs).
+  Authorization failures also never reached the catalogue (unit-tested with call
+  counters).
+
+## 10. Browser-level proof (headless Chrome 153; no player)
+
+- A page on another origin (allow-listed) made six independent `fetch` range
+  requests to the live gateway. The four 206 responses (beginning, suffix tail,
+  middle 256 KiB, unaligned 1 MiB) had correct headers and were **SHA-256-equal
+  in-browser** (`crypto.subtle`) to the source.
+- `bytes=1004462878-` got 416 with `bytes */1004462878`; no Range got 400.
+- It passed in both local and container mode.
+
+## 11. Latency, throughput, memory
+
+- **Cold starts.**
+  - E1.1 cold script: ~16–18 s for a 64 KiB read.
+  - Gateway startup to ready: 4.2–6.6 s (connect, identity, channel and rights,
+    pool warm-up).
+- **Warm: 10 × 64 KiB spread across the file, sequential, end to end over
+  HTTP.**
+  - Container: median TTFB **579 ms** (545–625).
+  - Local: median **567 ms** (516–631).
+  - That is ~230 ms catalogue plus ~350–450 ms MTProto, against the E1.1
+    established session's 0.3–0.5 s for the MTProto read alone.
+- **Before the resolver fix:** median 1,524 ms (four database round trips).
+- **Throughput:**
+  - 8 MiB response: 4.9 s locally (~1.7 MiB/s); 10.6 s in an earlier run.
+  - Concurrency: 3 × 256 KiB in 1.0–1.3 s.
+- **Connection pool.** mtcute's `main` connection read 1 MiB in ~0.6 s against
+  ~1.3 s on its `download` pool (4 concurrent: 2.16 against 1.16 MiB/s), so
+  `main` is the default.
+- **Container memory under `--memory 256m`:** 70.9 MiB idle; **76.5 MiB** with
+  three paused 8 MiB streams.
+
+## 12. Backpressure, disconnect, reconnect, shutdown (live)
+
+- **Disconnect** after the first chunk of an 8 MiB range:
+  - `client_closed`, **3 of 9** planned reads issued, 1 completed, 0.94 MB
+    served;
+  - no later activity for that request (both modes).
+- **Backpressure.** A client paused for 6 s mid-response: the gateway did not
+  finish or read ahead while paused. On resume it served all 8 MiB,
+  byte-equal (9 of 9 reads).
+- **Per-subject limit:** 3 open streams, and the 4th got 429 `too_many_streams`.
+- **Reconnect, container.** A real network cut (`docker network disconnect`) for
+  ~10.5 minutes:
+  - the drop was seen at once and followed by 131 bounded reconnect attempts;
+  - there was no crash or restart;
+  - after reconnection it was `connected` within ~5 s and `/readyz` was `ready`.
+- **Reconnect, in-process.** A hard socket drop:
+  - readiness 503 (`mtproto_connecting`) immediately;
+  - reconnected in **282 ms**;
+  - the next range was byte-equal.
+- **Graceful shutdown.**
+  - `docker stop` (SIGTERM) logged `shutdown` → `reader_state: stopped` →
+    `stopped`, and the container exited in 5.6 s with the session re-persisted.
+  - In-process, a 4 MiB stream in flight at shutdown completed byte-equal first.
+
+## 13. Tests and gates
+
+- **Gateway unit suites: 138 tests.** They cover:
+  - Range: aligned, unaligned, suffix, open-ended, invalid, 416;
+  - tokens: signature, tamper, expiry, lifetime, operation, version, extra or
+    Telegram claims;
+  - limits; pump (backpressure, disconnect, bounded read-ahead, cancel on error,
+    truncated reply);
+  - HTTP (denial ordering with call counters, 206/416 headers, download split,
+    CORS, readiness, shutdown);
+  - log redaction; safe errors; config; the bundle boundary.
+- **Resolver against the local database: 15 tests.** Published, and ten hidden
+  cases:
+  - draft, archived, not ready, unavailable, archived version;
+  - rights blocked, rights unknown;
+  - inactive VJ, unregistered channel, no size;
+  - also unknown id and Fuze-style media with no version.
+  - It rolls back and leaves no rows.
+- **Mutation testing: 24 of 24 critical mutants killed.**
+  - 6 token, 3 range, 4 server, 5 pump, 1 log, 5 SQL.
+  - The first round let 5 survive: 1 equivalent (its redundant line removed), 1
+    real pump defect (fixed and tested), and 3 weak tests or fixtures
+    (strengthened).
+- **Full suites:**
+  - `npm test`: 486 across 25 files;
+  - `npm run test:db`: 416 pgTAP, PASS;
+  - `npm run test:catalogue`: 45 across 4 files;
+  - `db lint --local`: no schema errors.
+- **Lint:** 0 errors (1 pre-existing warning in a Git-ignored E1.1 spike file).
+- **Typecheck:** root and service.
+- **`next build`:** passes, with 0 gateway strings in `.next`.
+- **Defects found and fixed during the checkpoint:**
+  - Node strip-only TypeScript rejected parameter properties; they were removed,
+    and `erasableSyntaxOnly` now enforces it;
+  - `bytes=<size>-` was misclassified as 400 (now 416);
+  - an abort observed during a write could schedule reads;
+  - the 4-round-trip resolver;
+  - the missing CORS preflight.
+
+## 14. Security and external state
+
+- **Secret scan.** All 33 changed or new files were checked against 25
+  configured secret values and against token, session, database-URL and
+  channel-id shapes: **no secret**. The only matches were public bot usernames
+  already in this record (the test sample was replaced) and the committed
+  `-1000000000000` constant.
+- **Log audit** in both modes: 0 matches for the token secret, API hash, bot
+  tokens, database URL, channel id (both forms), reader id or session; no
+  token-shaped strings; every line JSON.
+- **Session material** lives only in Git-ignored `.velora-ingest/`. The image
+  build context is an allow-list.
+- **Temporary packages removed:** `eval-mtcute`, the GramJS spike's
+  `node_modules`, the intermediate converted-session copy and the scratch
+  teleproto install.
+- **External writes:**
+  - Telegram content writes **0**. MTProto reads only: `getMe`, `getChannels`,
+    `getParticipant`, `getMessages`, `upload.getFile`, all bounded ranges. No
+    upload, send, edit, delete, forward or permission change.
+  - Hosted writes **0**. Reads: catalogue resolution, and one deliberate write
+    probe inside a read-only transaction (refused with 25006, nothing created).
+- **After the checkpoint, hosted is unchanged:**
+  - 11 migrations;
+  - On The Hunt published, version 1 ready/cleared, attempt 1, media 1;
+  - Fuze `received` with no version;
+  - checkpoint **26**;
+  - Series 0, episodes 0;
+  - every `updated_at` predates the checkpoint.
+- **Local infrastructure.** Docker Desktop was started for the gates and was
+  restarted when its engine hung. The Local Bot API container was not used.
+
+## 15. Debt and next
+
+- **Database credential.** A least-privilege database credential or a narrow
+  SECURITY DEFINER resolver (a migration) replaces the owner connection.
+- **Token issuer.** The entitled issuer, short-lived playback sessions, is E2.
+- **Playback.**
+  - Media-element playback was not tested (not MKV decoding).
+  - Safari cannot play Matroska/MP3 (C2B.2I).
+- **Latency options:** a short positive resolution cache (bounded unpublish
+  delay), and co-locating the gateway with the database region.
+- **`FILE_REFERENCE_*` refresh** is implemented but still unprovoked (as in E1.1).
+- **Production host, TLS, the public hostname and ingress rate limiting** are
+  G-phase work.

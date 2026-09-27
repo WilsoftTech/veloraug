@@ -90,6 +90,17 @@ The first Velora UG task is reconciliation, not feature construction.
   - After the operator removed its default rights, the reader holds only the admin-state marker `other`: visibility only, no write or manage ability, which is the minimum for a bot in a channel.
   - Message 23 is still readable, and a 64 KiB read was byte-equal.
   - Record: `docs/PHASE_C_INGESTION_DESIGN.md`, "E1.1".
+- E1.2 media gateway foundation (2026-09-27): **PASS.**
+  - **Client.** mtcute 0.32.3 (exact pin) over teleproto and tdl/TDLib: it is the only maintained client with per-RPC cancellation, and no native build is needed with in-memory storage. GramJS is rejected (archived, no cancel). mtcute's `downloadChunk` is not used: it can cross a 1 MiB window and truncates at EOF (reproduced).
+  - **Gateway.** A long-running, published-only HTTP byte-range gateway: dependency-free core in `lib/media-gateway/`, MTProto/Postgres adapters and Dockerfile in `services/media-gateway/`, and none of it in the Next.js bundle. It keeps one warm MTProto session for the dedicated reader, with identity, channel and `other`-only rights asserted at startup.
+  - **Authorization.** HMAC tokens bound to operation (`stream` ≠ `download`), internal version and lifetime; publication is rechecked on every request with one read-only round trip.
+  - **Limits.** Bounded read-ahead, a global read semaphore, and stream, rate and time limits. Backpressure stops scheduling, and a disconnect stops it and cancels in-flight reads.
+  - **Proof on On The Hunt.** The beginning, middle, final 64 KiB and unaligned ranges were byte-equal with correct 206 headers; 416 carried `bytes */1004462878`; unauthorized, expired, wrong-operation and Fuze requests made 0 MTProto RPCs. Headless Chrome range fetches were byte-equal.
+  - **Warm latency.** Median TTFB ~0.58 s for 64 KiB (E1.1 cold script: 16–18 s).
+  - **Container.** 76.5 MiB with three paused streams under a 256 MiB cap; it recovered from a real network cut; graceful SIGTERM.
+  - **External writes.** Telegram content 0, hosted 0. Checkpoint 26; Series untouched.
+  - **Debt.** The gateway reads through the owner database connection until a least-privilege resolver exists. The entitled token issuer is E2.
+  - Record: `docs/PHASE_C_INGESTION_DESIGN.md`, "E1.2".
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules
