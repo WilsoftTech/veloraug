@@ -3451,12 +3451,14 @@ unpublished; the Movies checkpoint is 26; Series is untouched.
 
 ---
 
-# E1.1 — Dedicated MTProto media-reader range proof: PASS (reader rights to remove)
+# E1.1 — Dedicated MTProto media-reader range proof: CLOSED — LEAST PRIVILEGE VERIFIED
 
-Date: 2026-09-27. **E1.1 DEDICATED MTProto RANGE PROOF: PASS** on all 14 criteria.
-**Open item:** the reader bot currently holds channel write rights. Section 4 of
-the brief requires none, so the operator must remove them ("Reader rights"). No
-production gateway, route, player or dependency was added to the application.
+Date: 2026-09-27. **E1.1 DEDICATED MTProto RANGE PROOF: CLOSED — LEAST
+PRIVILEGE VERIFIED.** The proof passed all 14 criteria. After the operator
+removed the reader's default channel rights, a live read-only re-check found
+the admin-state marker `other` and no write or manage capability ("Reader
+rights"). No production gateway, route, player or dependency was added to the
+application.
 
 ## Isolation (configuration only, before any login)
 
@@ -3503,7 +3505,7 @@ production gateway, route, player or dependency was added to the application.
   - the document lives on DC 4 (the home DC), so there was no `FILE_MIGRATE`.
   - `InputDocumentFileLocation` is built in memory only.
 
-## Reader rights (operator action required)
+## Reader rights (least privilege verified)
 
 - The reader is `ChannelParticipantAdmin` with **`postMessages`,
   `editMessages`, `deleteMessages` and `other`**. These are Telegram's defaults
@@ -3511,9 +3513,46 @@ production gateway, route, player or dependency was added to the application.
 - It holds no invite, change-info, ban, pin or add-admin rights.
 - Read access does not depend on these rights: `getChannels`, `getMessages` and
   `upload.getFile` are reads. So this is not a READER PERMISSION MODEL block.
-- They were **not changed** here. **The operator should switch off every right
-  in the channel's administrator settings for the reader, then re-run the
-  read-only check.**
+- They were **not changed** by the agent.
+
+### Close-out (read-only; the operator removed the rights in Telegram)
+
+- **First re-check.** Telegram still reported post, edit, delete and `other`,
+  both from the live `channels.getParticipant` and from the `channels.getChannels`
+  channel object. The change had not taken effect, so nothing was recorded then.
+- **Second re-check, after the operator saved the change.** Both sources report
+  `ChannelParticipantAdmin`, not creator, with **only `other`**:
+  - no `post_messages`, `edit_messages`, `delete_messages`, `invite_users`,
+    `change_info`, `ban_users`, `pin_messages` or `add_admins`;
+  - no `manage_call`, `manage_topics`, stories, direct-message or rank rights;
+  - not `anonymous`.
+- **What `other` means.** Per the official schema
+  ([chatAdminRights](https://core.telegram.org/constructor/chatAdminRights)),
+  `other` is set "if none of the other flags are set, but you still want the
+  user to be an admin".
+  - By itself it allows only admin-level **visibility**: the admin log, chat and
+    message statistics, the member list, and seeing anonymous admins. It also
+    allows ignoring slow mode, which is irrelevant without posting rights.
+  - It grants **no write or manage capability.** A bot can join a channel only
+    as an administrator, so `other` alone is the least privilege possible.
+- **Still readable.** The channel resolves (broadcast, member, full access hash).
+  Message 23 reads as a `video/x-matroska` document, 1,004,462,878 bytes,
+  caption fingerprint matching, on DC 4.
+- **One bounded read**, `bytes=777777777-777843312`: one `upload.getFile`
+  call, 65,536 bytes, **SHA-256 byte-equal** to the local source.
+  - It took about 16–18 s on both re-checks, against about 0.3–0.5 s for
+    similar reads in the main run. That is probably a fresh connection to the
+    file's DC on a short-lived script. A gateway must keep its connection warm;
+    this was not investigated further.
+- **The ingestion bot is unaffected.**
+  - Local `getMe` gives the exact identity.
+  - Channel `administrator` with can-post (it needs that) and recovery-group
+    `member`.
+  - The Local Bot API still holds only the Movies session, is healthy, and has
+    not restarted.
+- **Writes and state.** Telegram content writes 0, hosted writes 0. On The Hunt
+  published at attempt 1 with media 1, Fuze `received`, media references
+  unchanged, checkpoint 26, Series untouched.
 
 ## Range primitive (`lib/telegram/mtproto-range.ts`, pure, 12 unit tests, 8/8 mutants killed)
 
