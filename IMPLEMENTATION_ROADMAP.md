@@ -66,6 +66,17 @@ The first Velora UG task is reconciliation, not feature construction.
     public.
   - **Pending.** Rights confirmation, then approval and publication. Fuze and Series are
     untouched. No Telegram writes. Record: `docs/PHASE_C_INGESTION_DESIGN.md`, "C2B.2H".
+- C2B.2I first browser media delivery (2026-09-27): **BLOCKED — DELIVERY ARCHITECTURE.**
+  - Local-mode `getFile` needs a complete ~1 GB download before it returns (past the 300 s header limit), and later calls come from the Bot API cache.
+  - The Bot API offers no usable HTTP file path, and the cached bytes sit in its Docker state volume, unreachable by the Next.js application (on Vercel in production).
+  - So no Range delivery is possible in the current architecture. Media: Matroska, H.264 High@4.0 1080p, MP3.
+  - Options (the E1 decision) are recorded. No code changed; Telegram writes 0; hosted writes 0.
+  - A diagnostic exposed the Movies token in an operator transcript, so it was rotated. **MOVIES BOT CREDENTIAL ROTATION: PASS**:
+    - the new session was local only, with the exact id and username;
+    - channel admin/can-post and recovery-group access are verified;
+    - the session survived a restart, and no stale state remained;
+    - hosted and media references are unchanged, Series untouched, and Telegram writes 0.
+  - Record: `docs/PHASE_C_INGESTION_DESIGN.md`, "C2B.2I".
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules

@@ -3199,3 +3199,132 @@ Telegram writes: 0. `REAL_TELEGRAM_UPLOADS_AUTHORIZED` is unset in the shell and
     slug conflict;
   - evaluation: ambiguity, caller score, evidence replacement, non-uploaded
     source.
+
+---
+
+# C2B.2I — First browser media delivery: BLOCKED — DELIVERY ARCHITECTURE
+
+Date: 2026-09-27. **C2B.2I FIRST BROWSER MEDIA DELIVERY: BLOCKED — DELIVERY
+ARCHITECTURE.** It stopped at the audit, before any implementation. Repository code
+was unchanged. Telegram writes: 0. Hosted writes: 0.
+
+## Media (read-only header probe of the source; no ffprobe installed)
+
+| Property | On The Hunt (VJ Ice P) |
+| --- | --- |
+| Container | Matroska (`doctype matroska`, not WebM), muxed by Lavf 57.71 |
+| Video | H.264 High profile, level 4.0, 1920×1080, 24 fps |
+| Audio | MP3 (`A_MPEG/L3`), 2 channels, 44.1 kHz, 1 track, language `und` |
+| Subtitles | None |
+| Duration, bitrate | 1:26:48 (5,208.3 s), about 1.54 Mbps overall |
+| Seek index | Cues present, but at the end of the file (the last ~29 KB), so a browser needs a tail range request before it can seek |
+
+Browser compatibility was not tested, because delivery stopped first. H.264 with
+MP3 in Matroska is plausible in Chromium browsers and unsupported in Safari. It
+must be tested before any format decision.
+
+## Delivery findings
+
+- **`getFile` needs a complete download before it returns.** In `--local` mode, the
+  first `getFile` for the movie made the Bot API download the whole file from
+  Telegram (about 1 GB) into its own state storage. No byte was available before
+  that completed, so Telegram → Bot API is not progressive.
+- **The first retrieval exceeded the 300 s fetch header limit.** The client hit
+  undici's `headersTimeout`, as in C2B.2F. The server finished the download about
+  5 minutes after the request.
+- **Later retrievals came from the Bot API cache.** The second `getFile` returned
+  at once, with the exact size (1,004,462,878 bytes).
+- **No usable HTTP file-serving path.** The Bot API's HTTP file endpoint returned
+  404 in this deployment, for both path forms tried. No Range-capable path exists.
+- **The bytes are out of the application's reach.** The cached file sits inside
+  the Bot API's state storage, a Docker named volume, not on a filesystem the
+  Next.js application can read. In production that application is Vercel-hosted
+  and cannot reach the loopback Bot API at all.
+- **Conclusion.** The current architecture cannot provide production HTTP Range
+  delivery to a Vercel-hosted Next.js application. No streaming endpoint was
+  built: faking one would breach the checkpoint's own rule.
+
+## Options for the next delivery checkpoint (decision needed; the roadmap's E1 spike)
+
+1. **A read-only media gateway next to the Bot API.** It mounts the state volume
+   read-only on loopback, with a Velora-authorized range proxy in front.
+   - Every title needs a full `getFile` cache before its first play.
+   - It works only where the Bot API runs.
+2. **An MTProto-based gateway.** `upload.getFile` supports offset reads, so ranges
+   come from Telegram without a full pre-download. It needs a new dependency and a
+   long-running (non-serverless) host.
+3. **Browser-ready copies made at ingestion** (MP4 or HLS) in object storage. This
+   is a larger product and cost decision.
+
+## Security incident during the probe
+
+A diagnostic line printed the Bot API's absolute path for the cached file. In
+`--local` mode that path contains the Movies bot token. It reached the operator
+session transcript only: not Git, a file, a log or an external service. The value
+is not reproduced here. The operator is rotating the token in @BotFather ("Movies
+bot credential rotation" below).
+
+- **Lesson.** In `--local` mode, `getFile.file_path` is itself a secret. Diagnostics
+  must never print it, or any part of it, in any form: redact the whole path, not
+  just token-equal substrings.
+- **Afterwards.** A later read-only, name-hashed inventory of the state volume found
+  that the token-named per-bot directory, with the cached copy, was already gone.
+  It is recorded in the rotation section.
+
+## Writes
+
+Telegram: `sendDocument` 0, markers 0, forward probes 0, deletes 0. Two `getFile`
+calls were made (reads). Hosted: 0. Repository code: unchanged.
+
+## Movies bot credential rotation (PASS)
+
+Date: 2026-09-27. **MOVIES BOT CREDENTIAL ROTATION: PASS.** No credential values
+or credential-bearing paths are recorded anywhere.
+
+1. **Rotation.** The operator revoked the exposed token and generated a new one in
+   @BotFather, then updated `.env.local` (13:26 local). The agent never saw, read
+   or printed either token. At the operator's instruction the old token was **not
+   used or tested in any form**, including hashing.
+2. **The old token is out of use.** A revoked token cannot authenticate, so the
+   local identity check passing proves the configured token is valid. The state
+   volume holds **exactly one** per-bot directory, and a name-blind check (hashes
+   compared in-process, only a boolean printed) matches it to the configured
+   token.
+3. **Stale state.** No stale state remained. Before any post-rotation call, a
+   name-hashed inventory found **no** per-bot directory at all: the Bot API had
+   already discarded the revoked token's state, including the ~1 GB cached copy
+   from C2B.2I. **No cleanup, stop or deletion was needed or performed.**
+4. **Local login only.** The cloud Bot API was never called, since calling it
+   could log the bot back in there. The first post-rotation request, the
+   adapter's `checkIdentity` (local `getMe`), created the new session on
+   `127.0.0.1:8081`. It returned the exact configured numeric id, `is_bot` and
+   exactly `veloramovies_bot`.
+5. **Access, read-only, through the local server.**
+   - `checkRecoveryAccess`: `ok`. That is `getChat` on the registered Movies
+     channel (not content-protected) and on the recovery group.
+   - `getChatMember`: channel `administrator` with `can_post_messages`, and an
+     ordinary `member` of the recovery group.
+6. **Persistence.**
+   - `docker restart`, then healthy, still loopback-only (`127.0.0.1:8081`), 0
+     crash restarts.
+   - The same session directory (same inode) was reused, and its binlog grew with
+     the later calls.
+   - Every check passed again after the restart.
+7. **Series.** Unchanged: still cloud-only and not listed as local. The adapter
+   refused it with `bot_not_on_local_server` and made no request.
+8. **Hosted (read-only).** Unchanged:
+   - 11 migrations;
+   - the Movies channel registration and checkpoint **26**, last updated before
+     the rotation;
+   - media 1 (On The Hunt, message 23) and media 2 (Fuze, message 25), with
+     identical file-id fingerprints and last updated before the rotation;
+   - On The Hunt `published`, Fuze `received`, both attempt 1;
+   - Series 0.
+
+   Stored `file_id`s were not exercised: that would need `getFile`, which is
+   outside this checkpoint.
+9. **Writes.**
+   - Telegram: 0 (no upload, marker, forward, delete, recovery or publication).
+   - Reads: `getMe`, `getChat`, `getChatMember`.
+   - Hosted: 0.
+   - `REAL_TELEGRAM_UPLOADS_AUTHORIZED`: unset.
