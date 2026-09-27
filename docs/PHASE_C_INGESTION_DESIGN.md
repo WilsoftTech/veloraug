@@ -2857,3 +2857,193 @@ decision.
   - reconciliation stays the path for any `uncertain` result;
   - the crash drill, the near-ceiling test, bulk ingestion and the Series
     migration each still need authorization.
+
+---
+
+# C2B.2H — Uploaded movie → catalogue: publication foundation
+
+Date: 2026-09-27. **HOSTED PUBLICATION FOUNDATION: PASS — AWAITING RIGHTS
+CONFIRMATION.** Migration 11 is `20260927090650_ingestion_movie_publication.sql`,
+deployed. On The Hunt's match is recorded and pending. Approval, the rights
+attestation and publication are **not authorized yet** and were not done.
+Telegram writes: 0.
+
+## Why On The Hunt is not visible (hosted, read-only audit)
+
+- Event 1: `origin = uploader`, `upload_state = uploaded`, attempt count 1,
+  floor 22, media 1 (message 23, `On The Hunt.VJ ICE P.2026.mkv`, 1,004,462,878
+  bytes, one row for its `file_unique_id`). **`status = received`, `parsed` null.**
+- Candidates 0, movies 0, versions 0, genres 0. VJ 1 `vj-ice-p` is active.
+- Fuze (event 2, media 2, message 25) is in the same state. Series is unregistered.
+
+The missing lifecycle states are evaluation, approval and publication. None of
+them had a database write path: the worker commands stop at `uploaded` (by
+design, C2A threat model). So the public policies correctly return nothing.
+
+## Match (re-run through the existing matcher, read-only TMDB search)
+
+`On The Hunt` (2026), movie (confirmed), VJ `ICE P` resolved to 1. TMDB
+**1428857** "On the Hunt" (2026): `exact_title_year`, score 1, high
+confidence, unique. The other exact title, 440478 (2017), is a year conflict,
+and 18 more results do not match the title.
+
+## Design: two privilege tiers
+
+| Command | Who | Writes |
+| --- | --- | --- |
+| `public.ingest_record_evaluation(fp, bot, parsed, candidates)` | `service_role` (worker), SECURITY DEFINER | `parsed` with `review_reasons`, **pending** candidates, and `status` = `matched` or `needs_review` |
+| `private.catalogue_approve_movie_match(fp, tmdb_id)` | owner only, SECURITY INVOKER, no grant | the candidate becomes `approved`, the others `superseded` |
+| `private.catalogue_publish_movie(fp, metadata, rights_cleared)` | owner only, SECURITY INVOKER, no grant | the movie (reused by `tmdb_id`), genres, a version that is `ready` + `cleared` and linked to the uploaded media, the movie `published`, the event `published` |
+
+- **The C2A threat model is kept.** The worker key can record evidence but can never approve or
+  publish: no API role, including `service_role`, holds EXECUTE on the owner
+  commands, and they live in `private`, which the Data API does not expose. The evaluation
+  command references no `public.` table, no `'approved'` and no publication
+  column, and the existing structural tests (005/006) cover it.
+- **The decision is re-derived in the database.** Every candidate's score must
+  equal the tier of its own reasons (the caller cannot inflate confidence).
+  `matched` requires a declared kind, a resolved VJ and exactly one score-1
+  candidate. Approval re-checks the stored evidence (unique score 1, named id)
+  and that the VJ is active.
+- **Publication** is one transaction, as the C1 boundary requires. Slug:
+  `slug(title)-year`. A slug collision, an archived title, or an existing
+  version for the same title and VJ with other media (`same_title_same_vj`)
+  is refused, never merged. Artwork must be a TMDB path. Rights need the
+  operator's explicit attestation.
+- **Idempotency.** An identical evaluation returns `already_recorded`, and
+  different evidence is refused (`ingest_evaluation_conflict`). Approval
+  returns `already_approved` and publication `already_published`, with no row
+  changes.
+- **Public read is unchanged.** No grant, policy or predicate was touched.
+
+## Operator path (CLI + owner)
+
+1. `npm run ingest -- evaluate --fingerprint <sf1> --kind movie --vjs <vjs.json> [--execute]`
+   reads the server's own record of the upload (Telegram file name and caption
+   token; no local file or journal), then parses, resolves the VJ, runs the
+   matcher and records the result through the worker RPC.
+2. `npm run ingest -- publication-sql --fingerprint <sf1> --tmdb-id <n> --out <file.sql> [--rights-cleared]`
+   fetches the TMDB snapshot of the approved id and writes the owner script
+   (approve, publish and a readback in one transaction). It never overwrites a
+   file and touches no database. The snapshot is embedded as a random-tag
+   dollar-quoted literal; TMDB text in the header comment is JSON-escaped.
+3. The operator reviews the script, then runs it as `postgres` through `psql`
+   over the pooler (the channel-registration boundary).
+
+## UI
+
+`MovieCard` (the one card) now shows a top-left VJ badge derived from
+`TitleSummary.vjs`: the first VJ and `+N` for the rest, with the full list for
+screen readers. It comes after the title in reading order and uses the
+`DESIGN.md` pill tokens. Per-VJ `badge_variant` colours are still unused (D5,
+Phase D). No other component changed. Caching is unchanged: `/` and `/vjs`
+revalidate every 300 s, and `/movies`, details and search are dynamic.
+
+## Local verification
+
+- `db reset` applies all 11 migrations, and `db lint`: no errors. The linter caught a
+  `text[] || 'literal'` bug before any test.
+- `npm run test:db`: **416/416** across 7 files. The new
+  `007_ingestion_movie_publication` has 77 assertions: privileges, every
+  refusal, materialize-once, replay counts, the anon read surface, and an
+  approved-but-unpublished movie staying hidden. 003/005/006 were updated
+  deliberately for the sixth worker command.
+- Mutation checks: **11 of 11 killed**:
+  - approval: unique match, active VJ;
+  - publication: rights, version conflict, approved candidate, artwork path;
+  - evaluation: two exact matches, caller score, replacing evidence,
+    non-uploaded source.
+  Two initially survived, and both were fixed:
+  - M1: a test was added that corrupts the stored evidence as the owner;
+  - M6: the mutant itself was wrong.
+- `npm test` 336/336 (including `MovieCard` markup, the evaluation payload,
+  the snapshot and the script), `npm run test:catalogue` 30/30, lint and
+  typecheck pass.
+- **Rehearsal on the local stack** with the real file name, fingerprint and
+  TMDB data (fake channel id):
+  - evaluation `matched`, and its replay `already_recorded`;
+  - the owner script gave `approved` and `published` as `on-the-hunt-2026`, with
+    20 candidates, 1 approved, the version ready/cleared/linked and attempts 1;
+  - the second run: `already_approved` / `already_published`;
+  - anonymous PostgREST: title, poster, date, VJ and genres are readable;
+    `telegram_media_id`, `availability_status` and `publication_status` are
+    refused.
+- **Production build against the local catalogue**: `/`, `/movies`, the
+  detail page, `/search?q=On The Hunt` and `/vjs/vj-ice-p` all render the
+  movie with its badge. No Telegram, fingerprint or channel text appears in the
+  HTML.
+- Screenshots at 520 px and 1280 px show no overflow. Headless Edge cannot lay
+  out narrower than about 500 px, so 360–430 px is not verified here.
+
+## Known limits
+
+- A replayed `evaluate` searches TMDB again. If TMDB's results changed, the
+  replay is refused as `ingest_evaluation_conflict`; nothing is overwritten.
+- Evaluation and publication are movie-only. Series needs its own checkpoint.
+
+## Hosted: migration 11 deployment (PASS)
+
+- Starting HEAD `ee459f1`, equal to `veloraug/phase-a-foundation`. The code was committed first
+  (`ba06039`, `e463dc2`, `dfb12d9`), and the migration SHA-256 `52d506c8…a305` equals the
+  committed blob.
+- The gate was a re-read of the whole migration: four `CREATE FUNCTION` statements, then `REVOKE`/`GRANT`
+  only. There is no `DROP`, `ALTER`, table, policy or default-privilege change. Hosted had
+  exactly the 10 expected migrations.
+- Supabase CLI 2.117.0 `db push --db-url` over the **session** pooler (5432). The URL came from the local
+  environment and was never printed. The dry run proposed only
+  `20260927090650_ingestion_movie_publication.sql`, with no seeds and no roles. The push applied it and
+  exited 0. `.env.local`'s `DATABASE_URL` points at the transaction pooler (6543); the
+  port was overridden for this command only, and the file is unchanged.
+
+### Verification (read-only)
+
+| Check | Result |
+| --- | --- |
+| History | 11 migrations, last `20260927090650` |
+| Bodies | MD5 of all 9 `ingest_*`/`catalogue_*` functions identical to the clean local chain |
+| Worker commands (6) | Owner `postgres`, SECURITY DEFINER, `search_path=""`, ACL `postgres=X/postgres,service_role=X/postgres` |
+| Owner commands (approve, publish, slug) | Owner `postgres`, SECURITY INVOKER, `search_path=""`, ACL `postgres=X/postgres`. EXECUTE false for `anon`, `authenticated` and `service_role` |
+| Service-role probe (the uploader's key, PostgREST) | `rpc/catalogue_approve_movie_match` 404 via `public`; approve and publish 406 via `private` (not exposed). Nothing changed |
+| Private tables | RLS on, 0 policies, no table or column grant for `anon`, `authenticated`, `service_role` or `PUBLIC`; no `USAGE` on `private` |
+| Public columns | Unchanged. `telegram_media_id`, `telegram_media_bot_type`, availability, rights, publication and metadata status are not selectable by client roles |
+| Default privileges | None on `private` or `catalogue_access` |
+| Anonymous PostgREST | `movies` `[]`, `movie_versions` `[]`; private columns 401; worker RPCs 404; `private` and `catalogue_access` 406 |
+| Advisors | **No delta.** Security: the same 5 INFO `rls_enabled_no_policy` and the same accepted WARNs (`record_search`, `trending_searches` for `anon`/`authenticated`). Performance: the same 2 unindexed-FK and 11 unused-index INFOs |
+
+## Hosted: On The Hunt evaluation (PASS)
+
+- The command was `evaluate --fingerprint sf1-a9a1…b982 --kind movie --vjs … --execute`. It was keyed to the
+  existing recovered ingestion (event 1) and read from the server's own
+  Telegram record (`On The Hunt.VJ ICE P.2026.mkv`). No new event was created.
+- **Result: `matched`.** The server re-derived it: kind confirmed, VJ resolved to 1
+  (`vj-ice-p`, active), and exactly one score-1 candidate, **TMDB 1428857** "On the
+  Hunt" (2026), with `review_reasons: []`.
+- Candidates: 20 rows (every same-kind TMDB result), all `pending`, 0 decided.
+  Exactly one has score 1. The only other exact title, 440478 (2017), scores 0.3 as
+  a year conflict.
+- **Idempotency.** A second `evaluate --execute` returned `already_recorded`; the
+  counts were unchanged.
+- **State now.**
+  - Event 1: `status = matched`, `upload_state = uploaded`, attempt count **1**, media 1
+    (message 23).
+  - Totals: events 2, media 2, approved candidates **0**, movies **0**, versions **0**,
+    genres 0, series 0.
+  - Movies checkpoint **26**. Series is unregistered.
+  - Fuze (event 2): unchanged, `received`, 0 candidates.
+  - The anonymous catalogue does not show On The Hunt.
+
+## Rights gate (stopped here)
+
+- Owner script generated **without** `--rights-cleared`:
+  `.velora-ingest/c2b2h-on-the-hunt-publish-RIGHTS-NOT-ASSERTED.sql` (Git-ignored,
+  SHA-256 `8D5D209A…C351C`). It passes `false`. If it were run, the publish step would raise
+  `catalogue_rights_not_cleared`, and `ON_ERROR_STOP` would roll back the approval in the
+  same transaction. **It was not run.**
+- After explicit rights confirmation, the next step is:
+  1. `publication-sql --rights-cleared` to a new file;
+  2. review it;
+  3. run it once as `postgres` over the pooler;
+  4. readback, anonymous checks and the rendered production pages.
+
+Telegram writes: 0. `REAL_TELEGRAM_UPLOADS_AUTHORIZED` is unset in the shell and absent from
+`.env.local`.

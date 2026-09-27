@@ -43,6 +43,21 @@ The first Velora UG task is reconciliation, not feature construction.
 - C2B.2D retry (2026-09-27): **BLOCKED — UNCERTAIN.** Preflight passed, and one attempt ran with the runtime gate set for that one command only (removed in `finally`). The client got `uncertain` / `network_error` after exactly 300 s. Cause: Node's `fetch` (undici) default `headersTimeout` of 300 s cuts off the local Bot API's reply, which comes only after Telegram accepts the whole file; the adapter's 4 h signal does not override it. The server kept uploading, and its output levelled off at about the file size (1.01 GB), so the message is probably in the channel, though this is unconfirmed. Hosted: one row `uncertain`, attempt 1, floor 22; media 0; checkpoint 22. The journal is `uploading`. The server refuses any new start. Not retried. Next: fix the transport timeout, then an authorized reconciliation. Record: `docs/PHASE_C_INGESTION_DESIGN.md`, "C2B.2D … retry".
 - C2B.2E uncertain upload recovery (2026-09-27): **PASS.** The existing bounded marker protocol resolved the C2B.2D attempt without re-sending. It posted marker 24 to the Movies channel, forward-probed the interval (22, 24) = {23}, and matched the exact `velora-src` token and size. It then recorded the message through `ingest_upload_record`. Result: the same row is `uploaded` with attempt count 1 and floor 22; one media row is linked, message 23 (document, 1,004,462,878 bytes). The protocol advanced the checkpoint to 24. No candidates; nothing approved or published. A rescan skips the movie as `already_uploaded`, and with a lost journal the server's record returns `adopt_server` before any send. Recovery made 1 marker, 1 forward and 1 best-effort delete, and 0 `sendDocument`. Series untouched; real uploads disabled again. Next: fix the 300 s transport timeout. Record: `docs/PHASE_C_INGESTION_DESIGN.md`, "C2B.2E".
 - C2B.2F long-running Bot API transport (2026-09-27): **PASS.** The C2B.2D cause was reproduced on loopback: built-in `fetch` failed at 306 s with `UND_ERR_HEADERS_TIMEOUT` (undici's 300 s `headersTimeout`) despite the adapter's 4 h `AbortSignal`, because the local Bot API sends no headers until Telegram has the whole file. `sendDocument` now uses `longRunningFetch` (`node:http`/`node:https`, no own header or body timeout, a fresh connection per call, no global change, no dependency). This goes through a required `mediaFetch` transport; every other Bot API call keeps `fetch` and its 60 s limit. The 4 h upload limit is now real and finite. A timeout stays `uncertain`, a refused connection stays `unreachable`, and recovery is unchanged. Proven through the real adapter against a loopback server that held headers for 330 s: it succeeded at 330.1 s. 8 of 8 mutations were caught. `upload_failure_code` is the last recorded failure (historical), so no cleanup is needed. No Telegram or hosted writes. Record: `docs/PHASE_C_INGESTION_DESIGN.md`, "C2B.2F".
+- C2B.2H publication foundation (2026-09-27): **PASS — AWAITING RIGHTS CONFIRMATION.**
+  - **Migration 11**, `20260927090650_ingestion_movie_publication.sql`, is deployed; hosted now has 11
+    migrations and no new advisor findings.
+  - **Evaluation (worker, service_role).** The new command `ingest_record_evaluation` records parsed
+    evidence and **pending** TMDB candidates, and re-derives the match decision itself.
+  - **Approval and publication (owner only).** They are private SECURITY INVOKER functions
+    that no API role can execute, and they run only through `psql` as `postgres`. So the
+    uploader's key cannot approve or publish.
+  - **CLI.** `npm run ingest -- evaluate` and `publication-sql`.
+  - **UI.** `MovieCard` shows a VJ badge.
+  - **On The Hunt** is evaluated `matched` to TMDB 1428857, with 20 pending candidates, and a replay
+    returns `already_recorded`. Attempt 1, one media row; 0 movies and 0 versions; nothing is
+    public.
+  - **Pending.** Rights confirmation, then approval and publication. Fuze and Series are
+    untouched. No Telegram writes. Record: `docs/PHASE_C_INGESTION_DESIGN.md`, "C2B.2H".
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules
