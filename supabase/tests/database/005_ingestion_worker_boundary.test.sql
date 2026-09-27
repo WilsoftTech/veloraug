@@ -109,12 +109,13 @@ insert into worker_functions values
   ('public.ingest_upload_start(text, text, bigint, bigint)'),
   ('public.ingest_upload_record(text, text, bigint, bigint, text, text, text, text, text, text, bigint, integer, integer, integer, timestamptz)'),
   ('public.ingest_upload_fail(text, text, text, text)'),
-  ('public.ingest_channel_checkpoint(text, bigint, bigint)');
+  ('public.ingest_channel_checkpoint(text, bigint, bigint)'),
+  ('public.ingest_record_evaluation(text, text, jsonb, jsonb)');
 
 select is((select array_agg(p.proname::text order by p.proname) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
            where n.nspname = 'public' and p.proname like 'ingest\_%'),
-  array['ingest_channel_checkpoint', 'ingest_upload_fail', 'ingest_upload_record', 'ingest_upload_start', 'ingest_upload_status'],
-  'exactly five worker commands (migration 10 adds the checkpoint) (no CRUD, no evaluation or publication command)');
+  array['ingest_channel_checkpoint', 'ingest_record_evaluation', 'ingest_upload_fail', 'ingest_upload_record', 'ingest_upload_start', 'ingest_upload_status'],
+  'exactly six worker commands (migration 10 adds the checkpoint, migration 11 the evaluation) (no CRUD, no approval or publication command)');
 select is((select array_agg(format('%s %s', r, f)) from worker_functions, unnest(array['anon', 'authenticated']) r
            where has_function_privilege(r, f, 'EXECUTE')),
   null, 'anon/authenticated cannot execute any worker command');

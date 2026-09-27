@@ -215,7 +215,7 @@ select is(tests.other_session('select pg_try_advisory_xact_lock_shared(1001, 3):
   'concurrency: an unrelated lock key is free (the waits above are real contention, not a broken session)');
 
 -- ---------------------------------------------------------------------------
--- Privileges: the five worker commands, trigger functions, private tables
+-- Privileges: the six worker commands (migration 11 adds the evaluation), trigger functions, private tables
 -- ---------------------------------------------------------------------------
 create temp table worker_functions (f regprocedure);
 insert into worker_functions values
@@ -223,16 +223,17 @@ insert into worker_functions values
   ('public.ingest_upload_start(text, text, bigint, bigint)'),
   ('public.ingest_upload_record(text, text, bigint, bigint, text, text, text, text, text, text, bigint, integer, integer, integer, timestamptz)'),
   ('public.ingest_upload_fail(text, text, text, text)'),
-  ('public.ingest_channel_checkpoint(text, bigint, bigint)');
+  ('public.ingest_channel_checkpoint(text, bigint, bigint)'),
+  ('public.ingest_record_evaluation(text, text, jsonb, jsonb)');
 
 select is((select array_agg(distinct array_to_string(p.proacl, ',')) from worker_functions w join pg_proc p on p.oid = w.f),
-  array['postgres=X/postgres,service_role=X/postgres'], 'ACL: exactly owner and service_role on all five worker commands');
+  array['postgres=X/postgres,service_role=X/postgres'], 'ACL: exactly owner and service_role on all six worker commands');
 select is((select array_agg(format('%s %s', r, f)) from worker_functions, unnest(array['anon', 'authenticated']) r
            where has_function_privilege(r, f, 'EXECUTE')),
   null, 'ACL: anon and authenticated cannot execute any of them');
 select is((select array_agg(f::text) from worker_functions w join pg_proc p on p.oid = w.f
            where not p.prosecdef or not coalesce(p.proconfig @> array['search_path=""'], false) or pg_get_userbyid(p.proowner) <> 'postgres'),
-  null, 'definer: all five are SECURITY DEFINER, owned by postgres, search_path empty');
+  null, 'definer: all six are SECURITY DEFINER, owned by postgres, search_path empty');
 select is((select array_agg(f::text) from worker_functions w join pg_proc p on p.oid = w.f where p.prosrc ~* '\mexecute\M|format\s*\('),
   null, 'definer: no dynamic SQL');
 select is((select array_agg(p.oid::regprocedure::text) from pg_proc p
