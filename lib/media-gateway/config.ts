@@ -5,6 +5,7 @@
  * NEXT_PUBLIC_), and the Next.js application reads none of them.
  */
 import { limitsFromEnv, type GatewayLimits } from "@/lib/media-gateway/limits";
+import { GATEWAY_DATABASE_ROLE } from "@/lib/media-gateway/resolver-sql";
 import { MIN_SECRET_BYTES } from "@/lib/media-gateway/token";
 
 export interface GatewayConfig {
@@ -61,6 +62,7 @@ export function gatewayConfigFromEnv(env: Env): GatewayConfig {
   if (secret.length < MIN_SECRET_BYTES && !bad.includes("MEDIA_GATEWAY_TOKEN_SECRET")) bad.push("MEDIA_GATEWAY_TOKEN_SECRET");
 
   const databaseUrl = required("MEDIA_GATEWAY_DATABASE_URL", /^postgres(ql)?:\/\/\S+$/);
+  if (databaseUrl && !isRestrictedDatabaseUrl(databaseUrl)) bad.push("MEDIA_GATEWAY_DATABASE_URL");
   const sessionFile = required("MEDIA_GATEWAY_SESSION_FILE", /^\S.{0,1023}$/);
   const allowBotLogin = env.MEDIA_GATEWAY_ALLOW_BOT_LOGIN === "true";
   const origins = (env.MEDIA_GATEWAY_ALLOWED_ORIGINS ?? "").split(",").map((o) => o.trim()).filter(Boolean);
@@ -96,4 +98,23 @@ export function gatewayConfigFromEnv(env: Env): GatewayConfig {
     limits,
     telegram: { apiId, apiHash, readerBotId, readerUsername, readerBotToken, moviesChannelId, ingestionBotIds },
   };
+}
+
+/**
+ * The gateway's database credential must be the dedicated least-privilege role
+ * (plain, or `role.<project-ref>` as the Supabase pooler expects) with a
+ * password. Owner, service and any other identity is refused: there is no
+ * fallback. Readiness re-verifies the identity against the live session.
+ */
+export function isRestrictedDatabaseUrl(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  const user = decodeURIComponent(url.username);
+  const [name, projectRef, ...rest] = user.split(".");
+  const role = name === GATEWAY_DATABASE_ROLE && rest.length === 0 && (projectRef === undefined || /^[a-z0-9]{10,40}$/.test(projectRef));
+  return (url.protocol === "postgres:" || url.protocol === "postgresql:") && role && url.password.length > 0;
 }

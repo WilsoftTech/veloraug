@@ -1,30 +1,52 @@
 /**
- * Catalogue resolver over Postgres (E1.2). Runs the one fixed statement from
- * lib/media-gateway/resolver-sql.ts in a READ ONLY transaction with a short
- * statement timeout, sent as one simple-protocol batch: one network round trip
- * instead of four (measured on the hosted pooler: ~225 ms against ~1.15 s).
- * Startup parameters cannot carry the read-only default through the Supabase
- * pooler (it drops them; measured), so the batch sets it explicitly. The only
- * interpolated value is the version id, which must be a positive safe integer.
- * The gateway never writes to the catalogue.
+ * Catalogue resolver over Postgres (E1.2A). The gateway connects as the
+ * dedicated role `velora_media_gateway`, which can execute
+ * media_gateway.resolve_movie_version and nothing else. PostgreSQL privileges,
+ * not this module, are the boundary; this module only refuses to run as anyone
+ * else.
  *
- * Credential: MEDIA_GATEWAY_DATABASE_URL. For E1.2 it is the owner connection
- * the ingestion tooling already uses, because private.telegram_media has no
- * grant for any API role (hosted is unchanged in this checkpoint). A dedicated
- * least-privilege role or a narrow SECURITY DEFINER function is follow-up work.
+ * Each resolve is one simple-protocol batch: SET TRANSACTION READ ONLY, a short
+ * statement timeout, and the fixed call from lib/media-gateway/resolver-sql.ts.
+ * PostgreSQL runs such a batch as one implicit transaction, so it costs one
+ * network round trip (~225 ms on the hosted pooler, against ~1.15 s for four).
+ * The only interpolated value is the version id, which must be a positive safe
+ * integer.
+ *
+ * Readiness (`check`) re-verifies the identity: the session user must be exactly
+ * the gateway role, with no elevated attribute and no membership in postgres or
+ * service_role, and the transaction must be read-only. An owner or service
+ * credential therefore never becomes ready: there is no fallback.
  */
 import postgres from "postgres";
 import { GatewayError } from "@/lib/media-gateway/errors";
 import type { CatalogueMediaResolver, MediaLocator } from "@/lib/media-gateway/ports";
-import { RESOLVE_MOVIE_VERSION_SQL, locatorFromRow, type ResolverRow } from "@/lib/media-gateway/resolver-sql";
+import { GATEWAY_DATABASE_ROLE, RESOLVE_MOVIE_VERSION_SQL, locatorFromRow, type ResolverRow } from "@/lib/media-gateway/resolver-sql";
+
+export type CatalogueState = "reachable" | "unreachable" | "wrong_identity";
 
 export interface PgResolver extends CatalogueMediaResolver {
   /** Opens the pool's connections ahead of traffic (a pooler connect costs seconds). */
   warm(): Promise<void>;
-  /** Readiness probe: true only if the catalogue answers inside a read-only transaction. */
-  ping(): Promise<boolean>;
+  /** Readiness probe: `reachable` only for the restricted gateway identity inside a read-only transaction. */
+  check(): Promise<CatalogueState>;
   close(): Promise<void>;
 }
+
+interface IdentityRow {
+  role: string;
+  read_only: string;
+  elevated: boolean;
+  owner_member: boolean;
+}
+
+const IDENTITY_SQL = `
+select current_user::text as role,
+       pg_catalog.current_setting('transaction_read_only') as read_only,
+       (r.rolsuper or r.rolbypassrls or r.rolcreaterole or r.rolcreatedb or r.rolreplication) as elevated,
+       (pg_catalog.pg_has_role(current_user, 'postgres', 'MEMBER')
+         or pg_catalog.pg_has_role(current_user, 'service_role', 'MEMBER')) as owner_member
+  from pg_catalog.pg_roles r
+ where r.rolname = current_user`;
 
 export function createPgResolver(databaseUrl: string, options: { statementTimeoutMs?: number; maxConnections?: number } = {}): PgResolver {
   const timeout = Math.max(100, Math.min(options.statementTimeoutMs ?? 3000, 10_000));
@@ -54,7 +76,7 @@ export function createPgResolver(databaseUrl: string, options: { statementTimeou
     return selected[0];
   }
 
-  return {
+  const resolver: PgResolver = {
     async resolveMovieVersion(movieVersionId: number, signal: AbortSignal): Promise<MediaLocator | null> {
       // The id is interpolated into the batch, so it must be exactly a positive safe integer.
       if (!Number.isSafeInteger(movieVersionId) || movieVersionId <= 0) return null;
@@ -62,24 +84,27 @@ export function createPgResolver(databaseUrl: string, options: { statementTimeou
       try {
         const rows = await readOnly<ResolverRow>(RESOLVE_MOVIE_VERSION_SQL.replace("$1", String(movieVersionId)));
         if (rows.length > 1) throw new GatewayError("internal_error"); // telegram_media_id is unique; more than one row is a schema breach
-        return locatorFromRow(rows[0]);
+        return locatorFromRow(movieVersionId, rows[0]);
       } catch (error) {
         if (error instanceof GatewayError) throw error;
         // Driver errors can carry connection details; only the classification leaves this module.
         throw new GatewayError("catalogue_unavailable");
       }
     },
-    async ping() {
+    async check() {
+      let row: IdentityRow | undefined;
       try {
-        const [row] = await readOnly<{ read_only: string }>("select current_setting('transaction_read_only') as read_only");
-        return row?.read_only === "on";
+        [row] = await readOnly<IdentityRow>(IDENTITY_SQL);
       } catch {
-        return false; // readiness reports "catalogue unreachable"; the detail stays out of logs
+        return "unreachable"; // the driver error can carry connection details; only the state is reported
       }
+      const restricted = row?.role === GATEWAY_DATABASE_ROLE && row.read_only === "on" && row.elevated === false && row.owner_member === false;
+      return restricted ? "reachable" : "wrong_identity";
     },
     async warm() {
-      await Promise.all(Array.from({ length: maxConnections }, () => this.ping()));
+      await Promise.all(Array.from({ length: maxConnections }, () => resolver.check()));
     },
     close: () => sql.end({ timeout: 5 }),
   };
+  return resolver;
 }

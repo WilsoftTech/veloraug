@@ -13,7 +13,7 @@ export const PUBLISHED_VERSION = 1;
 export const FILE_SIZE = 1_004_462_878;
 
 export const publishedLocator: MediaLocator = {
-  mediaId: 1,
+  movieVersionId: 1,
   chatId: "-1009999999999",
   messageId: 23,
   fileUniqueId: "AgADtestunique1",

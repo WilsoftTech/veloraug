@@ -47,7 +47,7 @@ export interface MtcuteReaderConfig {
   forbiddenBotIds: string[];
   /** The Movies channel in Bot API form (-100…). */
   moviesChannelId: string;
-  /** How long a resolved document (and its file reference) is reused. */
+  /** How long a resolved document (and its file reference) is reused, per movie version. */
   documentCacheTtlMs?: number;
   /** Interval of the periodic channel-access re-check. */
   accessRecheckMs?: number;
@@ -243,16 +243,16 @@ export function createMtcuteReader(config: MtcuteReaderConfig): MediaReader & { 
   }
 
   async function documentFor(locator: MediaLocator, signal: AbortSignal, refresh: boolean): Promise<{ doc: CachedDocument; rpcs: number }> {
-    const cached = documents.get(locator.mediaId);
+    const cached = documents.get(locator.movieVersionId);
     if (!refresh && cached && Date.now() - cached.fetchedAt < cacheTtl) return { doc: cached, rpcs: 0 };
-    let pending = resolving.get(locator.mediaId);
+    let pending = resolving.get(locator.movieVersionId);
     if (!pending) {
       // Concurrent readers share one resolution; it is not tied to any single request's signal.
-      pending = resolveDocument(locator, new AbortController().signal).finally(() => resolving.delete(locator.mediaId));
-      resolving.set(locator.mediaId, pending);
+      pending = resolveDocument(locator, new AbortController().signal).finally(() => resolving.delete(locator.movieVersionId));
+      resolving.set(locator.movieVersionId, pending);
     }
     const doc = await abortable(pending, signal);
-    documents.set(locator.mediaId, doc);
+    documents.set(locator.movieVersionId, doc);
     return { doc, rpcs: 1 };
   }
 

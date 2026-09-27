@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { GatewayConfigError, gatewayConfigFromEnv } from "@/lib/media-gateway/config";
+import { GatewayConfigError, gatewayConfigFromEnv, isRestrictedDatabaseUrl } from "@/lib/media-gateway/config";
 
 const SECRET = Buffer.alloc(32, 5).toString("base64url");
 const valid = {
   MEDIA_GATEWAY_TOKEN_SECRET: SECRET,
-  MEDIA_GATEWAY_DATABASE_URL: "postgresql://user:pw@localhost:5432/postgres",
+  MEDIA_GATEWAY_DATABASE_URL: "postgresql://velora_media_gateway.abcdefghij0123456789:pw@pooler.example:5432/postgres",
   MEDIA_GATEWAY_SESSION_FILE: "/run/velora-media/reader.session",
   TELEGRAM_API_ID: "123456",
   TELEGRAM_API_HASH: "0123456789abcdef0123456789abcdef",
@@ -45,6 +45,26 @@ describe("gatewayConfigFromEnv", () => {
     expect(message).not.toContain("secret-looking");
   });
 
+  it("accepts only the restricted gateway database identity (no owner fallback)", () => {
+    expect(isRestrictedDatabaseUrl("postgresql://velora_media_gateway:pw@127.0.0.1:54322/postgres")).toBe(true);
+    expect(isRestrictedDatabaseUrl("postgres://velora_media_gateway.abcdefghij0123456789:pw@pooler.example:6543/postgres")).toBe(true);
+    for (const url of [
+      "postgresql://postgres:pw@127.0.0.1:54322/postgres",
+      "postgresql://postgres.abcdefghij0123456789:pw@pooler.example:6543/postgres",
+      "postgresql://service_role:pw@db.example:5432/postgres",
+      "postgresql://supabase_admin:pw@db.example:5432/postgres",
+      "postgresql://velora_media_gateway_admin:pw@db.example:5432/postgres",
+      "postgresql://velora_media_gateway.ref.extra:pw@db.example:5432/postgres",
+      "postgresql://velora_media_gateway@db.example:5432/postgres",
+      "mysql://velora_media_gateway:pw@db.example/x",
+      "not a url",
+    ]) {
+      expect(isRestrictedDatabaseUrl(url), url).toBe(false);
+    }
+    expect(failures({ ...valid, MEDIA_GATEWAY_DATABASE_URL: "postgresql://postgres.abcdefghij0123456789:pw@pooler.example:6543/postgres" })).toEqual(["MEDIA_GATEWAY_DATABASE_URL"]);
+    expect(failures({ ...valid, MEDIA_GATEWAY_DATABASE_URL: undefined })).toEqual(["MEDIA_GATEWAY_DATABASE_URL"]);
+  });
+
   it("refuses a short token secret", () => {
     expect(failures({ ...valid, MEDIA_GATEWAY_TOKEN_SECRET: Buffer.alloc(16).toString("base64url") })).toContain("MEDIA_GATEWAY_TOKEN_SECRET");
   });
@@ -69,6 +89,7 @@ describe("gatewayConfigFromEnv", () => {
     ["MEDIA_GATEWAY_PORT", "70000"],
     ["MEDIA_GATEWAY_ALLOWED_ORIGINS", "javascript:alert(1)"],
     ["MEDIA_GATEWAY_DATABASE_URL", "mysql://x"],
+    ["MEDIA_GATEWAY_DATABASE_URL", "postgresql://postgres:pw@localhost:5432/postgres"],
     ["MEDIA_GATEWAY_MAX_READS_IN_FLIGHT", "1000"],
   ])("fails closed on bad %s", (name, value) => {
     expect(failures({ ...valid, [name]: value }).length).toBeGreaterThan(0);

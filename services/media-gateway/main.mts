@@ -16,7 +16,7 @@ import { createLogger } from "@/lib/media-gateway/log";
 import type { MediaReader } from "@/lib/media-gateway/ports";
 import { createMediaGateway } from "@/lib/media-gateway/server";
 import { createMtcuteReader } from "./mtcute-reader.mts";
-import { createPgResolver } from "./pg-resolver.mts";
+import { createPgResolver, type CatalogueState } from "./pg-resolver.mts";
 
 const logger = createLogger();
 
@@ -44,17 +44,19 @@ const reader = createMtcuteReader({
 });
 
 // Readiness also requires the catalogue: without it no request can be authorized for bytes.
-let catalogueReachable = false;
+// It also requires the restricted database identity: an owner or service credential reports
+// `wrong_identity` and the gateway never becomes ready (no fallback).
+let catalogueState: CatalogueState = "unreachable";
 const probeCatalogue = async () => {
-  const reachable = await resolver.ping();
-  if (reachable !== catalogueReachable) logger.info({ event: "catalogue_state", state: reachable ? "reachable" : "unreachable" });
-  catalogueReachable = reachable;
+  const state = await resolver.check();
+  if (state !== catalogueState) logger.info({ event: "catalogue_state", state });
+  catalogueState = state;
 };
 const catalogueProbe = setInterval(probeCatalogue, 30_000);
 catalogueProbe.unref();
 
 const gatedReader: MediaReader = {
-  readiness: () => (catalogueReachable ? reader.readiness() : { ready: false, state: "catalogue_unreachable" }),
+  readiness: () => (catalogueState === "reachable" ? reader.readiness() : { ready: false, state: `catalogue_${catalogueState}` }),
   readPart: (locator, offset, limit, signal) => reader.readPart(locator, offset, limit, signal),
 };
 

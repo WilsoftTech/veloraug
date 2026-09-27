@@ -10,8 +10,8 @@
  * It only ever comes from the catalogue resolver.
  */
 export interface MediaLocator {
-  /** private.telegram_media id. */
-  mediaId: number;
+  /** The internal movie-version id this location was resolved for (the reader's cache key). */
+  movieVersionId: number;
   /** Telegram channel id in Bot API form (-100…), as stored in the catalogue. */
   chatId: string;
   messageId: number;
