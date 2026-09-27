@@ -7,6 +7,8 @@
 //   resume [--server] [--execute]
 //   checkpoint --kind movie|series --message-id <n> [--execute]
 //   status
+//   evaluate --fingerprint sf1-… --kind movie --vjs vjs.json [--execute]
+//   publication-sql --fingerprint sf1-… --tmdb-id <n> --out <file.sql> [--rights-cleared]
 //
 // Dry run is the default. `upload`/`resume --execute` need the runtime
 // authorization (REAL_TELEGRAM_UPLOADS_AUTHORIZED exactly "true", set for that
@@ -20,13 +22,20 @@
 // Telegram call.
 // `upload --fingerprint` selects exactly one already-scanned journal entry
 // (never a path) and runs it through the same checks as any other upload.
+// `evaluate` matches one UPLOADED source from the server's own Telegram record
+// (no local file or journal needed) and, with --execute, records the parse and
+// the scored candidates through the worker RPC; the server decides matched or
+// needs_review. `publication-sql` writes the owner's approve+publish script for
+// one source from its TMDB snapshot; the worker key cannot run it, and it
+// touches no database itself.
 // Tokens are never printed. Paths are shown only in this terminal.
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { basename, extname, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import * as z from "zod";
-import { parseFilename } from "@/lib/ingestion/parser";
+import { decideKind, parseFilename } from "@/lib/ingestion/parser";
+import { isFingerprint } from "@/lib/ingestion/fingerprint";
 import { matchTitle } from "@/lib/ingestion/match";
 import { planSource } from "@/lib/ingestion/plan";
 import { titleKey } from "@/lib/ingestion/duplicates";
@@ -35,10 +44,11 @@ import { buildUploadCaption, TELEGRAM_MAX_FILE_BYTES } from "@/lib/ingestion/tel
 import { createLocalBotApiClient, loadLocalBotApiConfig, type LocalBotApiConfig } from "@/lib/telegram/local-bot-api";
 import { longRunningFetch } from "@/lib/telegram/long-running-fetch";
 import { isTmdbConfigured } from "@/lib/tmdb/client";
-import { searchTmdbForIngestion } from "@/lib/tmdb/ingestion-search";
+import { fetchMovieSnapshot, searchTmdbForIngestion } from "@/lib/tmdb/ingestion-search";
+import { publicationScript } from "@/lib/uploader/publication";
 import { JOURNAL_DIR_ENV, newJournalEntry, openJournal, resolveJournalDir, type Journal, type JournalEntry } from "@/lib/uploader/journal";
 import { fingerprintFile, hashFile, toSourceFile, walkMedia, type DiscoveredFile } from "@/lib/uploader/scan";
-import { createRpcIngestionStore, offlineStore, supabaseRpcTransport, type IngestionStore } from "@/lib/uploader/store";
+import { createRpcIngestionStore, evaluationPayload, offlineStore, supabaseRpcTransport, type EvaluationEvidence, type IngestionStore } from "@/lib/uploader/store";
 import { isRealTelegramUploadAuthorized, isUploadPlanned, planResume, REAL_UPLOADS_ENV, resumeEntry, selectUploadEntries, uploadEntry, verifySourceFingerprint, type UploaderDeps, type UploadSelectionError } from "@/lib/uploader/upload";
 import type { CatalogueKind } from "@/types/catalogue";
 import type { DuplicateSubject, KnownVj, MatchOutcome } from "@/types/ingestion";
@@ -59,6 +69,9 @@ const options = {
   "message-id": { type: "string" },
   // Collected as a list so a repeated option is refused, not "last one wins".
   fingerprint: { type: "string", multiple: true },
+  "tmdb-id": { type: "string" },
+  out: { type: "string" },
+  "rights-cleared": { type: "boolean", default: false },
 } as const;
 
 let parsed: ReturnType<typeof parseArgs<{ allowPositionals: true; options: typeof options }>>;
@@ -415,7 +428,81 @@ async function status() {
   console.log(`stops:   ${[...reasons].map(([name, count]) => `${name}: ${count}`).join("  ") || "none"}`);
 }
 
-const commands: Record<string, () => Promise<void>> = { scan, inspect, upload, resume, checkpoint, status };
+/** Exactly one canonical --fingerprint; a path or a partial value is never accepted. */
+function oneFingerprint() {
+  const given = values.fingerprint ?? [];
+  if (given.length !== 1 || !isFingerprint(given[0])) fail("exactly one --fingerprint sf1-<64 lowercase hex> is required");
+  return given[0];
+}
+
+async function evaluate() {
+  const kind = kindOption();
+  if (kind !== "movie") fail("evaluate supports --kind movie only in this checkpoint");
+  const fingerprint = oneFingerprint();
+  const vjs = await loadVjs();
+  if (vjs.length === 0) fail("--vjs is required (the VJs to resolve against)");
+  if (!isTmdbConfigured()) fail("TMDB is not configured; matching needs it");
+  const server = workerStore();
+
+  // The server's own record of the upload is the source of truth: its Telegram
+  // file name and caption, not a local file.
+  const current = await server.getUploadStatus(fingerprint, kind);
+  if (current.status !== "uploaded") fail(`the source is not uploaded (server: ${current.status}); nothing to evaluate`);
+  if (current.record.sourceFingerprint !== fingerprint) fail("the recorded caption does not carry this fingerprint");
+  if (current.record.fileName === null) fail("the recorded Telegram document has no file name");
+
+  const parse = parseFilename(current.record.fileName);
+  if (parse.title === null) fail("no title could be parsed from the recorded file name");
+  const evidence: EvaluationEvidence = {
+    kind: decideKind(kind, parse),
+    title: parse.title,
+    vjText: parse.vjText,
+    vj: resolveVj(parse.vjText, vjs),
+    year: parse.year,
+    season: parse.season,
+    episode: parse.episode,
+    match: await matchTitle({ kind, title: parse.title, year: parse.year }, searchTmdbForIngestion),
+  };
+  if (evidence.match?.outcome === "error") fail(`TMDB search failed (${evidence.match.code}); nothing was recorded`);
+  const payload = evaluationPayload(evidence);
+  console.log(JSON.stringify({
+    fingerprint,
+    telegramFileName: current.record.fileName,
+    parsed: payload.p_parsed,
+    match: evidence.match?.outcome === "matched"
+      ? { outcome: "matched", confidence: evidence.match.confidence, tmdbId: evidence.match.best.candidate.tmdbId, title: evidence.match.best.candidate.title, year: evidence.match.best.candidate.year }
+      : { outcome: evidence.match?.outcome },
+    candidates: payload.p_candidates,
+  }, null, 2));
+  if (!values.execute) {
+    console.log("\ndry run: nothing was recorded. The server re-derives matched/needs_review at --execute.");
+    return;
+  }
+  console.log(`\nrecorded: ${await server.recordEvaluation(fingerprint, kind, evidence)}`);
+}
+
+async function publicationSql() {
+  const fingerprint = oneFingerprint();
+  const tmdbId = Number(values["tmdb-id"]);
+  if (!Number.isSafeInteger(tmdbId) || tmdbId < 1) fail("--tmdb-id must be the approved TMDB movie id");
+  if (!values.out) fail("--out <file.sql> is required (outside the repository, e.g. .velora-ingest/)");
+  if (!isTmdbConfigured()) fail("TMDB is not configured; the snapshot needs it");
+  // Checked before any request too, so a refusal never exits with a socket open.
+  if (await stat(resolve(values.out)).then(() => true, () => false)) fail("--out already exists; it is never overwritten (choose a new file)");
+  const snapshot = await fetchMovieSnapshot(tmdbId);
+  if (snapshot === null) fail("TMDB returned no usable movie for that id");
+  // "wx": never overwrite a script someone may already have reviewed.
+  try {
+    await writeFile(resolve(values.out), publicationScript({ fingerprint, tmdbId, snapshot, rightsCleared: values["rights-cleared"] }), { flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") fail("--out already exists; it is never overwritten (choose a new file)");
+    throw error;
+  }
+  console.log(JSON.stringify({ tmdbId, title: snapshot.title, releaseDate: snapshot.release_date, genres: snapshot.genres.map((genre) => genre.name), poster: snapshot.poster_path !== null, backdrop: snapshot.backdrop_path !== null }, null, 2));
+  console.log(`\nwrote the owner script${values["rights-cleared"] ? "" : " WITHOUT the rights attestation (the database will refuse to publish)"}. Nothing was sent to any database.`);
+}
+
+const commands: Record<string, () => Promise<void>> = { scan, inspect, upload, resume, checkpoint, status, evaluate, "publication-sql": publicationSql };
 const run = command ? commands[command] : undefined;
 if (!run) fail(`usage: ingest <${Object.keys(commands).join("|")}> …`);
 await run();

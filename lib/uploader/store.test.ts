@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { createRpcIngestionStore, IngestStoreError, supabaseRpcTransport, type RpcTransport } from "@/lib/uploader/store";
+import { createRpcIngestionStore, evaluationPayload, IngestStoreError, supabaseRpcTransport, type EvaluationEvidence, type RpcTransport } from "@/lib/uploader/store";
 import type { SourceFingerprint, TelegramMediaRecord } from "@/types/ingestion";
 
 // No Supabase: every call goes through a mocked RPC transport.
@@ -100,9 +100,10 @@ describe("RPC ingestion store: command selection and payloads", () => {
     await expect(refused.advanceCheckpoint("movie", MOVIES, 400)).rejects.toMatchObject({ code: "ingest_recovery_unresolved" });
   });
 
-  it("only ever calls the five worker commands", () => {
+  it("only ever calls the six worker commands (never approval or publication)", () => {
     const source = readFileSync(join(__dirname, "store.ts"), "utf8");
-    expect([...new Set(source.match(/"ingest_[a-z_]+"/g))].sort()).toEqual(['"ingest_channel_checkpoint"', '"ingest_upload_fail"', '"ingest_upload_record"', '"ingest_upload_start"', '"ingest_upload_status"']);
+    expect([...new Set(source.match(/"ingest_[a-z_]+"/g))].sort()).toEqual(['"ingest_channel_checkpoint"', '"ingest_record_evaluation"', '"ingest_upload_fail"', '"ingest_upload_record"', '"ingest_upload_start"', '"ingest_upload_status"']);
+    expect(source).not.toMatch(/catalogue_(approve|publish)/);
     expect(source).not.toMatch(/\.from\(|\.schema\(|private\./);
   });
 });
@@ -143,6 +144,59 @@ describe("RPC ingestion store: errors are normalized", () => {
   it("error messages carry the code only", async () => {
     const error = new IngestStoreError("store_error");
     expect(error.message).toBe("Ingestion store: store_error");
+  });
+});
+
+describe("evaluation (ingest_record_evaluation)", () => {
+  const exact = {
+    candidate: { tmdbId: 1428857, mediaType: "movie" as const, title: "On the Hunt", originalTitle: null, year: 2026 },
+    tier: "exact_title_year" as const, score: 1, reasons: { title: "exact" as const, titleField: "title" as const, year: "match" as const },
+  };
+  const namesake = {
+    candidate: { tmdbId: 440478, mediaType: "movie" as const, title: "On the Hunt", originalTitle: "A la chasse", year: 2017 },
+    tier: "exact_title_year_conflict" as const, score: 0.3, reasons: { title: "exact" as const, titleField: "title" as const, year: "conflict" as const },
+  };
+  const EVIDENCE: EvaluationEvidence = {
+    kind: { status: "confirmed", kind: "movie" }, title: "On The Hunt", vjText: "ICE P", vj: { status: "resolved", vjId: 1, slug: "vj-ice-p" },
+    year: 2026, season: null, episode: null,
+    match: { outcome: "matched", best: exact, confidence: "high", candidates: [exact, namesake] },
+  };
+
+  it("sends the parse and every scored candidate (the server re-derives ambiguity), never a verdict", async () => {
+    const rpc = transport({ data: "matched", error: null });
+    expect(await createRpcIngestionStore(rpc).recordEvaluation(FP, "movie", EVIDENCE)).toBe("matched");
+    expect(rpc).toHaveBeenCalledWith("ingest_record_evaluation", {
+      p_source_fingerprint: FP,
+      p_bot_type: "movie",
+      p_parsed: { kind: "movie", kind_status: "confirmed", title: "On The Hunt", year: 2026, vj_text: "ICE P", vj_status: "resolved", vj_id: 1, season: null, episode: null },
+      p_candidates: [
+        { tmdb_id: 1428857, media_type: "movie", score: 1, title_match: "exact", title_field: "title", year_match: "match", title: "On the Hunt", year: 2026 },
+        { tmdb_id: 440478, media_type: "movie", score: 0.3, title_match: "exact", title_field: "title", year_match: "conflict", title: "On the Hunt", year: 2017 },
+      ],
+    });
+    expect(JSON.stringify(rpc.mock.calls[0][1])).not.toMatch(/outcome|confidence|approved|best/);
+  });
+
+  it("maps an unresolved VJ without an id, and not_found to no candidates", () => {
+    const payload = evaluationPayload({ ...EVIDENCE, vj: { status: "unresolved", suggestionIds: [4] }, match: { outcome: "not_found", reason: "no_results" } });
+    expect(payload.p_parsed).toMatchObject({ vj_status: "unresolved", vj_id: null });
+    expect(payload.p_candidates).toEqual([]);
+  });
+
+  it("never records a failed or missing search, or a missing title, as evidence", async () => {
+    const rpc = transport({ data: "matched", error: null });
+    const store = createRpcIngestionStore(rpc);
+    await expect(store.recordEvaluation(FP, "movie", { ...EVIDENCE, match: { outcome: "error", code: "tmdb_search_failed" } })).rejects.toMatchObject({ code: "evaluation_incomplete" });
+    await expect(store.recordEvaluation(FP, "movie", { ...EVIDENCE, match: null })).rejects.toMatchObject({ code: "evaluation_incomplete" });
+    await expect(store.recordEvaluation(FP, "movie", { ...EVIDENCE, title: null })).rejects.toMatchObject({ code: "evaluation_incomplete" });
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it("passes database codes through and rejects unexpected replies", async () => {
+    const refused = createRpcIngestionStore(transport({ data: null, error: { message: "ingest_evaluation_conflict" } }));
+    await expect(refused.recordEvaluation(FP, "movie", EVIDENCE)).rejects.toMatchObject({ code: "ingest_evaluation_conflict" });
+    const odd = createRpcIngestionStore(transport({ data: "approved", error: null }));
+    await expect(odd.recordEvaluation(FP, "movie", EVIDENCE)).rejects.toMatchObject({ code: "store_bad_reply" });
   });
 });
 

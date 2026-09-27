@@ -222,6 +222,10 @@ class FakeStore implements IngestionStore {
     if (this.status.status === "uploading" || this.status.status === "uncertain") throw Object.assign(new Error("ingest_recovery_unresolved"), { code: "ingest_recovery_unresolved" });
     return messageId;
   }
+  // The upload and recovery paths never evaluate.
+  async recordEvaluation(): Promise<never> {
+    throw new Error("upload paths must not record an evaluation");
+  }
 }
 
 /** The recovery marker lands here unless a test says otherwise; the journal's floor is 40. */

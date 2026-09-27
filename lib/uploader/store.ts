@@ -3,13 +3,14 @@ import { createClient } from "@supabase/supabase-js";
 import * as z from "zod";
 import { fingerprintFromCaption } from "@/lib/ingestion/telegram";
 import type { CatalogueKind } from "@/types/catalogue";
-import type { ServerUploadStatus, SourceFingerprint, SourceIdentity, TelegramMediaRecord, UploadFailureOutcome } from "@/types/ingestion";
+import type { DryRunEntry, ServerUploadStatus, SourceFingerprint, SourceIdentity, TelegramMediaRecord, UploadFailureOutcome } from "@/types/ingestion";
 
 /**
  * The uploader's view of the Supabase ingestion write boundary: the worker
- * commands of migrations 20260925004059 and 20260925194322, and nothing else. There is no table
+ * commands of migrations 20260925004059, 20260925194322 and 20260927090650, and nothing else. There is no table
  * access and no SQL here: every call is a PostgREST `rpc/` call that only
- * service_role may execute. None of the commands approves or publishes.
+ * service_role may execute. None of the commands approves or publishes: that
+ * is the database owner's (supabase/admin/, docs "C2B.2H").
  */
 export interface IngestionStore {
   readonly available: boolean;
@@ -36,7 +37,18 @@ export interface IngestionStore {
    * the checkpoint after the call (ingest_channel_checkpoint).
    */
   advanceCheckpoint(kind: CatalogueKind, channelId: number, messageId: number): Promise<number>;
+  /**
+   * Records the parse, VJ resolution and scored TMDB candidates of an uploaded
+   * source (ingest_record_evaluation). The server re-derives the decision:
+   * `matched` (automatic) or `needs_review`. An identical replay is
+   * `already_recorded`; different evidence is refused, never an overwrite.
+   * Candidates are recorded pending; nothing is approved.
+   */
+  recordEvaluation(fingerprint: SourceFingerprint, kind: CatalogueKind, evidence: EvaluationEvidence): Promise<"matched" | "needs_review" | "already_recorded">;
 }
+
+/** What an evaluation records: the planner's view of one source. */
+export type EvaluationEvidence = Pick<DryRunEntry, "kind" | "title" | "vjText" | "vj" | "year" | "season" | "episode" | "match">;
 
 /**
  * A failed store call, reduced to a fixed code: one of the database's
@@ -70,22 +82,34 @@ export const offlineStore: IngestionStore = {
   advanceCheckpoint: async () => {
     throw new IngestStoreError("store_not_configured");
   },
+  recordEvaluation: async () => {
+    throw new IngestStoreError("store_not_configured");
+  },
 };
 
 // ---------------------------------------------------------------------------
 // RPC transport
 // ---------------------------------------------------------------------------
 
-export type WorkerRpc = "ingest_upload_status" | "ingest_upload_start" | "ingest_upload_record" | "ingest_upload_fail" | "ingest_channel_checkpoint";
+export type WorkerRpc =
+  | "ingest_upload_status"
+  | "ingest_upload_start"
+  | "ingest_upload_record"
+  | "ingest_upload_fail"
+  | "ingest_channel_checkpoint"
+  | "ingest_record_evaluation";
+
+/** Scalars, or a JSON value for a jsonb argument. */
+type RpcArg = string | number | null | Record<string, unknown> | unknown[];
 
 export type RpcTransport = (
   fn: WorkerRpc,
-  args: Record<string, string | number | null>,
+  args: Record<string, RpcArg>,
 ) => Promise<{ data: unknown; error: { message?: string; code?: string } | null }>;
 
 const DB_CODE = /^ingest_[a-z_]{1,60}$/;
 
-async function call(rpc: RpcTransport, fn: WorkerRpc, args: Record<string, string | number | null>): Promise<unknown> {
+async function call(rpc: RpcTransport, fn: WorkerRpc, args: Record<string, RpcArg>): Promise<unknown> {
   let reply: Awaited<ReturnType<RpcTransport>>;
   try {
     reply = await rpc(fn, args);
@@ -181,6 +205,40 @@ function toStatus(kind: CatalogueKind, row: z.infer<typeof statusRow>): ServerUp
 }
 
 /**
+ * The ingest_record_evaluation payload. Every scored candidate is sent (not
+ * just the best), so the server can re-derive ambiguity itself. A failed or
+ * unrequested search is not evidence and is never recorded.
+ */
+export function evaluationPayload(evidence: EvaluationEvidence) {
+  const { match } = evidence;
+  if (evidence.title === null || match === null || match.outcome === "error") throw new IngestStoreError("evaluation_incomplete");
+  const scored = match.outcome === "not_found" ? [] : match.candidates;
+  return {
+    p_parsed: {
+      kind: evidence.kind.status === "conflict" ? evidence.kind.declared : evidence.kind.kind,
+      kind_status: evidence.kind.status,
+      title: evidence.title,
+      year: evidence.year,
+      vj_text: evidence.vjText,
+      vj_status: evidence.vj.status,
+      vj_id: evidence.vj.status === "resolved" ? evidence.vj.vjId : null,
+      season: evidence.season,
+      episode: evidence.episode,
+    },
+    p_candidates: scored.map(({ candidate, score, reasons }) => ({
+      tmdb_id: candidate.tmdbId,
+      media_type: candidate.mediaType,
+      score,
+      title_match: reasons.title,
+      title_field: reasons.titleField,
+      year_match: reasons.year,
+      title: candidate.title,
+      year: candidate.year,
+    })),
+  };
+}
+
+/**
  * The store over an RPC transport. Payloads carry only what each command
  * takes: fingerprint, kind, size, channel and the Telegram message identity.
  * No local path, token or journal data is sent; a file name travels only
@@ -244,6 +302,14 @@ export function createRpcIngestionStore(rpc: RpcTransport): IngestionStore {
       const checkpoint = z.number().int().nonnegative().safeParse(data);
       if (!checkpoint.success) throw new IngestStoreError("store_bad_reply");
       return checkpoint.data;
+    },
+
+    async recordEvaluation(fingerprint, kind, evidence) {
+      const { p_parsed, p_candidates } = evaluationPayload(evidence);
+      const data = await call(rpc, "ingest_record_evaluation", { p_source_fingerprint: fingerprint, p_bot_type: kind, p_parsed, p_candidates });
+      const outcome = z.enum(["matched", "needs_review", "already_recorded"]).safeParse(data);
+      if (!outcome.success) throw new IngestStoreError("store_bad_reply");
+      return outcome.data;
     },
   };
 }

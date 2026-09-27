@@ -16,3 +16,18 @@ export interface TmdbResult {
 export interface TmdbSearchResponse {
   results?: TmdbResult[];
 }
+
+/** GET /movie/{id}: the fields an approved catalogue snapshot takes. */
+export interface TmdbMovieDetails {
+  id: number;
+  title?: string;
+  original_title?: string;
+  overview?: string | null;
+  release_date?: string;
+  runtime?: number | null;
+  poster_path?: string | null;
+  backdrop_path?: string | null;
+  vote_average?: number;
+  vote_count?: number;
+  genres?: { id: number; name: string }[];
+}
