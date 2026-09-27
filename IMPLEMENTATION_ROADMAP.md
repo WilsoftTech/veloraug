@@ -101,6 +101,19 @@ The first Velora UG task is reconciliation, not feature construction.
   - **External writes.** Telegram content 0, hosted 0. Checkpoint 26; Series untouched.
   - **Debt.** The gateway reads through the owner database connection until a least-privilege resolver exists. The entitled token issuer is E2.
   - Record: `docs/PHASE_C_INGESTION_DESIGN.md`, "E1.2".
+- E1.2A media gateway database least privilege (2026-09-28): **PASS.** This closes the E1.2 database-credential debt.
+  - **Migration 12,** `20260927210453_media_gateway_least_privilege.sql`, is deployed (hosted has 12, and the function body is MD5-identical to local).
+  - **Role.** `velora_media_gateway` is NOINHERIT with no attributes or memberships. Its login and password are operator configuration, set as a SCRAM verifier, never SQL history.
+  - **Resolver.** The unexposed `media_gateway.resolve_movie_version(bigint)` is SECURITY DEFINER with an empty `search_path`, enforces the publication rule, and returns exactly five transport fields. Only that role can execute it.
+  - **Gateway.** It accepts only that identity, with no owner fallback, and readiness re-verifies it.
+  - **Live proof as the role on hosted.**
+    - On The Hunt resolves; Fuze and unknown ids return nothing.
+    - 23 prohibited reads, writes, commands, DDL and role switches are all refused with 42501.
+    - The Data API does not offer the resolver (PGRST202/PGRST106).
+  - **Residual.** The role can create session-temporary tables, through PostgreSQL's `PUBLIC` TEMP grant.
+  - **Tests.** 66 pgTAP and 22 integration tests; 17 of 20 database mutants killed, and the 3 survivors are equivalent to schema constraints.
+  - **External writes.** Telegram reads and writes 0. Hosted writes: the migration and the login step only. Catalogue unchanged, checkpoint 26, Series untouched.
+  - Record: `docs/PHASE_C_INGESTION_DESIGN.md`, "E1.2A".
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules

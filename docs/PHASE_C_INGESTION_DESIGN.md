@@ -4081,3 +4081,200 @@ cases.
 - **`FILE_REFERENCE_*` refresh** is implemented but still unprovoked (as in E1.1).
 - **Production host, TLS, the public hostname and ingress rate limiting** are
   G-phase work.
+
+---
+
+# E1.2A — Media gateway database least privilege: PASS
+
+Date: 2026-09-28. **E1.2A MEDIA GATEWAY DB LEAST PRIVILEGE: PASS.** The media
+gateway no longer uses the owner connection. It connects as a dedicated role
+that PostgreSQL allows to do exactly one thing: execute one resolver. It closes
+the E1.2 debt ("Database credential"). Starting HEAD `b5ebb55`. E1.2 was not
+rerun, and nothing was read from Telegram.
+
+## Migration 12: `20260927210453_media_gateway_least_privilege.sql`
+
+- **Role `velora_media_gateway`.**
+  - Created NOLOGIN, NOINHERIT, no CREATEDB or CREATEROLE, connection limit 10.
+  - SUPERUSER, REPLICATION and BYPASSRLS stay off. They are defaults: PG 16+
+    lets only a superuser even name them in `ALTER ROLE`, and the tests assert
+    all three.
+  - It is a member of no role. Its session defaults are read-only transactions,
+    `statement_timeout` 5 s, `idle_in_transaction_session_timeout` 10 s and an
+    empty `search_path` (defence in depth; the grants are the boundary).
+  - Creation is idempotent, because roles are cluster-wide and survive a local
+    reset.
+  - **Login and password are not in the migration.** They are operator
+    configuration (below), so no credential exists in SQL history.
+- **Schema `media_gateway`.** Not in the Data API's exposed schemas. `USAGE` is
+  granted to the gateway role only, and revoked from `PUBLIC`, `anon`,
+  `authenticated` and `service_role`.
+- **`media_gateway.resolve_movie_version(p_movie_version_id bigint)`:**
+  - SECURITY DEFINER, owned by `postgres`, `search_path` pinned to `''`;
+  - every object schema-qualified; plain SQL, STABLE, with no dynamic SQL;
+  - one typed input.
+  - It returns a row only when:
+    - the id is positive;
+    - the movie is `published` with `published_at`;
+    - the version is `ready`, with rights `cleared`;
+    - the VJ is active;
+    - the media is movie-bot media in the **registered** Movies channel, with a
+      recorded size.
+  - **Output: exactly `chat_id, message_id, file_unique_id, file_size_bytes,
+    mime_type`.** No `file_id`, caption, file name or internal id.
+  - EXECUTE belongs to `velora_media_gateway` only (ACL
+    `{postgres=X, velora_media_gateway=X}`).
+
+## Privilege model (hosted, verified)
+
+| Capability | velora_media_gateway |
+| --- | --- |
+| Callable functions outside the system catalogs | exactly `media_gateway.resolve_movie_version` |
+| Reachable tables, views, sequences | **0** |
+| Schema USAGE | `media_gateway`; `public` (every role has it through `PUBLIC`; it holds no PUBLIC-executable function or PUBLIC table grant) |
+| CREATE on any schema / on the database | none / no |
+| Role memberships | none. (`postgres` holds the automatic ADMIN membership PG 16+ gives a role's creator: the owner can administer it, and the gateway inherits nothing.) |
+| `PUBLIC` ACLs on Supabase platform objects (`extensions.pg_stat_statements*`, `cron.*`) | unreachable: no USAGE on those schemas |
+| **Residual** | Session-temporary tables (`TEMP` on the database is granted to `PUBLIC` for every role and cannot be revoked per role). They are private to the session, vanish with it and reach no Velora data. Removing it would change Supabase's platform-wide defaults, which was not done. |
+
+## Operator configuration (hosted)
+
+- **Enabling login.** `ALTER ROLE velora_media_gateway WITH LOGIN PASSWORD
+  '<SCRAM-SHA-256 verifier>'`, run once as the owner. The 256-bit random
+  password was generated locally and only its verifier was sent, like psql's
+  `\password`, so statement logging cannot capture it.
+- **Connection string.** `MEDIA_GATEWAY_DATABASE_URL` in Git-ignored
+  `.env.local`: user `velora_media_gateway.<project-ref>` on the transaction
+  pooler (6543). It was never printed.
+- **Rotation.** Repeat the same step with a new password.
+
+## Gateway changes
+
+- **Resolver.** `lib/media-gateway/resolver-sql.ts` now only calls the function
+  (`$1::bigint`, a validated positive safe integer), still as one
+  `SET TRANSACTION READ ONLY` batch. The reader's document cache is keyed by
+  movie version (`MediaLocator.movieVersionId`), because the private media id is
+  no longer returned.
+- **No fallback.** `config.ts` accepts only a `velora_media_gateway` (or
+  `velora_media_gateway.<ref>`) URL with a password. `postgres`,
+  `postgres.<ref>`, `service_role`, `supabase_admin`, look-alike names and
+  password-less URLs all stop startup, and the error names the variable, never
+  its value.
+- **Readiness re-verifies the live identity.** `pg-resolver.mts` `check()`
+  requires:
+  - `current_user = velora_media_gateway`;
+  - a read-only transaction;
+  - no elevated attribute;
+  - no membership in `postgres` or `service_role`.
+  An owner credential yields `wrong_identity`, and `/readyz` stays 503.
+- **`.env.example`** documents the gateway variables by name only.
+
+## Live proof (hosted, as the restricted identity; no Telegram call)
+
+- **Identity.** `current_user` = `session_user` = `velora_media_gateway`,
+  `default_transaction_read_only` on, `search_path` `""`, not elevated.
+- **Allowed.** On The Hunt (version 1) returns 1 row with exactly the five
+  columns:
+  - the channel equals the configured Movies channel, and the message equals the
+    recorded upload;
+  - `file_unique_id` has 15 characters;
+  - the size is 1,004,462,878 and the MIME type `video/x-matroska`.
+- **Nothing returned** for Fuze (no version; id 2), an unknown id, 0 and −1.
+- **The real adapter** reports `check()` `reachable`; the locator has only
+  `movieVersionId, chatId, messageId, fileUniqueId, fileSize, mimeType`, and
+  Fuze gives `null`.
+- **Denied: all 23 probes refused with SQLSTATE 42501.** Each ran in its own
+  transaction, explicitly `READ WRITE` so refusals are privilege refusals,
+  targeting no rows, and was rolled back:
+  - catalogue update, insert and direct read;
+  - version rights change; VJ change;
+  - ingestion-event, Telegram-media and checkpoint mutation;
+  - Telegram-media and match-candidate reads;
+  - the checkpoint, worker, approval and publication commands;
+  - `auth.users`, profiles, watchlists;
+  - create table, create schema, alter and drop resolver;
+  - `SET ROLE postgres` and `service_role`.
+- **API exposure** (publishable key):
+  - `POST /rest/v1/rpc/resolve_movie_version` → 404 `PGRST202`;
+  - with `Content-Profile: media_gateway` → 406 `PGRST106` (schema not exposed);
+  - no field leaked.
+  - At the database, `PUBLIC`, `anon`, `authenticated` and `service_role` have
+    neither EXECUTE nor schema USAGE.
+
+## Hosted migration
+
+- **Path.** Code committed first (`32c1c3e`). The migration's SHA-256
+  `3b05083e…d76a` equals the committed blob.
+- **Push.** Supabase CLI 2.117.0 (`dist/supabase.js`, no shell), `db push
+  --db-url` over the session pooler (5432 for that command only). The URL was
+  never printed.
+- **Dry run.** Exactly this migration; no seeds, no roles. The push exited 0.
+- **Result:**
+  - 12 migrations, ending `20260927210453`;
+  - the function body MD5 `c1d312d7…4b21` is identical to the local stack;
+  - the ACLs, role attributes and settings are as above.
+- **Hosted writes:** the migration, plus one `ALTER ROLE … LOGIN PASSWORD`
+  (verifier only). No catalogue or content row changed:
+  - On The Hunt still published, version 1 ready/cleared, last updated
+    2026-09-27T09:45Z;
+  - Fuze `received` with no version;
+  - checkpoint **26**;
+  - Series 0.
+
+## Tests and gates
+
+- **pgTAP `008_media_gateway_boundary`: 66 tests.**
+  - role attributes, memberships and defaults;
+  - resolver hardening and exact output;
+  - `PUBLIC`/`anon`/`authenticated`/`service_role` denied;
+  - a whole-database reach audit;
+  - resolution and **denials executed as the role**. Probe functions *owned by*
+    the role, SECURITY DEFINER, return each statement's SQLSTATE. pgTAP itself
+    lives in a schema the role cannot use.
+  - `npm run test:db`: 482 across 8 files, PASS. `db lint --local`: no schema
+    errors.
+- **Integration: `media-gateway-resolver.test.ts`, 22 tests on the local
+  database.**
+  - The eligibility matrix runs as the role. Nothing is returned for:
+    - draft, archived, not ready, unavailable, archived version;
+    - inactive VJ; rights blocked or unknown;
+    - unregistered channel, no size;
+    - unknown, Fuze-style, 0 and negative ids.
+  - The real adapter logs in as the role over TCP (random local password;
+    fixtures removed and the role returned to NOLOGIN afterwards). It resolves
+    only the published version; the **owner credential gives `wrong_identity`**
+    and a wrong password `unreachable`.
+- **Database mutation testing: 20 mutants, 17 killed.** Killed:
+  - publication, readiness, rights, VJ, size and channel clauses;
+  - SECURITY INVOKER; unpinned `search_path`; an extra private column;
+  - EXECUTE to anon or `PUBLIC`; schema USAGE to authenticated;
+  - gateway EXECUTE revoked;
+  - role INHERIT; membership in `service_role`;
+  - UPDATE on movies; private schema plus media SELECT.
+
+  The 3 survivors were declared equivalent before the run, because a schema
+  constraint already enforces each clause:
+  - `published_at is not null` (a CHECK);
+  - `bot_type = 'movie'` (the version's composite FK);
+  - `id > 0` (identity ids).
+
+  They stay as defence in depth.
+- **Other gates.**
+  - `npm test`: 488 across 25 files.
+  - `npm run test:catalogue`: 52 across 4 files.
+  - Lint: 0 errors (1 pre-existing warning in a Git-ignored E1.1 file).
+  - Root and gateway typecheck; `next build`.
+- **Secret scan.** 22 secret values, including the restricted password on its
+  own (raw and URL-encoded), the owner URLs, bot tokens, API hash, token secret
+  and both sessions. It covered 1,071 sources: the committed diff, the pending
+  diff, gateway source, migrations, tests, `.env.example`, all 1,014 `.next`
+  files, and the proof and gate logs.
+  - **0 hits.** No SCRAM verifier and no credentialed URL.
+  - 0 `.next` files mention the gateway, its schema or its role.
+
+## External state
+
+- **Telegram:** reads 0, writes 0. The active mtcute session was not touched,
+  and the obsolete GramJS session was left for separate cleanup.
+- **Local infrastructure.** The local Supabase stack ran for the tests; the role
+  is NOLOGIN there after them.
