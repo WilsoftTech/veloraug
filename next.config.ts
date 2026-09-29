@@ -10,6 +10,12 @@ if (
 }
 
 const nextConfig: NextConfig = {
+  experimental: {
+    // Turbopack's dev cache (.next/dev/cache) persists the process environment.
+    // A local run holding a per-run secret (the E3 playback proof) turns it off so
+    // the secret never reaches disk. Development only; builds are unaffected.
+    turbopackFileSystemCacheForDev: process.env.VELORA_DISABLE_DEV_FS_CACHE !== "true",
+  },
   // Pre-B5 TMDB browse routes. The catalogue now lives at /movies and /series.
   // Legacy /movie/:id and /tv/:id detail links resolve in app/[mediaType]/[id].
   async redirects() {

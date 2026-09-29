@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { cache } from "react";
 import { notFound } from "next/navigation";
+import { MoviePlayer } from "@/components/movie-player";
 import { TitleHero } from "@/components/title-hero";
 import { WatchlistButton } from "@/components/watchlist-button";
 import { getMovie } from "@/lib/catalogue";
@@ -35,9 +36,21 @@ export default async function MoviePage({ params }: PageProps<"/movies/[slug]">)
     movie.runtimeMinutes ? formatRuntime(movie.runtimeMinutes) : null,
   ].filter((fact): fact is string => fact !== null);
 
+  // Playable versions come from the published catalogue (ids and VJ names only).
+  const versions = movie.versions.map((version) => ({ id: version.id, label: version.vj.name }));
+
   return (
     <article>
-      <TitleHero title={movie} facts={facts} actions={<WatchlistButton item={titleWatchlistItem(movie)} variant="primary" />} />
+      <TitleHero
+        title={movie}
+        facts={facts}
+        actions={
+          <>
+            <MoviePlayer versions={versions} signInHref={`/sign-in?next=${encodeURIComponent(`/movies/${movie.slug}`)}`} />
+            <WatchlistButton item={titleWatchlistItem(movie)} variant={versions.length > 0 ? "secondary" : "primary"} />
+          </>
+        }
+      />
     </article>
   );
 }
