@@ -128,6 +128,12 @@ The first Velora UG task is reconciliation, not feature construction.
   - **Firefox (Playwright Gecko 155)** decodes the video but not the MP3-in-Matroska audio, so it plays silently. **Playwright WebKit** never loads metadata. **Safari: NOT TESTED.**
   - **Evidence for the next step.** Video re-encoding looks unnecessary. Try first a container-only remux to MP4 keeping the MP3, which Gecko reports "probably"; next, MP3 → AAC. Nothing was transformed.
   - **External state.** Telegram writes 0; about 0.35 GB of bounded reads; hosted catalogue writes 0; the throwaway auth user was deleted. Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3".
+- E3.1 browser-compatible packaging proof (2026-09-30): **PASS — MP4 REMUX ONLY.**
+  - **Change.** `ffmpeg -c copy -movflags +faststart` moves both streams unchanged from the MKV into a fast-start MP4. It takes about 4 s, uses no encoding, and adds 0.30% (1,007,441,962 bytes).
+  - **Identity.** The H.264 packets, Annex B stream, SPS/PPS and all 124,997 packets are byte-identical to the source; so are all 199,380 MP3 packets.
+  - **Browsers.** Chrome 153 and Playwright Gecko 155 both decode video **and** audio, and seek to 15:00, 30:00 and 81:40. Delivery is bounded: 8 MiB 206 windows, metadata within the first 8–16 MiB, no full-file request, nothing fetched while paused. Playwright WebKit (Windows) reads the metadata but decodes no H.264 or audio (engine build), so AAC was not justified and was not created. **Safari: NOT TESTED.**
+  - **Open.** Safari MP3-in-MP4 needs a real-device check, and MSE or HLS would need AAC.
+  - **External state.** Telegram and hosted reads and writes 0; nothing uploaded; the derivative was deleted. Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.1". Where the derivative lives is the next checkpoint's decision.
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules

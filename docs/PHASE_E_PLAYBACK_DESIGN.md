@@ -344,3 +344,116 @@ Unit tests prove the rest against the real E2 handler: renewal re-reads the sess
 ### Not done, by design
 
 No remux, transcode, HLS, download, payment or Series playback. The player stays in place: once a browser-compatible rendition exists, it plays without code changes.
+
+## E3.1 — Browser-compatible packaging proof (2026-09-30)
+
+**Result: `E3.1 PACKAGING PROOF: PASS — MP4 REMUX ONLY`.** Starting HEAD `183df79`.
+
+Moving both streams, unchanged, from Matroska into a fast-start MP4 fixes the E3 incompatibility. Chrome and Gecko then decode video **and** audio, and seek. No audio or video encoding was needed. This is a format proof only. Nothing was uploaded, stored or linked to the catalogue, and no storage or ingestion decision was made.
+
+### Tooling
+
+- FFmpeg and ffprobe **9.0.2**: the gyan.dev "release essentials" Windows build. Its SHA-256 matched the published checksum. It was unpacked in the session scratch directory, with no system install and nothing in the repository.
+- Browsers were driven by the scratch Playwright 1.63 from E3.
+- Media was served by a local byte-range server (`127.0.0.1:8790`). There was no media gateway, Telegram call or Supabase access.
+
+### Source (inspection only; unchanged afterwards)
+
+The source is `On The Hunt.VJ ICE P.2026.mkv`: 1,004,462,878 bytes, SHA-256 `1d0dcd00256adc0c…`. The SHA-256, size and modification time were identical after the proof.
+
+| | |
+| --- | --- |
+| Container | Matroska (written by `Lavf57.71.100`), 5208.294 s, 1.54 Mb/s overall |
+| Stream 0 | H.264 High, level 4.0, 1920×1080, 24/1 fps, progressive, yuv420p, BT.709 limited range, AVCC with 4-byte NAL lengths, B-frames (`has_b_frames` 2), start 0.084 s. Bitrate not recorded; about 1.41 Mb/s (the MP4 reports 1,411,270 b/s) |
+| Stream 1 | MP3, stereo, 44.1 kHz, fltp, 128 kb/s CBR, start 0.000 s |
+| Frames | 124,997 video packets, 199,380 audio packets |
+
+### Candidate A: MP4, both streams copied
+
+```text
+ffmpeg -hide_banner -nostdin -loglevel warning -i "<source>.mkv" \
+  -map 0:v:0 -map 0:a:0 -c copy -movflags +faststart -f mp4 -y A.mp4
+```
+
+- **Cost.** 3.8 s wall-clock and 4.2 s CPU with a warm file cache; 6.7 s cold. It is limited by disk speed. Two runs gave byte-identical output, so the remux is deterministic. No warnings.
+- **Output.** 1,007,441,962 bytes, which is **+2,979,084 bytes (+0.30%)** because MP4 sample tables are larger than Matroska's.
+- **ffprobe.**
+  - Video: `h264`, High, level 40, `avc1`, 1920×1080, 124,997 frames, start 0.084 s.
+  - Audio: `mp3` as `mp4a` (object type 0x6B), stereo, 44.1 kHz, 128 kb/s, 199,380 frames.
+  - Duration 5208.29 s. A full audio decode pass reported no errors.
+- **Layout (fast-start).** Top-level boxes, in order: `ftyp` at 0, `moov` at 32 (5,335,509 bytes), `free`, then `mdat` at 5,335,549. The index comes before the media data, so a player can start from the head of the file.
+
+### Candidate A identity proof
+
+Every hash is over packet payloads demuxed with `-c copy`, with no decoding, using `-f hash -hash sha256` and `-f framemd5`:
+
+| Check | Source | Candidate A |
+| --- | --- | --- |
+| H.264 packet payloads (AVCC) | `b9232513…f7b837` | `b9232513…f7b837` |
+| H.264 Annex B elementary stream (`h264_mp4toannexb`) | `ed50271d…ad1971` | `ed50271d…ad1971` |
+| avcC extradata (SPS/PPS) | 49 B, `4351fda9…dc8cbc` | 49 B, `4351fda9…dc8cbc` |
+| Video packets: count, sizes and MD5s in order | 124,997 | 124,997, identical |
+| MP3 packet payloads | `ba605f2a…892ea4` | `ba605f2a…892ea4` |
+| Audio packets: count, sizes and MD5s in order | 199,380 | 199,380, identical |
+
+**The video and audio are bit-for-bit the source's.** Only timestamps are rewritten, into MP4's time base, and they aren't part of the compared payloads.
+
+### Candidate A in browsers
+
+The local server capped each 206 response at 8 MiB, like the gateway.
+
+| | Google Chrome 153 | Playwright Firefox 155 (Gecko) | Playwright WebKit 26.6 (Windows) |
+| --- | --- | --- | --- |
+| Metadata | 284 ms: 5208.294 s, 1920×1080 | 296 ms: 5208.294 s, 1920×1080 | 2.5 s: 5208.294 s, 1920×1080 |
+| Playback starts | 400 ms | 424 ms | time advances |
+| Video decode | 196 frames in 8.2 s, 0 dropped; frames change | 208 frames in 8.7 s, 3 dropped; frames change | **0 frames decoded** |
+| Audio decode | decoded audio bytes 4.6 KB → 313 KB; analyser peak RMS 0.37 | `mozHasAudio` **true** (MKV: false); RMS 0.33 | **0 audio tracks**, 0 decoded bytes; no Web Audio |
+| Seeks 15:00 / 30:00 / 81:40, resumed | yes: 111 / 200 / 11 ms to `seeked` | yes: 477 / 940 / 195 ms | not run |
+| **Verdict** | **PASS** | **PASS** | **FAIL (no decoders)** |
+
+- **Safari: NOT TESTED** (no macOS).
+- **Playwright WebKit on Windows** decodes neither the H.264 video nor the audio. It is an engine-build limitation, not a packaging one: it now reads the MP4's metadata, which it never did for the MKV.
+
+### Progressive and range behaviour (Candidate A)
+
+- **Opening.** Metadata needed `bytes=0-` and nothing else: one 8 MiB window in Chrome (0.8% of the file) and two in Gecko (16 MiB, 1.7%). Playback started straight after.
+- **Seeks.** Each needs one or two open-ended ranges at the target, answered 206 in ≤ 8 MiB windows: `bytes=178683904-` for 15:00, `bytes=334200832-` for 30:00, `bytes=961609728-` for 81:40. Unlike the MKV, the MP4 needs no extra tail fetch, because its index is already in `moov`.
+- **Whole test.** 0 full-file requests and only 206 statuses.
+  - Chrome: 5 requests, 26.6 MB (2.6%).
+  - Gecko: 9 requests, 57.9 MB (5.8%).
+  - Largest response: 8 MiB.
+- **Pause:** 0 requests and 0 bytes during a 12 s pause in both engines.
+
+The harness's own "progressive" flag showed false for Gecko only because its threshold was "less than 16 MiB before metadata", and Gecko fetched exactly 16 MiB. Nothing more was fetched.
+
+### Why Candidate B (AAC audio) was not created
+
+The brief says not to transcode audio when Candidate A meets the target, and A does: Chrome and Gecko both decode its MP3 audio. The only engine that still fails, Playwright WebKit on Windows, fails on the **video** as well (0 H.264 frames), so AAC audio could not fix it. No audio was encoded.
+
+**Open question for the architecture decision (not proven here).**
+
+- **Safari** support for MP3 inside MP4 is unverified until tested on a real Apple device. AAC is the fallback if it fails.
+- **MSE and HLS.** `MediaSource.isTypeSupported('video/mp4; codecs="avc1.640028, mp4a.6B"')` is **false** in Chrome and Gecko, while H.264 with AAC is **true**. Progressive playback in a plain `<video>`, which is what Velora uses, does not rely on MSE. Any future MSE, HLS or adaptive path would need AAC audio.
+
+### Size and cost
+
+| | Bytes | vs source | Time | Video | Audio |
+| --- | --- | --- | --- | --- | --- |
+| Original MKV | 1,004,462,878 | — | — | — | — |
+| Candidate A (MP4) | 1,007,441,962 | +0.30% | 3.8–6.7 s, about 4 s CPU | copied, bit-identical | copied, bit-identical |
+| Candidate B | not created | — | — | — | — |
+
+A remux has no encoding cost and is lossless. It could run on the uploader machine or anywhere that can read the source.
+
+### Recommended minimum compatible format (from this proof only)
+
+**Progressive MP4, fast-start (`moov` before `mdat`), with the H.264 and MP3 copied from the source.** It is produced by `-c copy -movflags +faststart`, with no re-encoding.
+
+Where that file is stored, whether it replaces or sits beside the original in Telegram, and whether AAC is needed for Safari or MSE, are for the next architecture checkpoint.
+
+### External state and cleanup
+
+- Telegram reads 0 and writes 0. Hosted reads 0 and writes 0. No auth user, no gateway, no catalogue change. On The Hunt, Fuze, checkpoint 26 and Series untouched.
+- The 1 GB Candidate A file, the packet lists and the FFmpeg zip were deleted after the proof. No media file remains in the scratch directory, and none was ever in the repository.
+- Kept in the session scratch directory: the FFmpeg binaries, the harness scripts and the logs.
+- The repository changed only in documentation (this record and the roadmap).
