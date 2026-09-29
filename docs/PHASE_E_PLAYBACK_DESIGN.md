@@ -211,3 +211,136 @@ Downloads stay separate. An E2 capability has `op = "stream"`, and the gateway a
 - Before production playback, operators must set the same `MEDIA_GATEWAY_TOKEN_SECRET` in Vercel and on the gateway, and set `MEDIA_GATEWAY_PUBLIC_ORIGIN` in Vercel.
 
 Not built, by design: the player (E3), downloads, subscriptions and payments, HLS, remuxing, Series playback.
+
+## E3 — Real movie playback (2026-09-30)
+
+**Result: `E3 BLOCKED — MEDIA COMPATIBILITY`.** Starting HEAD `d0d22b9`.
+
+The player, authorization flow, renewal, cleanup and privacy all work end to end, and Chrome plays the original On The Hunt file with video, audio and seeking. Firefox (Gecko) decodes the video but **not the MP3 audio in Matroska**, so it plays silently. That fails the PASS definition, so E3 stops here. The media was not changed.
+
+### What was built
+
+- **`components/movie-player.tsx`** (client). A native `<video controls playsInline preload="metadata">`, placed in the existing `/movies/[slug]` hero actions next to My List. Nothing is title-specific.
+  - Play requests an E2 capability, then sets the source. Nothing is requested on page load.
+  - Signed out, Play gets 401 from the issuer, and the player shows "Sign in to watch this movie." with a link to the existing `/sign-in?next=/movies/<slug>`. No video element is created and the gateway is never contacted.
+  - States shown: getting ready, loading, buffering, and errors (sign-in required, not entitled, unavailable, unsupported in this browser, playback error, interrupted, temporarily unavailable). No raw gateway, Telegram or database text is ever shown.
+  - "Close player" and leaving the page pause the element, drop its source and reload it, which aborts its range requests.
+- **`lib/playback/player.ts`** (framework-free, unit-tested): the state reducer, the capability request and its response mapping, renewal timing, `MediaError` mapping, version choice and source detachment.
+- **Version selection.** The page passes `{ id, label }` for every published version: the internal version id and the VJ name, which the public catalogue already exposes. The first version, in the catalogue's VJ order, plays by default. A native VJ `<select>` appears only when there are two or more versions. On The Hunt resolves to version 1 (VJ Ice P).
+- **`next.config.ts`.** `VELORA_DISABLE_DEV_FS_CACHE=true` turns off Turbopack's dev filesystem cache, which persists the process environment. The live proof used it so the per-run secret never reached disk. Builds are unaffected.
+
+### Renewal design
+
+A capability lasts 10 minutes (E2). The player renews 90 s before expiry while playing. A paused player renews when it resumes, if the capability is within 90 s of expiry. After a media network error it renews once and resumes.
+
+Renewal is the same `POST /api/media/stream-token`, so the session, entitlement and catalogue are re-checked each time. The new URL is swapped in place: the player saves the position, sets the new `src`, restores the position on `loadedmetadata`, and resumes if it was playing. A denied renewal stops playback and shows the reason.
+
+**Bug found and fixed during the live test.** Expiry was first compared as server `expiresAt` against the device clock. With the page clock ahead (the renewal test fast-forwards it 8m40s, and real device skew would do the same), every fresh capability looked nearly expired. The `play` event after each swap then renewed again, in a loop, until the issuer answered 429 after 30 requests. Two fixes:
+
+- Expiry is now kept on the device clock (`expiresAtMs`), using the issuer reply's `Date` header to cancel skew.
+- A 30 s minimum interval between renewals guards against any loop.
+
+Both are unit-tested, and the rerun renewed exactly once.
+
+### Live proof setup (local)
+
+- **Secret.** One per-run `MEDIA_GATEWAY_TOKEN_SECRET`, generated in memory by the harness and given only to the two processes below. It was never printed, written to disk, put in `.env.local` or committed.
+- **Next.js.** `next dev` on `127.0.0.1:3000`, with `MEDIA_GATEWAY_PUBLIC_ORIGIN=http://127.0.0.1:8787` (the E2 development loopback exception; production still requires HTTPS) and the dev filesystem cache off.
+- **Gateway.** The `velora-media-gateway:e3` image, built from HEAD, run read-only with a 256 MiB and 1 CPU cap. It used the existing mtcute session (`.velora-ingest/mtproto-gateway/reader.session`): no new login, rotation or permission change. Database access was the restricted `velora_media_gateway` role.
+- **Identity.** One throwaway hosted Supabase Auth user. The harness first confirmed the admin API worked, then created the user with a random password held in memory. The user signed in through the real `/sign-in` page and was deleted afterwards: lookup returned not found, and hosted then showed 1 user and 1 profile. Deleting the user cascades to `profiles`, the watchlist and search history.
+- **Browsers.** Driven by Playwright 1.63, installed in a scratch directory outside the repository.
+
+### Browser matrix
+
+| | Google Chrome 153 | Playwright Firefox 155 (Gecko) | Playwright WebKit 26.6 (Windows) |
+| --- | --- | --- | --- |
+| Metadata | yes: 5208.29 s, 1920×1080 | yes: 5208.29 s, 1920×1080 | **no**: readyState 0 after 90 s, no error |
+| Video decode | yes: 297 frames in 12.4 s, 0 dropped; frames change | yes: 293 frames in 12.3 s, 0 dropped; frames change | no |
+| Audio decode | **yes**: decoded audio bytes 13.8 KB → 211.9 KB; analyser peak RMS 0.32 | **no**: `mozHasAudio` false; analyser RMS 0 at the same point | no |
+| Playback | yes: first `playing` 3.3 s after Play | yes (silent): 1.3 s | no |
+| Seek to 30:00 | yes: `seeked` in 1.4 s, resumed | yes: 3.2 s, resumed | no |
+| Seek to 81:40 | yes: 0.7 s, resumed | yes: 1.2 s, resumed | no |
+| 45 s pause, then resume | yes | yes | no |
+| **Verdict** | **PASS** | **FAIL (no audio)** | **FAIL (no metadata)** |
+
+- **Safari: NOT TESTED** (no macOS). Playwright WebKit on Windows is not Safari.
+- Firefox was Playwright's Gecko build because desktop Firefox is not installed.
+
+`canPlayType`, which needs no media reads, agrees with the live results:
+
+| Type | Chrome | Gecko | WebKit |
+| --- | --- | --- | --- |
+| `video/x-matroska; codecs="avc1.640028, mp3"` (the source) | probably | **no** | probably |
+| `video/x-matroska; codecs="avc1.640028, mp4a.40.2"` (MKV, H.264 + AAC) | probably | probably | probably |
+| `video/mp4; codecs="avc1.640028, mp3"` (MP4, H.264 + MP3) | probably | probably | probably |
+| `video/mp4; codecs="avc1.640028, mp4a.40.2"` (MP4, H.264 + AAC) | probably | probably | probably |
+
+WebKit answers "probably" for the source but never loads it, so its `canPlayType` answer can't be trusted here.
+
+### Evidence for the next checkpoint (nothing was transformed)
+
+H.264 High 1080p decodes in both Chrome and Gecko, so **video re-encoding looks unnecessary**. Only the audio track, or the container around it, blocks Gecko. In the brief's order:
+
+1. **Container-only remux to MP4, keeping the MP3 audio.** Gecko reports "probably" for MP4 with H.264 and MP3. This is the smallest change and should be tried first.
+2. **Audio conversion (MP3 to AAC), keeping the H.264 video**, in MKV or MP4. All three engines report "probably".
+3. **Progressive MP4** (faststart) covers both, and is also the most likely container for Safari.
+4. **HLS or transcoding**: no evidence yet that either is needed.
+
+### HTTP range behaviour (final run, all three engines)
+
+- **Pattern.** Each open starts with `bytes=0-`, then Matroska's cue lookup at the tail (`bytes=1004404736-`, 58 KB), then data ranges. Every request is open-ended and answered 206 with a gateway-bounded `Content-Range`.
+- **Full-file requests:** 0. **Largest response:** 8,388,608 bytes, the gateway's `maxResponseBytes`.
+- **Seeks.** Seeking to 30:00 requested `bytes=329646080-`; seeking to 81:40 requested `bytes=958464000-`. Both were served in 8 MiB windows.
+- **Totals.** 31 gateway requests, 154.2 MB served, 177 MTProto `upload.getFile` reads (167 RPCs).
+  - Outcomes: 23 complete, 7 `client_closed`, 1 denied (the deliberate download probe).
+  - Per engine: Chrome 61.0 MB / 70 reads; Gecko 75.2 MB / 85 reads (it includes the audio probe's CORS requests); WebKit 17.9 MB.
+- **Earlier runs.** Four debugging runs (two Chrome full, two Chrome short) came before this one. Telegram reads across all E3 runs total about 0.35 GB, all through bounded 8 MiB windows.
+- **Gateway memory.** At most 80.2 MiB of the 256 MiB cap in the final run, and 120.4 MiB in the first run.
+
+### Boundedness and cleanup
+
+- **Pause (45 s):** 0 new browser requests and 0 gateway reads while paused. Resuming made one range request and playback continued.
+- **Close player:** the video element was removed; 0 browser gateway requests afterwards, and 0 gateway requests starting 2–10 s later.
+- **Navigating to `/movies` mid-play:** 0 browser gateway requests afterwards, 0 gateway requests starting 2–10 s later, and the in-flight range ended as `client_closed` or `complete`.
+- **A stream capability on `/download`:** 403 `forbidden`.
+
+### Renewal, live in Chrome
+
+The page clock was fast-forwarded 8m40s, which fired the real renewal timer:
+
+- 1 issuer call, and a new capability (a different token);
+- the source was swapped in place, at position 4909.07 s → 4911.77 s, and kept playing;
+- element events: `abort`, `emptied`, `loadstart`, `loadedmetadata`, `seeking`, `seeked`, `playing`.
+
+Unit tests prove the rest against the real E2 handler: renewal re-reads the session, entitlement and catalogue, and a renewal refused for signed-out, not entitled or unavailable ends playback.
+
+### Signed out (all three engines)
+
+- The page load made 0 issuer calls.
+- Play made 1 issuer call and got 401. The player showed the sign-in message and link.
+- 0 video elements were created, 0 browser requests went to the gateway, and the gateway logged 0 media requests.
+
+### Privacy and secrets
+
+- **Browser-visible responses.** 26 HTML, RSC and JS responses from the movie and `/movies` pages were checked for: the per-run secret, the channel id in both forms, the `file_unique_id`, the API hash, the gateway database URL, the service-role key, both bot tokens, and the session. Every one was absent, and no `message_id`, `file_id`, `access_hash` or `file_reference` field name appeared.
+- **Stream URL.** It carries only `/v1/movie-versions/1/stream?token=…` on the configured origin.
+- **Logs.** 0 capability tokens in the `next dev` and gateway logs, and the secret is in neither.
+- **Disk.** The per-run secret was found in 0 of 1,600 `.next` files, scanned while the run was still alive.
+- **Production build.** Built with a random stand-in secret: 0 secret values in all 27 `.next/static` files, and none of the gateway variable names, audience or route markers. Server-side hits are only in Turbopack's local caches (`.next/cache/turbopack`, `.next/dev/cache/turbopack`), as recorded in E2. They are Git-ignored and never deployed.
+
+### Tests and gates
+
+- Unit: 625 passing. New: `lib/playback/player.test.ts` and `components/movie-player.test.tsx`.
+- Database (pgTAP): 482. Catalogue and gateway integration: 56.
+- Lint: 0 errors (the one existing warning in an ignored spike script). Both typechecks and the production build pass.
+- **Mutation testing: 22 of 22 killed.** Covered: the reducer's request, denial, failure, renewal and close handling; the 401, 403 and 404 mapping; URL scheme validation; clock-skew correction; the renewal margin, inversion, floor and loop guard; the `MediaError` mapping; source detachment; the default version; the request body; credentials; and the VJ choice and empty-version rendering.
+
+### External state
+
+- Telegram content writes: 0. Reads: only bounded playback, seek and disconnect ranges, plus the reader's startup identity and channel checks.
+- Hosted catalogue writes: 0. Hosted auth: one throwaway user created and deleted.
+- On The Hunt published (version 1 ready/cleared); Fuze has media but no version; checkpoint 26; Series 0; 12 migrations.
+
+### Not done, by design
+
+No remux, transcode, HLS, download, payment or Series playback. The player stays in place: once a browser-compatible rendition exists, it plays without code changes.

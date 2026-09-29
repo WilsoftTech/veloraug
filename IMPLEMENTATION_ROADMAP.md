@@ -122,6 +122,12 @@ The first Velora UG task is reconciliation, not feature construction.
   - **Proofs.** The real gateway core accepts On The Hunt's capability. Download, another version, tampering and expiry are refused, with 0 media reads. Fuze has no version and gets no capability. The browser output contains no secret.
   - **External state.** Telegram reads and writes 0; hosted writes 0; catalogue unchanged, checkpoint 26. The obsolete GramJS session was deleted; the active mtcute session is untouched.
   - **Not built.** The player (E3). Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E2".
+- E3 real movie playback (2026-09-30): **BLOCKED — MEDIA COMPATIBILITY.**
+  - **Built.** A reusable native-`<video>` `MoviePlayer` on `/movies/[slug]`: Play requests the E2 capability, with in-place renewal that is safe under clock skew, and it cleans up on close and navigation. Signed-out Play gets the existing sign-in prompt and never reaches the gateway. Versions come from the catalogue, with a VJ choice when there are several.
+  - **Chrome 153** plays the original MKV fully: 1920×1080, 5208 s, video and audio decode, seeks to 30:00 and 81:40 resume. Renewal was proven live, delivery is bounded (8 MiB responses), and nothing private reaches the browser.
+  - **Firefox (Playwright Gecko 155)** decodes the video but not the MP3-in-Matroska audio, so it plays silently. **Playwright WebKit** never loads metadata. **Safari: NOT TESTED.**
+  - **Evidence for the next step.** Video re-encoding looks unnecessary. Try first a container-only remux to MP4 keeping the MP3, which Gecko reports "probably"; next, MP3 → AAC. Nothing was transformed.
+  - **External state.** Telegram writes 0; about 0.35 GB of bounded reads; hosted catalogue writes 0; the throwaway auth user was deleted. Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3".
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules
