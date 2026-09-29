@@ -2,11 +2,12 @@
  * Media gateway configuration from the environment (E1.2). Fails closed:
  * anything missing or malformed stops startup. Error messages name the
  * variable, never its value. All variables are server-only (none is
- * NEXT_PUBLIC_), and the Next.js application reads none of them.
+ * NEXT_PUBLIC_). The Next.js application reads only the shared token secret, to
+ * issue stream capabilities (E2: lib/playback/stream-capability.ts).
  */
 import { limitsFromEnv, type GatewayLimits } from "@/lib/media-gateway/limits";
 import { GATEWAY_DATABASE_ROLE } from "@/lib/media-gateway/resolver-sql";
-import { MIN_SECRET_BYTES } from "@/lib/media-gateway/token";
+import { parseMediaTokenSecret } from "@/lib/media-gateway/token";
 
 export interface GatewayConfig {
   host: string;
@@ -58,8 +59,8 @@ export function gatewayConfigFromEnv(env: Env): GatewayConfig {
   const port = Number(env.MEDIA_GATEWAY_PORT ?? "8787");
   if (!Number.isInteger(port) || port < 1 || port > 65535) bad.push("MEDIA_GATEWAY_PORT");
 
-  const secret = Buffer.from(required("MEDIA_GATEWAY_TOKEN_SECRET", /^[A-Za-z0-9_-]{43,512}$/), "base64url");
-  if (secret.length < MIN_SECRET_BYTES && !bad.includes("MEDIA_GATEWAY_TOKEN_SECRET")) bad.push("MEDIA_GATEWAY_TOKEN_SECRET");
+  const secret = parseMediaTokenSecret(env.MEDIA_GATEWAY_TOKEN_SECRET);
+  if (!secret) bad.push("MEDIA_GATEWAY_TOKEN_SECRET");
 
   const databaseUrl = required("MEDIA_GATEWAY_DATABASE_URL", /^postgres(ql)?:\/\/\S+$/);
   if (databaseUrl && !isRestrictedDatabaseUrl(databaseUrl)) bad.push("MEDIA_GATEWAY_DATABASE_URL");
@@ -86,11 +87,11 @@ export function gatewayConfigFromEnv(env: Env): GatewayConfig {
     bad.push("MEDIA_GATEWAY_* limits");
   }
 
-  if (bad.length > 0 || !limits) throw new GatewayConfigError(bad);
+  if (bad.length > 0 || !limits || !secret) throw new GatewayConfigError(bad);
   return {
     host,
     port,
-    tokenSecret: new Uint8Array(secret),
+    tokenSecret: secret,
     databaseUrl,
     sessionFile,
     allowBotLogin,

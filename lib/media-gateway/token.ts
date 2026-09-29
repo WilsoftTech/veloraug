@@ -48,6 +48,17 @@ export const MIN_SECRET_BYTES = 32;
 
 const mac = (secret: Uint8Array, signingInput: string) => createHmac("sha256", secret).update(signingInput).digest();
 
+/**
+ * Decodes the shared signing key (`MEDIA_GATEWAY_TOKEN_SECRET`: base64url, at
+ * least 32 bytes). Used by the gateway and the application's issuer (E2), so
+ * both read the same value the same way. Null when absent or malformed.
+ */
+export function parseMediaTokenSecret(value: string | undefined): Uint8Array | null {
+  if (value === undefined || !/^[A-Za-z0-9_-]{43,512}$/.test(value)) return null;
+  const bytes = Buffer.from(value, "base64url");
+  return bytes.length >= MIN_SECRET_BYTES ? new Uint8Array(bytes) : null;
+}
+
 function assertSecret(secret: Uint8Array) {
   if (!(secret instanceof Uint8Array) || secret.length < MIN_SECRET_BYTES) throw new Error("media token secret too short");
 }

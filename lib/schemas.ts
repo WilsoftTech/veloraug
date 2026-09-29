@@ -58,6 +58,15 @@ export const recordSearchSchema = z.strictObject({
 /** Identifies one history row to remove. The user comes from the session, never from here. */
 export const searchHistoryKeySchema = z.strictObject({ query: searchQuery, scope: searchScope });
 
+/**
+ * A stream-capability request (E2): the internal movie-version id and nothing
+ * else. Strict, so Telegram identifiers, sizes, types, a user id or an earlier
+ * token are refused rather than ignored. Identity comes from the session.
+ */
+export const streamTokenRequestSchema = z.strictObject({
+  movieVersionId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+});
+
 export type FieldErrors = Record<string, string[] | undefined>;
 
 export function fieldErrors(error: z.ZodError): FieldErrors {

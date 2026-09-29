@@ -36,17 +36,35 @@ describe("media gateway boundary", () => {
     }
   });
 
-  it("is never imported by the Next.js application", () => {
+  /**
+   * E2 exception: the application's stream-capability issuer (lib/playback)
+   * shares the token contract and the rate-limit primitive, so there is one
+   * signing implementation. Both are pure (next test); nothing else crosses.
+   */
+  const SHARED_WITH_ISSUER = ["@/lib/media-gateway/token", "@/lib/media-gateway/limits"];
+
+  it("is never imported by the Next.js application, except the shared token contract in lib/playback", () => {
     const appFiles = ["app", "components", "lib", "types", "proxy.ts"].flatMap((entry) => {
       const path = join(ROOT, entry);
       if (!existsSync(path)) return [];
       return statSync(path).isDirectory() ? files(path, /\.(ts|tsx|mts)$/) : [path];
     });
     for (const file of appFiles.filter((f) => !rel(f).startsWith("lib/media-gateway/"))) {
+      const issuer = rel(file).startsWith("lib/playback/");
       for (const specifier of importsOf(file)) {
+        if (issuer && SHARED_WITH_ISSUER.includes(specifier)) continue;
         expect(/media-gateway|services\/|@mtcute|^postgres$/.test(specifier), `${rel(file)} imports ${specifier}`).toBe(false);
       }
     }
+  });
+
+  it("keeps the modules shared with the issuer free of anything but Node crypto and the gateway error model", () => {
+    const allowed: Record<string, string[]> = {
+      "lib/media-gateway/token.ts": ["node:crypto"],
+      "lib/media-gateway/limits.ts": ["@/lib/media-gateway/errors"],
+      "lib/media-gateway/errors.ts": [],
+    };
+    for (const [file, imports] of Object.entries(allowed)) expect(importsOf(join(ROOT, file)), file).toEqual(imports);
   });
 
   it("keeps MTProto and Postgres packages out of the application's dependencies", () => {

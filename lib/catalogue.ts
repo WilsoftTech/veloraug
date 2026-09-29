@@ -325,6 +325,20 @@ export async function findTitles(kind: CatalogueKind, by: "id" | "tmdb_id", ids:
   return data.map(toSeriesSummary);
 }
 
+/**
+ * Whether one movie version is publicly playable now (E2 stream eligibility).
+ * The public read policy decides it: the row is visible only for a published
+ * movie, a ready and rights-cleared version, and an active VJ. A ready version
+ * always links movie-bot media (movie_versions_ready_media_check and its foreign
+ * key), so visibility also proves the media exists. Nothing private is read.
+ * The media gateway still re-checks publication and its own transport rules.
+ */
+export async function isMovieVersionPlayable(versionId: number): Promise<boolean> {
+  const { data, error } = await catalogueClient().from("movie_versions").select("id").eq("id", versionId).maybeSingle();
+  if (error) fail("movie version eligibility", error);
+  return data !== null;
+}
+
 // ---------------------------------------------------------------------------
 // Details
 // ---------------------------------------------------------------------------
