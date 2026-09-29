@@ -114,6 +114,14 @@ The first Velora UG task is reconciliation, not feature construction.
   - **Tests.** 66 pgTAP and 22 integration tests; 17 of 20 database mutants killed, and the 3 survivors are equivalent to schema constraints.
   - **External writes.** Telegram reads and writes 0. Hosted writes: the migration and the login step only. Catalogue unchanged, checkpoint 26, Series untouched.
   - Record: `docs/PHASE_C_INGESTION_DESIGN.md`, "E1.2A".
+- E2 entitlement and stream capability issuing (2026-09-30): **PASS.**
+  - **Access policy (product decision, 2026-09-30).** Until Phase F, every signed-in user may stream published movies; signed-out users are denied. It lives only in `hasStreamingEntitlement`, which Phase F replaces with the subscription check.
+  - **Boundary.** `canStreamMovieVersion` checks id, then session, then entitlement, then catalogue. Eligibility reuses the public read contract (a ready version always has media), so no migration was needed.
+  - **Endpoint.** `POST /api/media/stream-token` takes `{ movieVersionId }` only, uses the Supabase session, and returns `{ streamUrl, expiresAt }` with `no-store`. Every unplayable version gets the same 404. Same-origin, JSON, a 256-byte body limit, a strict schema, and 30 requests per user per minute.
+  - **Capability.** The E1.2 format and signer, unchanged. It is `op = stream` only, bound to version and user, and lasts 10 minutes. Renewal is the same request again, with no refresh token. The gateway origin is configuration only: HTTPS, or loopback HTTP outside production.
+  - **Proofs.** The real gateway core accepts On The Hunt's capability. Download, another version, tampering and expiry are refused, with 0 media reads. Fuze has no version and gets no capability. The browser output contains no secret.
+  - **External state.** Telegram reads and writes 0; hosted writes 0; catalogue unchanged, checkpoint 26. The obsolete GramJS session was deleted; the active mtcute session is untouched.
+  - **Not built.** The player (E3). Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E2".
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules
