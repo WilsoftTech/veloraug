@@ -829,3 +829,171 @@ A stream-copy failure **stops**; it never falls back to transcoding.
 ### External state
 
 Documentation only: Telegram 0, hosted 0, no storage created.
+
+
+## E3.3 — Telegram MP4 playback proof (2026-09-30)
+
+**Result: `E3.3 TELEGRAM MP4 PLAYBACK PROOF: PASS`.** Starting HEAD `c3477f0` (after E3.2A).
+
+On The Hunt (VJ Ice P) now plays from a browser-ready fast-start MP4 in the Telegram Movies channel, through the dedicated MTProto reader, the Media Gateway and the unchanged E2 capability. Chrome and Firefox both have video, audio and seeking. The original MKV message stays in the channel, unlinked.
+
+### 1. Source and normalization (Class 2)
+
+- **Tooling.** FFmpeg and ffprobe 9.0.2, the gyan.dev essentials build, as in E3.1. The SHA-256 matched the published checksum. It was unpacked in the session scratch directory only.
+- **Source.** `On The Hunt.VJ ICE P.2026.mkv`, 1,004,462,878 bytes, SHA-256 `1d0dcd00256adc0c…`, mtime 2026-05-31. This is identical to E3.1, and it was unchanged after every step (size, mtime and full hash re-checked).
+- **Classification.** Matroska, one H.264 High@4.0 stream (8-bit yuv420p, progressive, 1920×1080, 24 fps, AVCC) and one MP3 stream (stereo, 44.1 kHz, 128 kb/s). No subtitles or attachments, and a clean audio decode. That is **Class 2**.
+- **Command.** `-map 0:v:0 -map 0:a:0 -c copy -movflags +faststart -f mp4`, with no encoding and no warnings. Output: 1,007,441,962 bytes (+0.30%, the E3.1 size). A second run took 3.7 s and was byte-identical (SHA-256 `c475dcfc…`).
+- **Identity.** The new artifact was verified directly, not taken from the E3.1 report:
+  - the H.264 payload, Annex B stream and 49-byte avcC are identical (`b9232513…`, `ed50271d…`);
+  - all 124,997 video packets match in order, size and MD5, as do all 199,380 MP3 packets (`ba605f2a…`);
+  - duration, resolution, frame rate, profile/level, sample rate and channels are unchanged;
+  - the layout is `ftyp@0 moov@32 free mdat@5,335,549`, so it is fast-start.
+- **Staging.** The derivative was placed in `G:\Movies\.velora-renditions\`. That is the only place the Bot API container can read, through its single read-only path map. It stayed out of Git and never replaced the master, and it was **deleted** after the proof.
+
+### 2. Upload (one `sendDocument`) and recovery
+
+- **Preconditions.**
+  - An isolated journal scanned only the staging folder.
+  - An exact-fingerprint dry run selected 1 of 1 and passed preflight to the configured Movies channel via the local Bot API. The source bytes re-fingerprinted exactly.
+  - Movies bot identity and recovery access were OK. Series is not on the local Bot API.
+  - Hosted: 12 migrations, checkpoint 26, no unresolved upload, new fingerprint `absent`.
+  - The runtime gate was set only in that one command's environment.
+- **Reviewer hold.** With a journal that knows the MKV, the planner classifies this file `same_title_same_vj` and holds it. That replacement decision was made explicitly by this checkpoint's authorization, and the isolated journal carried it out. The server still enforces one row per fingerprint.
+- **Outcome.** `sendDocument` started at 19:24:44Z. The client got **`uncertain` / `network_error` at 505 s**, and nothing was retried.
+- **Cause (found and proven).**
+  - The pinned Bot API source sets `HttpServer.h: IDLE_TIMEOUT = 500` seconds on inbound HTTP connections, and no option overrides it.
+  - The server dropped the idle client connection while it kept uploading to Telegram at about 0.45 MB/s; the file closed at 19:58:59Z.
+  - The Docker loopback forwarder was ruled out. A local probe held headers for 720 s through the same `127.0.0.1` port forwarding, and it succeeded with and without TCP keepalive.
+  - **Consequence for ingestion:** any upload whose Telegram leg takes longer than 500 s always ends `uncertain` on the client. On this uplink that is roughly every file over 225 MB. The recovery protocol settles it without a resend. A future checkpoint may raise the constant in the pinned build or accept recovery as the normal path.
+- **Recovery (existing marker protocol).**
+  - `resume --server` planned exactly one `reconcile`.
+  - Execution posted marker **28** to the Movies channel. The interval (26, 28) contained only **message 27**, which was forwarded once to the recovery group; the copy's deletion was then requested.
+  - The document, 1,007,441,962 bytes, matched the exact `velora-src` token.
+  - `ingest_upload_record` then recorded it. Event 3 is `uploaded` with attempt count **1**, media 3 is `document`, `video/mp4`, and the checkpoint is **28**.
+  - `sendDocument` calls: **1** in total.
+
+### 3. Media mapping and cutover
+
+- **Model.** The existing structures are reused, with no new schema. `movie_versions.telegram_media_id` (unique, FK to `private.telegram_media`) points at exactly one file. The MP4 has its own `telegram_media` row and its own uploader `ingestion_events` row. No migration was needed.
+- **Evidence.** `evaluate --execute` recorded the MP4 event's parse and 20 candidates through the worker RPC. The server derived `matched`: a unique score-1 candidate, TMDB 1428857, and VJ Ice P resolved.
+- **Proof before any database change.** The real gateway HTTP core and mtcute reader were pointed at a fixed locator for message 27, with the catalogue untouched.
+  - The reader's identity check passed: unique file id, size and `video/mp4`.
+  - These ranges were **byte-equal** to the local MP4, each 206 `video/mp4`: `0-65535`, `0-` (8 MiB), middle 1 MiB, unaligned `123456789-124505364`, tail 64 KiB, `-65536`, and an EOF clamp.
+  - An unsatisfiable range got 416 `bytes */1007441962`.
+  - Totals: 16 reads, 17 RPCs, 10.7 MB.
+- **Cutover.** One owner transaction, run as `postgres` with `psql -X -v ON_ERROR_STOP=1` (script SHA-256 `4db19a92…`, Git-ignored):
+  - It approves 1428857 for the MP4 event.
+  - It locks the version and both events, then asserts all of the following:
+    - version 1 is `on-the-hunt-2026` / `vj-ice-p`, ready and cleared, on the MKV media;
+    - the old media is message 23 (MKV), and the new media is message 27, `document`, `video/mp4`, 1,007,441,962 bytes, in the same registered Movies channel;
+    - the approved TMDB id and resolved VJ are the version's own;
+    - the new media is not linked to any version.
+  - It swaps `telegram_media_id` 1 → 3 (exactly one row) and marks event 3 `published`.
+  - The same script was first run against hosted **ending in ROLLBACK** (all guards passed, nothing kept), then committed at 20:03:08Z.
+  - The swap is a single row update, so there was never a published state pointing at missing media.
+- **Rollback (prepared, not used).** A guarded owner script swaps 3 → 1 and returns event 3 to `matched`, with the same assertions. The MKV message is intact:
+  - the reader still resolves message 23 to its recorded identity;
+  - its head, middle and tail 64 KiB are byte-equal to the local master.
+- **Old event.** The MKV event 1 stays `published` as history. A publication replay for it now fails closed with `catalogue_publication_inconsistent`, which is correct for a superseded rendition.
+- **Gateway defect fixed.** The reader cached resolved documents per movie version only. After a media cutover, a warm gateway would have served the **old file's bytes** under the new locator (new size and type) for up to 10 minutes. The cache is now valid only for the exact locator identity: version, channel, message, unique file id, size and type. In-flight resolutions are shared per identity. The fix is `locatorIdentity` in `lib/media-gateway/ports.ts`, with a unit test; 7 of 7 mutants were killed. In this proof the gateway started after the cutover, so the defect never showed.
+
+### 4. Browser proof (real `/movies/on-the-hunt-2026` player)
+
+**Setup.**
+- The gateway ran from image `velora-media-gateway:e3.3` (HEAD plus the fix), read-only, with 256 MiB and 1 CPU, on the existing mtcute session (no new login) and the restricted database role.
+- `next dev` ran on `127.0.0.1:3000` with the dev filesystem cache off.
+- One per-run token secret was generated in memory and given only to those two processes and the harness's negative-test signer.
+- One throwaway hosted auth user per run signed in through `/sign-in` and was deleted afterwards (lookup 404).
+- Browsers were Google Chrome 154.0.8037.59 and Playwright Firefox 155.0 (Gecko, the E3/E3.1 build), driven by scratch Playwright 1.63.
+
+| | Chrome 154 | Firefox 155 (Gecko) |
+| --- | --- | --- |
+| Media requests before Play | 0 (0 issuer, 0 gateway) | 0 |
+| On Play | 1 issuer call → 200; `{ streamUrl, expiresAt }` on the gateway origin | same |
+| Metadata | `bytes=0-` only; 1920×1080, 5208.29 s | `bytes=0-` only; same |
+| Video | 211 frames in 8.8 s, 0 dropped | 217 frames in 9.0 s, 0 dropped |
+| Audio | decoded audio bytes 15,047 → 156,317 → 465,608 across the run | `mozHasAudio` **true** (the MKV was false). A separate CORS probe element with a fresh capability had a Web Audio peak RMS of **0.323** (E3.1: 0.33). The player's own element is no-cors, so the analyser only works on the probe. |
+| Pause | 20 s: 0 requests, 0 reads | 60 s: 0 requests started, 0 reads (the in-flight window was closed by the browser at `pause()`) |
+| Seek 15:00 / 30:00 / 81:40 | resumed; `bytes=178683904-` / `334200832-` / `961609728-` (then two more ranges) | resumed; `bytes=178683904-` / `334200832-` / `961609728-` |
+| Renewal (page clock +8m40s) | exactly 1 issuer call (200), new token, position 4903.0 → 4904.8 s, playing; 0 further calls in 45 s | exactly 1 (200), new token, 4901.8 → 4903.3 s, playing; 0 further in 45 s |
+| Close player | 0 video elements, 0 requests afterwards, 0 gateway requests afterwards | same |
+| Navigate to `/movies` mid-play | 0 requests afterwards, 0 gateway requests afterwards | same |
+| **Verdict** | **PASS** | **PASS** |
+
+**Range evidence (sanitized).**
+- Every gateway response was `206`, `Content-Type: video/mp4`, with `Content-Length` ≤ **8,388,608**, the gateway's unchanged `maxResponseBytes`.
+- Examples:
+  - `bytes=0-` → `bytes 0-8388607/1007441962`, length 8,388,608;
+  - `bytes=178683904-` → `bytes 178683904-187072511/1007441962`;
+  - `bytes=961609728-` → `bytes 961609728-969998335/1007441962`.
+- Every request carried a Range header and a token. Full-file requests: **0**.
+- Aborted requests are the browser cancelling open-ended windows it no longer needs; the gateway logged them `client_closed`.
+
+**Fast start.**
+- Metadata came from the head of the file (`bytes=0-`, 8–16 MiB) with **no tail fetch**. The MKV in E3 needed `bytes=1004404736-` for its cues.
+- Each seek needed one open-ended range at the target. This matches E3.1's local-server pattern exactly, now served from Telegram.
+
+**Signed out (both engines).**
+- Page load: 0 issuer and 0 gateway requests.
+- Play: 1 issuer call → 401, the sign-in message and link, 0 video elements, 0 gateway requests, and 0 gateway log entries.
+
+### 5. Negative security
+
+| Case | Result |
+| --- | --- |
+| App capability, control | 206; lifetime 600 s; response keys `expiresAt`, `streamUrl` only |
+| Missing / malformed / tampered signature / tampered claims | 401 |
+| Expired | 401 `authorization_expired` |
+| Token for another version | 403 (`wrong_version`) |
+| Stream token on `/download` | 403 (`wrong_operation`) |
+| Download-operation token | 501 (reserved, not implemented) |
+| Unavailable version 2 (no published version; Fuze has none) | 404 |
+| Extra query parameter (`message_id`) | 400 |
+| Issuer: version 2 / unknown / extra body field | 404 / 404 / 400 |
+
+- **Gateway.** 10 denials logged, with 0 Telegram reads or RPCs on any denial. On The Hunt's publication state was not changed to test anything.
+- **Privacy.** The checked values were the per-run secret, the channel id (both forms), both media `file_unique_id` and `file_id` values, the API hashes, the service-role key, both database URLs, all bot tokens and the reader session.
+  - **Browser responses:** 47 in Chrome and 29–30 in Firefox, all HTML, RSC, JS and JSON, with **0** of those values. The field-name scan matched only `messageId`, which is `@supabase/auth-js`'s OTP reply field (an SMS message id) in the client bundle, not Telegram data.
+  - **Logs and disk:** the `next dev` and gateway logs held **0** issued tokens, **0** secrets and **0** of those values, and **0** of 1,592 `.next` files held the per-run secret.
+
+### 6. Resources
+
+| | This proof | E1.2 / E3 bounds |
+| --- | --- | --- |
+| Gateway memory (256 MiB cap) | peak **74.3 MiB** (combined Chrome + Firefox run) | 76.5 MiB (E1.2), 80.2 MiB (E3) |
+| Largest response | 8,388,608 B | 8 MiB `maxResponseBytes` (unchanged) |
+| Combined run | 34 gateway requests (10 denials), 128.1 MB served, 155 `upload.getFile` reads, 133 RPCs | E3: 31 requests, 154.2 MB, 177 reads |
+| Firefox-only rerun (60 s pause, audio probe) | 26 requests, 98.2 MB, 113 reads | |
+
+No limit was changed and no regression was found.
+
+### 7. External state
+
+| | Count |
+| --- | --- |
+| **Telegram Movies writes** | `sendDocument` **1** (message 27, the MP4); recovery marker `sendMessage` **1** (message 28) |
+| **Recovery group writes** | `forwardMessage` 1; `deleteMessage` 1 (best effort, the forwarded copy) |
+| **Telegram Movies reads** | the recovery probe; about 0.26 GB of bounded gateway reads across the pre-cutover proof, five harness runs and the MKV check. One Firefox run's gateway log was overwritten; that run's reads are estimated at ≤ 25 MB. |
+| **Telegram Series** | reads 0, writes 0 |
+| **Hosted database** | migrations **0** (still 12). Worker: `ingest_upload_start` 1, `ingest_upload_record` 1, checkpoint advance 26 → 28 (recovery), `ingest_record_evaluation` 1 (20 candidates). Owner: 1 committed cutover transaction (approval, version 1 media 1 → 3, event 3 published) and 1 rehearsal rolled back. Catalogue: 0 other writes. |
+| **Hosted auth** | 5 throwaway users, each created and deleted, one per harness run (three of the five stopped early on harness bugs and were rerun). All confirmed deleted; auth users 1, profiles 1. |
+| **Media** | derivative created and **deleted**; master unchanged; old Telegram MKV (message 23) **retained**, intact, unlinked; new Telegram MP4 (message 27) **retained**, **active for playback**. |
+| **Unchanged** | Fuze: event 2 `received`, media 2 (message 25), no version. Series: 0 rows. |
+
+The Bot API container, which had been stopped before this checkpoint, was started for the upload and stopped again.
+
+### 8. Tests and gates
+
+- **Unit:** 634 passing (9 new, for `locatorIdentity`).
+- **Database:** pgTAP 482, with no schema errors from `db lint --local`.
+- **Catalogue and gateway integration:** 56.
+- **Static checks:** lint 0 errors (the pre-existing warning in an ignored spike script), and both the application and gateway typechecks pass.
+- **Build:** the production build passes, run with a random stand-in secret.
+- **Secret scan:** 22 `.env.local` secret values and the reader session were checked against tracked files, the diff, `.next/static` (27 files), `.next/server` (377) and the evidence logs. There were 0 secret hits; the only matches were public bot usernames and a file path already in the docs.
+
+### 9. Open items
+
+- **Pre-launch gate: a real Safari / iOS device plays MP3-in-MP4.** If it fails, MP3 sources become Class 3 (MP3 → AAC, video copied).
+- **Bot API 500 s idle timeout.** Decide whether to raise `IDLE_TIMEOUT` in the pinned build or keep recovery as the normal path for long uploads.
+- **Old MKV (message 23) and Fuze's MKV.** Retention or cleanup needs a separately approved checkpoint.
+- **Replacement command.** The replacement was a guarded one-off owner script. If more legacy titles need it, a reusable owner command (a migration) should replace the script.

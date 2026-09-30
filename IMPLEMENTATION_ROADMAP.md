@@ -153,6 +153,16 @@ The first Velora UG task is reconciliation, not feature construction.
   - **Ingestion.** Normalization classes 1–5 are active: none, remux (stream copy with an identity check), audio only (not built), stop, and review.
   - **Safari/iOS.** Not tested; a real Apple-device test is a pre-launch gate.
   - **Not introduced:** R2, HLS and player libraries. Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.2A".
+- E3.3 Telegram MP4 playback proof (2026-09-30): **PASS.** On The Hunt now plays from a fast-start MP4 in the Telegram Movies channel.
+  - **Normalization.** Class 2 remux with stream copy only. H.264 and MP3 are packet-identical to the source, `moov` precedes `mdat`, and the file is 1,007,441,962 bytes. The temporary derivative was deleted afterwards.
+  - **Upload.** Exactly **1** `sendDocument`. The client got `uncertain` at 505 s, because the pinned Bot API hard-codes a 500 s idle timeout on HTTP connections (a new ingestion finding). It was not retried. The existing marker protocol recovered **message 27** (marker 28, checkpoint 28, attempt count 1).
+  - **Cutover.** Before any database change, the real reader and gateway core read message 27 byte-equal to the local MP4 at the beginning, middle, tail and an unaligned range. One guarded owner transaction, rehearsed first with ROLLBACK, then moved version 1 from media 1 (MKV, message 23) to media 3 (MP4). No migration was needed. A rollback script is ready.
+  - **Gateway fix.** The reader's document cache is now keyed by the full locator identity, so a warm gateway can never serve the replaced file's bytes after a cutover.
+  - **Browsers.** Chrome 154 and Firefox 155 (Gecko) both play video and audio (Gecko Web Audio RMS 0.323) and seek to 15:00, 30:00 and 81:40. Metadata needs only `bytes=0-`, with no tail fetch. Every response was 206 `video/mp4` and ≤ 8 MiB, with 0 full-file requests and 0 reads while paused. Close and navigation stop all activity.
+  - **E2.** Renewal made exactly 1 issuer call with position preserved and no loop. Signed-out access is blocked. All negative-security cases were denied with 0 Telegram reads, and nothing private reached the browser or the logs.
+  - **Resources.** Gateway peak 74.3 MiB of its 256 MiB cap.
+  - **External state.** Telegram Movies writes: 1 document and 1 marker, plus 1 forward and 1 delete in the recovery group. Series 0. Hosted: 0 migrations and 1 cutover. The old MKV is retained and unlinked; Fuze is unchanged. Throwaway auth users were created and deleted.
+  - **Next:** the real Safari/iOS device test (a pre-launch gate), then roadmap E3 progress persistence (bounded, throttled, idempotent writes). Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.3".
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules
