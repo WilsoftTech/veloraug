@@ -10,7 +10,7 @@
  * It only ever comes from the catalogue resolver.
  */
 export interface MediaLocator {
-  /** The internal movie-version id this location was resolved for (the reader's cache key). */
+  /** The internal movie-version id this location was resolved for (the reader's cache slot). */
   movieVersionId: number;
   /** Telegram channel id in Bot API form (-100…), as stored in the catalogue. */
   chatId: string;
@@ -19,6 +19,16 @@ export interface MediaLocator {
   fileUniqueId: string;
   fileSize: number;
   mimeType: string | null;
+}
+
+/**
+ * Everything that identifies the file behind a locator. A cached resolution is
+ * reused only for an identical identity, so a version whose media is replaced
+ * (a rendition cutover, E3.3) is resolved afresh on its next read and never
+ * served from the previous file. Server-internal, like the locator: never logged.
+ */
+export function locatorIdentity(locator: MediaLocator): string {
+  return JSON.stringify([locator.movieVersionId, locator.chatId, locator.messageId, locator.fileUniqueId, locator.fileSize, locator.mimeType]);
 }
 
 export interface CatalogueMediaResolver {

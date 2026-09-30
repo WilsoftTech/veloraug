@@ -31,7 +31,7 @@ import { Long, MemoryStorage, TelegramClient, tl } from "@mtcute/node";
 const { RpcError } = tl;
 import { GatewayError } from "@/lib/media-gateway/errors";
 import type { GatewayLogger } from "@/lib/media-gateway/log";
-import type { MediaLocator, MediaReader, ReaderReadiness } from "@/lib/media-gateway/ports";
+import { locatorIdentity, type MediaLocator, type MediaReader, type ReaderReadiness } from "@/lib/media-gateway/ports";
 
 export interface MtcuteReaderConfig {
   apiId: number;
@@ -70,6 +70,8 @@ interface CachedDocument {
   location: tl.RawInputDocumentFileLocation;
   dcId: number;
   fetchedAt: number;
+  /** locatorIdentity of the locator this document was resolved and checked for. */
+  identity: string;
 }
 
 /** Bot API channel id (-100XXXXXXXXXX) → MTProto channel id. */
@@ -96,8 +98,11 @@ export function createMtcuteReader(config: MtcuteReaderConfig): MediaReader & { 
   let client: TelegramClient | null = null;
   let channel: tl.RawInputChannel | null = null;
   let recheck: ReturnType<typeof setInterval> | null = null;
+  // One slot per movie version (bounded by the catalogue), valid only for the
+  // exact locator identity it was checked against. In-flight resolutions are
+  // shared per identity, so a replaced file is never read under the new locator.
   const documents = new Map<number, CachedDocument>();
-  const resolving = new Map<number, Promise<CachedDocument>>();
+  const resolving = new Map<string, Promise<CachedDocument>>();
 
   const setState = (next: ReaderState) => {
     if (next !== state) logger.info({ event: "reader_state", state: next });
@@ -239,17 +244,19 @@ export function createMtcuteReader(config: MtcuteReaderConfig): MediaReader & { 
       location: { _: "inputDocumentFileLocation", id: document.id, accessHash: document.accessHash, fileReference: document.fileReference, thumbSize: "" },
       dcId: document.dcId,
       fetchedAt: Date.now(),
+      identity: locatorIdentity(locator),
     };
   }
 
   async function documentFor(locator: MediaLocator, signal: AbortSignal, refresh: boolean): Promise<{ doc: CachedDocument; rpcs: number }> {
+    const identity = locatorIdentity(locator);
     const cached = documents.get(locator.movieVersionId);
-    if (!refresh && cached && Date.now() - cached.fetchedAt < cacheTtl) return { doc: cached, rpcs: 0 };
-    let pending = resolving.get(locator.movieVersionId);
+    if (!refresh && cached && cached.identity === identity && Date.now() - cached.fetchedAt < cacheTtl) return { doc: cached, rpcs: 0 };
+    let pending = resolving.get(identity);
     if (!pending) {
       // Concurrent readers share one resolution; it is not tied to any single request's signal.
-      pending = resolveDocument(locator, new AbortController().signal).finally(() => resolving.delete(locator.movieVersionId));
-      resolving.set(locator.movieVersionId, pending);
+      pending = resolveDocument(locator, new AbortController().signal).finally(() => resolving.delete(identity));
+      resolving.set(identity, pending);
     }
     const doc = await abortable(pending, signal);
     documents.set(locator.movieVersionId, doc);
