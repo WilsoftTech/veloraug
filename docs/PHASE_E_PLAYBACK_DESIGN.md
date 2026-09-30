@@ -457,3 +457,274 @@ Where that file is stored, whether it replaces or sits beside the original in Te
 - The 1 GB Candidate A file, the packet lists and the FFmpeg zip were deleted after the proof. No media file remains in the scratch directory, and none was ever in the repository.
 - Kept in the session scratch directory: the FFmpeg binaries, the harness scripts and the logs.
 - The repository changed only in documentation (this record and the roadmap).
+
+## E3.2 — Production media storage and delivery architecture (2026-09-30)
+
+**Result: `E3.2 PRODUCTION MEDIA ARCHITECTURE: DECIDED` — Hybrid "B-prime".**
+
+- Playback is served from **private Cloudflare R2**: one browser-canonical MP4 per movie version, through short-lived presigned URLs issued by the existing E2 boundary.
+- **Local masters are authoritative.**
+- **Telegram** keeps an **archive-only** copy of each original, off the playback path.
+- The **Media Gateway leaves the production playback path.** Its code stays as the archive-restore reader and as a documented fallback.
+
+Starting HEAD `c8c1928`. This is a design decision. No storage was created, nothing was uploaded, and no runtime code changed.
+
+### 1. What Model A already is (current implementation)
+
+Model A is not a sketch; it is built and tested:
+
+| Piece | Where | State |
+| --- | --- | --- |
+| Dedicated MTProto reader (mtcute 0.32.3); identity, channel and `other`-only rights asserted at startup; one warm persistent session, re-persisted atomically | `services/media-gateway/mtcute-reader.mts` | E1.2 PASS |
+| Range planner (1 KiB-aligned `upload.getFile`, ≤ 1 MiB, one window) | `lib/telegram/mtproto-range.ts` | E1.1 byte-equal |
+| HTTP core: token → limits → readiness → publication → Range → bytes | `lib/media-gateway/server.ts` | E1.2 PASS |
+| Concurrency: global read semaphore, read-ahead of 2, per-subject and per-IP stream and rate limits, request and idle timeouts, 8 MiB response cap | `lib/media-gateway/limits.ts`, `pump.ts` | E1.2 and E3 proven |
+| Cancellation and backpressure (drain, abort, and cancel in-flight reads on disconnect) | `pump.ts` | E3: 0 reads after close or navigation |
+| HMAC capability (`stream` ≠ `download`, version- and user-bound) | `lib/media-gateway/token.ts` | E1.2 and E2 |
+| Least-privilege database resolver: the `velora_media_gateway` role can execute exactly one function | migration 12 | E1.2A PASS |
+| Publication re-checked on **every** request | `server.ts` step 5 | E1.2 and E2 |
+| E2 entitlement and issuer, native player, renewal | `lib/playback/*`, `components/movie-player.tsx` | E2 PASS; E3 working in Chrome |
+
+- **Size:** about 1,260 lines of gateway core, 555 of adapters, 1,220 of gateway tests, an 80-line range mapper, a 250-line issuer and a 430-line player.
+- **Deployment needs:** a long-running container (256 MiB was enough) that holds the MTProto session file as a secret volume, the restricted database login, the reader bot's credentials, and a public HTTPS origin.
+- **Operations:** session custody, reader re-authentication, flood waits, Telegram availability, and scaling the gateway's bandwidth.
+
+### 2. Providers (researched 2026-09-30, official pages; facts, not estimates)
+
+| | Cloudflare R2 | Backblaze B2 | Wasabi | Bunny Storage + CDN |
+| --- | --- | --- | --- | --- |
+| Storage | $0.015/GB-month Standard; $0.01 Infrequent Access | $6.95/TB-month | $7.99/TB-month, **minimum 1 TB billed** | $0.01/GB (1 region) up to $0.025 (3 regions) |
+| Egress | **free** (all classes) | free up to 3× stored per month, then **$0.01/GB**; free to partner CDNs | "free" only while **monthly egress ≤ active storage**; persistent excess → "may limit or suspend" | storage→Bunny CDN free; CDN **$0.06/GB Middle East & Africa**, $0.01 EU/NA; Volume network $0.005/GB (10 PoPs) |
+| Requests | Class A $4.50/M, Class B $0.36/M (Standard); 1M A and 10M B free | A, B and C free; D $0.004/10k | none | none |
+| Minimum duration | none (Standard); 30 days (IA) | none | **90 days**, charged if deleted early | $1/month minimum |
+| S3 API / presigned | yes; presigned 1 s–7 days, **S3 endpoint only** (not custom domains) | yes | yes | not stated on the pricing page; CDN token auth (SHA256, expiry, optional IP binding) |
+| Range | yes (plus conditional headers) | yes (S3 API) | yes (S3 API) | yes (CDN) |
+| CORS | bucket CORS rules | yes | yes | yes |
+| Private buckets | yes | yes | yes | yes |
+| Data location | wnam, enam, weur, eeur, apac, oc: **no Africa** | account-bound region (US or EU) | no Africa region | per-region choice |
+| Serving to Uganda | requests enter Cloudflare's network, which lists a **Kampala** PoP (also Nairobi, Mombasa, Kigali, Dar es Salaam) | direct from the US or EU | direct from its region | edge PoPs; Africa rate applies |
+
+- **Cloudflare terms.** Outside Enterprise, video must be served through its paid services, such as the Developer Platform (which includes R2), Images or Stream. **R2-origin video is inside the terms.** Proxying a self-hosted gateway through the plain CDN for video is not.
+- **Hetzner (Model A host).** EU cloud includes 20 TB per server; overage is **€1 ($1.20)/TB**; ingress is free. CX33 (4 vCPU, 8 GB) is **€8.49/month** after 15 June 2026. US and Singapore include only 1 and 0.5 TB.
+- **Telegram.** The API terms don't address using Telegram as a media host or CDN, and they reserve the right to cut off API access. That is **an unresolved risk**, not a known violation. Telegram publishes no per-GB price or throughput guarantee for bots.
+
+### 3. Cost model
+
+All figures are USD per month. Storage uses the rates above with free tiers ignored. The **size basis** is decimal TB.
+
+**Storage only:**
+
+| Movies × avg size | TB | R2 | B2 | Wasabi | Bunny (1 region) |
+| --- | --- | --- | --- | --- | --- |
+| 100 × 0.7 / 1.0 / 1.5 GB | 0.07 / 0.10 / 0.15 | 1.05 / 1.50 / 2.25 | 0.49 / 0.70 / 1.04 | 7.99 (1 TB minimum) | 0.70 / 1.00 / 1.50 |
+| 1,000 × 0.7 / 1.0 / 1.5 GB | 0.70 / 1.00 / 1.50 | 10.50 / 15.00 / 22.50 | 4.87 / 6.95 / 10.43 | 7.99 / 7.99 / 11.99 | 7.00 / 10.00 / 15.00 |
+| 5,000 × 0.7 / 1.0 / 1.5 GB | 3.5 / 5.0 / 7.5 | 52.50 / 75.00 / 112.50 | 24.33 / 34.75 / 52.13 | 27.97 / 39.95 / 59.93 | 35.00 / 50.00 / 75.00 |
+
+Model B keeps the original in Telegram, which has no direct charge, **not** in R2, so R2 holds one copy (the MP4, about +0.3%). If originals were also kept in R2, the R2 column would double (or cost +$0.01/GB in Infrequent Access).
+
+**Delivery only, per monthly playback traffic:**
+
+| Traffic | R2 (egress $0; Class B worst case at 1 request per MiB) | B2 direct (1 TB stored, so 3 TB free) | Bunny CDN, Africa | Wasabi | Model A gateway, Hetzner EU CX33 |
+| --- | --- | --- | --- | --- | --- |
+| 1 TB | $0 + ≤ $0.36 | $0 | $60 | within policy only if ≥ 1 TB stored | $10 (inside 20 TB) |
+| 10 TB | ≤ $3.60 | $70 | $600 | **outside the free-egress policy** | $10 |
+| 50 TB | ≤ $18 | $470 | $3,000 | outside | $10 + 30 × $1.20 = $46 |
+| 100 TB | ≤ $36 | $970 | $6,000 | outside | $10 + 80 × $1.20 = $106 |
+
+- **R2 requests (estimate).** Measured browsers issue a few open-ended ranges per session plus one or two per seek (E3 and E3.1), far below 1 per MiB, so real Class B cost should be well under the bound.
+- **Model A** covers traffic only. It excludes more servers for concurrency (section 4), redundancy, and the Telegram throughput risk. **Telegram → gateway** traffic is free as Hetzner ingress, but it roughly equals delivered bytes, up to about 20% more on seek-heavy use (E3: 177 reads of up to 1 MiB for 147 MiB served).
+- **Scale reference (estimate).** At the source's 1.54 Mb/s, 1 TB is about 1,440 viewing hours, roughly 1,000 full movie plays. 100 TB/month averages about 309 Mb/s, around 200 concurrent viewers on average, with peaks likely several times higher.
+
+**Model totals at 1,000 movies × 1 GB** (storage + delivery; compute for token issuing is on the existing Next.js deploy in every model):
+
+| Traffic | A (gateway) | B / C (R2) | B2 direct | Bunny Storage + CDN, Africa |
+| --- | --- | --- | --- | --- |
+| 1 TB | ~$10 | ~$15 | ~$7 | ~$70 |
+| 10 TB | ~$10 | ~$19 | ~$77 | ~$610 |
+| 50 TB | ~$46 + more servers | ~$33 | ~$477 | ~$3,010 |
+| 100 TB | ~$106 + more servers | ~$51 | ~$977 | ~$6,010 |
+
+Model A is cheapest only at small scale. R2's cost is dominated by storage, is flat with traffic, and is predictable. Every priced-egress option becomes the largest cost as traffic grows.
+
+### 4. Bandwidth and concurrency
+
+The source's average is 1,004,462,878 B × 8 / 5,208 s = **1.54 Mb/s**, plus start and seek bursts (8 MiB windows in E3).
+
+| Concurrent viewers | Viewer-side sustained | Model A: Telegram → gateway, then gateway → viewers | Model B/C: on Velora infrastructure |
+| --- | --- | --- | --- |
+| 10 | 15 Mb/s | about 15–18 Mb/s in and 15 Mb/s out | about 1 issuer POST per viewer per 8.5 min (~0.02/s) |
+| 100 | 154 Mb/s | about 154–185 Mb/s in and 154 Mb/s out | ~0.2 POST/s |
+| 1,000 | 1.54 Gb/s | about 1.5–1.8 Gb/s in and 1.5 Gb/s out: several gateway hosts | ~2 POST/s |
+
+- **Model A bottlenecks** (in order): throughput per reader session and Telegram's per-DC download limits, which are **untested beyond a few streams and undocumented**; the gateway's network interface; then horizontal scaling. E1 established that one reader bot needs one MTProto login, so N gateways need N sessions or N reader bots, each with channel membership.
+- **Model B/C** moves the bottleneck to the storage provider's edge. Velora's own infrastructure handles only authorization, which the existing Next.js endpoint already does and rate-limits.
+
+### 5. Failure domains
+
+| Dependency | Model A | Model B-prime (decision) |
+| --- | --- | --- |
+| Playback needs | Telegram DC availability, reader session validity, reader membership and rights, gateway host, gateway DB role, Supabase, Next.js issuer | R2 (Cloudflare), Supabase (session and catalogue), Next.js issuer |
+| Blast radius | a lost session, bot ban, rights change or API cut-off stops **all** playback; the gateway is a single stateful service | an R2 outage stops playback; an issuer outage stops **new** starts and renewals, while running capabilities last ≤ 10 min |
+| Recovery | re-login the reader (operator), redeploy the gateway; nothing to fall back to | regenerate derivatives from local masters, or the Telegram archive, into another S3 bucket; keys are opaque, so switching provider is configuration |
+
+### 6. Security comparison
+
+| | E2 token → gateway (Model A) | E2 → presigned R2 URL (decision) |
+| --- | --- | --- |
+| Lifetime | 10 min, HMAC, bound to version, user and `stream` | presigned GET; **keep 10 min** (5 min is possible). R2 allows up to 7 days; long lifetimes are rejected |
+| Replay and sharing | anyone holding the URL can stream until expiry (bearer) | same (bearer until expiry) |
+| Entitlement revocation | at the next renewal (≤ 10 min) | same: renewal goes through `canStreamMovieVersion` |
+| Publication or rights withdrawal | **immediate**: re-checked per request | at the next renewal (≤ 10 min). Emergency levers: delete or rename the object (immediate, per title); rotate the R2 signing key (immediate, every URL) |
+| Origin hiding | Telegram completely hidden | the bucket host (account id), bucket name and object key are visible. Use **opaque keys** (`mv/<uuid>.mp4`) with no title, VJ, catalogue or Telegram id |
+| Hotlinking and CORS | CORS only matters for script reads; `<video>` needs none | same; CORS is set on the bucket for Velora's origins only |
+| Download prevention | none | none |
+
+In both models, a browser allowed to stream the bytes can save them. Hiding a Download button or making URLs short-lived **does not prevent** determined copying; it only limits unauthorized **new** access. Real prevention needs DRM, which is out of scope.
+
+### 7. Authorization consequence
+
+The gateway re-checks publication per request, and R2 can't. To stay close to that:
+
+1. **Keep capabilities short.** The same 10 min as E2, renewed by the existing player logic (90 s before expiry, on resume, and once after a network error). E3 proved in-place renewal live.
+2. **Issuer semantics are unchanged.** `canStreamMovieVersion` → presign. The only change is that `issueStreamCapability` signs an S3 GET instead of a gateway HMAC. The response stays `{ streamUrl, expiresAt }`, so the player does not change.
+3. **Worst case** is 10 min of continued access to an unpublished title. Delete the object for immediate effect.
+
+This is the one security property the decision gives up relative to Model A, and it is bounded and documented.
+
+### 8. Media normalization policy (for ingestion; not implemented)
+
+Inspect with `ffprobe -show_format -show_streams`:
+
+- **Container:** `format_name`.
+- **Video:** `codec_name`, `profile`, `level`, `pix_fmt` (bit depth), `width`/`height`, `field_order`, `r_frame_rate`/`avg_frame_rate`, `start_time`, `is_avc`/`nal_length_size`.
+- **Audio:** `codec_name`, `profile`, `channels`/`channel_layout`, `sample_rate`, `bit_rate`, `start_time`.
+- **Streams:** the number of video, audio and subtitle streams; attachments; the default audio stream.
+- **File:** duration, and whether decoding is error-free (`-v error -f null` over the audio at minimum).
+
+| Class | Rule (all must hold) | Action |
+| --- | --- | --- |
+| 1: canonical | MP4 with `moov` before `mdat`; H.264 8-bit yuv420p, progressive, profile ≤ High, level ≤ 4.1; audio AAC-LC or MP3, ≤ 2 channels | none (verify the layout) |
+| 2: remux | codecs as in class 1, but the container or layout is not (MKV, AVI, MP4 without fast-start) | `-map 0:v:0 -map 0:a:<chosen> -c copy -movflags +faststart` (the E3.1 command) |
+| 3: audio only | video as in class 1; audio not AAC or MP3 (AC-3, E-AC-3, DTS, Opus, Vorbis, FLAC, PCM) or > 2 channels | copy video; **AAC-LC**, stereo downmix, 44.1 or 48 kHz, 128–160 kb/s; fast-start |
+| 4: video incompatible | HEVC, VP9, AV1, 10-bit, interlaced, level > 4.1, MPEG-4 Part 2 and others | **stop**: needs a future explicit transcoding policy (cost and quality decision) |
+| 5: review | several candidate audio tracks with no clear choice, decode errors, missing streams, duration mismatch, unknown codec | manual review |
+
+**Identity check after every class 2 or 3 job:** the E3.1 method, where the copied stream's packet hash must equal the source's. A mismatch fails the job, so video is never silently re-encoded.
+
+### 9. Canonical browser format
+
+- **Format:** progressive fast-start MP4, H.264 (8-bit, ≤ High at 4.1), audio **as copied if MP3 or AAC-LC**.
+- **Proven:** MP3-in-MP4 in Chrome 153 and Gecko 155 (E3.1).
+- **When audio must be transformed anyway** (class 3), produce **AAC-LC**. It is the conservative choice for Safari, iOS and MSE, where MP3-in-MP4 fails `isTypeSupported` in Chrome and Gecko.
+- **MP3 is not converted to AAC** for theoretical purity.
+- **Safari/iOS gate.** One real-device test of an MP3-in-MP4 derivative before iOS is a launch target. If it fails, MP3 sources move from class 2 to class 3 (the video is still copied).
+
+### 10. Original retention
+
+- **Authoritative:** the operator's local masters. They are the regeneration source and are **not a backup** (a single disk today).
+- **Archive:** Telegram keeps the original MKV, as C2 already does (idempotent, crash-recoverable, checkpointed). It is a free off-site copy used only for disaster recovery and for regenerating derivatives through the retained MTProto reader. Keeping it costs nothing new and removes the single-disk risk. It is **not** a delivery path and carries no uptime promise.
+- **Delivery:** R2 holds **only** the browser derivative. There are no originals in R2, so storage isn't duplicated.
+- **A future download feature** would serve the same MP4, with a separate `download` entitlement and operation. It doesn't justify keeping originals online.
+- **A future codec migration** (for example, AAC or HEVC renditions) regenerates from masters or the archive.
+
+### 11. Mobile implications
+
+- **Android (Media3/ExoPlayer)** and **iOS (AVPlayer)** play progressive MP4 from an HTTPS URL with Range; no player library or HLS is needed.
+- **Renewal:** native players need the same source swap (replace the item and seek), or a slightly longer lifetime for native clients.
+- **iOS** MP3-in-MP4 is untested (the gate in section 9).
+- **Casting:** Chromecast receivers fetch the URL themselves. A presigned URL needs no cookies, so casting works.
+- **Offline later** means downloading the MP4. Protecting it offline needs DRM, which neither model provides.
+- **Model A** is equivalent for mobile but adds the gateway to every mobile byte.
+
+### 12. Player library
+
+**None is required.** Progressive MP4 plays in the native `<video>` element (E3.1), and the E3 player's renewal and failure handling carries over unchanged. A library (hls.js, Shaka) would be justified only by a concrete need for adaptive bitrate or HLS/DASH, which is not demonstrated. Mobile data use may create that need later, and it would then also require AAC.
+
+### 13. Observed third-party evidence (boundary)
+
+A comparable VJ streaming service was observed in browser DevTools: a protected playback flow ending in a direct browser request for a `.mkv` object on an S3-compatible Wasabi endpoint, using an AWS SigV4-style presigned URL, answered `206 Partial Content` with `Accept-Ranges: bytes`.
+
+That shows the pattern is used in this market. It says nothing about that service's backend, costs or terms compliance. Note that Wasabi's free egress is limited to egress ≤ stored volume. No token, key or URL from that service is recorded here, and this decision does not depend on it.
+
+### 14. Evaluation
+
+| Criterion | A: Telegram + gateway | B-prime: R2 playback + Telegram archive (chosen) | C: R2 only |
+| --- | --- | --- | --- |
+| Implementation left | normalize before upload; scale gateways | presign in the issuer, add a derivative upload step, add object-key storage | same as B-prime, minus the archive |
+| Existing investment | fully used | issuer, player, entitlement and the normalization proof reused; gateway kept for archive restore | gateway code idle |
+| Monthly cost at scale | lowest at ≤ 20 TB; grows with servers | flat, storage-driven (~$15 per 1,000 GB) | same |
+| Bandwidth and concurrency | on Velora's gateway and Telegram's unknown limits | on Cloudflare's edge (Kampala PoP) | same |
+| Browser compatibility | same once normalized | same | same |
+| Revocation | immediate (per request) | ≤ 10 min, plus an object-delete lever | same |
+| Operational burden | high: session custody, flood waits, stateful service | low: bucket, key, CORS | lowest |
+| Terms and legal risk | Telegram as a delivery host is unaddressed by its terms | within Cloudflare's terms; Telegram as private archive only | same |
+| Disaster recovery | originals in Telegram; masters local | masters + Telegram archive + reproducible derivatives | masters only |
+| Vendor dependency | Telegram (non-standard API) | Cloudflare (S3 API, portable) | same |
+
+**Why B-prime.** It removes the two things Velora can't control in Model A: Telegram's unspecified throughput and terms, and a single stateful gateway on every byte. It costs a known, small amount, gives up only per-request publication checks (bounded at 10 min, with an immediate object-delete lever), keeps the already-built Telegram pipeline as a free off-site archive, and changes neither the player nor the entitlement boundary.
+
+### 15. Architecture
+
+```text
+INGESTION (operator machine)
+  local master (authoritative)
+    ├─► archive: Telegram Movies channel (existing C2 uploader; originals, DR only)
+    └─► ffprobe classify ─► 1 none | 2 remux | 3 audio→AAC | 4/5 stop for review
+            └─► derivative MP4 (identity-checked) ─► PUT private R2 bucket
+                   key = mv/<uuid>.mp4, recorded privately against the movie version
+PUBLICATION: unchanged owner flow; a version is ready only when its derivative exists
+
+PLAYBACK
+  browser ─POST /api/media/stream-token─► Next.js (session → entitlement → catalogue)
+          ◄── { streamUrl: presigned R2 GET (10 min), expiresAt } ──
+  browser ─GET + Range─► R2 via Cloudflare edge (Kampala PoP) ─► 206
+  (renewal: the same POST, in-place source swap, as in E3)
+
+RESTORE (rare): MTProto reader (E1.2 code) reads the Telegram original ─► regenerate the derivative
+```
+
+- **Telegram:** a private off-site **archive** of originals, no longer an origin.
+- **R2:** the **playback origin** for one browser-canonical rendition per version.
+- **Media Gateway:** leaves production playback. It isn't deployed; its reader is kept for archive restore and, if ever needed, as a Telegram-origin fallback. Tests stay green.
+- **E1 and E2:** E2's entitlement, issuer contract, rate limit, strict schema and player are reused as they are. E1's HMAC token becomes the gateway-only (fallback) format. Migration 12's role and resolver remain; their retirement or reuse is decided with the fallback's fate.
+- **Ingestion:** adds classify → derivative → identity check → R2 upload → a private object-key record. The Telegram upload stays but becomes archival.
+- **Existing titles:** On The Hunt needs a derivative (class 2, E3.1 command) uploaded and linked. Its Telegram original remains as the archive. Fuze gets the same derivative path before any publication.
+- **New uploads:** a movie becomes publishable only once its derivative is stored and verified.
+
+### 16. Next checkpoint: E3.3 one-object R2 playback proof
+
+Smallest proof; operator-authorized account and bucket; no catalogue change.
+
+1. The operator creates one private R2 bucket (Standard, location hint `weur` or automatic) and a bucket-scoped key (object read and write) with CORS limited to the local development origin. The secret stays in `.env.local` only.
+2. Regenerate On The Hunt's class 2 derivative locally (E3.1 command), verify identity, and upload it once under an opaque key.
+3. A temporary, isolated presign path (SigV4 with `node:crypto`, no SDK dependency unless it proves necessary) issues 10-minute GET URLs from the existing E2 boundary. The catalogue is not changed.
+4. Browser proof (Chrome, Gecko; WebKit reported separately): metadata, video, audio, seeks to 15:00, 30:00 and 81:40, range pattern, expiry refused, renewal swap, and first-byte latency from this network compared with the gateway.
+5. Revocation levers: an expired URL refused, a deleted object refused.
+6. Cost and requests observed; then delete the object, or keep it pending the ingestion checkpoint (operator's choice).
+
+Telegram reads and writes 0; hosted catalogue writes 0.
+
+### External state
+
+Telegram reads 0, writes 0; hosted reads 0, writes 0; object storage: none created. Only this document and the roadmap changed.
+
+### Sources (retrieved 2026-09-30)
+
+- [Cloudflare R2 pricing](https://developers.cloudflare.com/r2/pricing/)
+- [R2 presigned URLs](https://developers.cloudflare.com/r2/api/s3/presigned-urls/)
+- [R2 S3 API compatibility](https://developers.cloudflare.com/r2/api/s3/api/)
+- [R2 data location](https://developers.cloudflare.com/r2/reference/data-location/)
+- [Cloudflare network](https://www.cloudflare.com/network/)
+- [Cloudflare service-specific terms](https://www.cloudflare.com/service-specific-terms-application-services/)
+- [WAF token authentication](https://developers.cloudflare.com/waf/custom-rules/use-cases/configure-token-authentication/)
+- [Backblaze B2 pricing](https://www.backblaze.com/cloud-storage/pricing)
+- [B2 presigned URLs](https://help.backblaze.com/hc/en-us/articles/360047815993-Does-the-B2-S3-Compatible-API-support-Pre-Signed-URLs)
+- [Wasabi pricing](https://wasabi.com/pricing)
+- [Wasabi pricing FAQ](https://wasabi.com/pricing/faq)
+- [Bunny CDN pricing](https://bunny.net/pricing/)
+- [Bunny Storage pricing](https://bunny.net/pricing/storage/)
+- [Bunny token authentication](https://bunny.net/docs/cdn-token-authentication)
+- [Hetzner traffic](https://docs.hetzner.com/robot/general/traffic/)
+- [Hetzner price adjustment 2026](https://docs.hetzner.com/general/infrastructure-and-availability/price-adjustment/)
+- [Hetzner billing FAQ](https://docs.hetzner.com/cloud/billing/faq/)
+- [Telegram API terms](https://core.telegram.org/api/terms)

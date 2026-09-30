@@ -134,6 +134,16 @@ The first Velora UG task is reconciliation, not feature construction.
   - **Browsers.** Chrome 153 and Playwright Gecko 155 both decode video **and** audio, and seek to 15:00, 30:00 and 81:40. Delivery is bounded: 8 MiB 206 windows, metadata within the first 8–16 MiB, no full-file request, nothing fetched while paused. Playwright WebKit (Windows) reads the metadata but decodes no H.264 or audio (engine build), so AAC was not justified and was not created. **Safari: NOT TESTED.**
   - **Open.** Safari MP3-in-MP4 needs a real-device check, and MSE or HLS would need AAC.
   - **External state.** Telegram and hosted reads and writes 0; nothing uploaded; the derivative was deleted. Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.1". Where the derivative lives is the next checkpoint's decision.
+- E3.2 production media architecture (2026-09-30): **DECIDED — Hybrid B-prime.**
+  - **Playback** comes from a private **Cloudflare R2** bucket: one browser-canonical fast-start MP4 per version, through 10-minute presigned GETs issued by the unchanged E2 boundary (`{ streamUrl, expiresAt }`, same player).
+  - **Local masters are authoritative.** **Telegram** keeps the original only as an **archive** (existing C2 uploader, off the playback path).
+  - The **Media Gateway** leaves production playback. Its reader is kept for archive restore and as a fallback.
+  - **Evidence** (researched 2026-09-30):
+    - R2 has free egress and $0.015/GB-month, and Cloudflare's network includes a Kampala PoP. At 1,000 × 1 GB that is about $15–51/month from 1 to 100 TB, against B2 at $7–977, Bunny Africa at $70–6,010, and Wasabi, whose egress policy excludes it.
+    - The gateway is cheapest at ≤ 20 TB but puts every byte on Velora infrastructure and on Telegram's untested throughput and unaddressed terms.
+  - **Trade-off.** Publication withdrawal takes effect at the next renewal (≤ 10 min) instead of per request; deleting the object is the immediate lever.
+  - **Ingestion policy.** Classes 1–5: none / remux / AAC audio only / stop / review, with the E3.1 identity check after every copy.
+  - **Next:** the E3.3 one-object R2 playback proof. No storage was created; nothing changed externally. Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.2".
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules
