@@ -134,7 +134,7 @@ The first Velora UG task is reconciliation, not feature construction.
   - **Browsers.** Chrome 153 and Playwright Gecko 155 both decode video **and** audio, and seek to 15:00, 30:00 and 81:40. Delivery is bounded: 8 MiB 206 windows, metadata within the first 8–16 MiB, no full-file request, nothing fetched while paused. Playwright WebKit (Windows) reads the metadata but decodes no H.264 or audio (engine build), so AAC was not justified and was not created. **Safari: NOT TESTED.**
   - **Open.** Safari MP3-in-MP4 needs a real-device check, and MSE or HLS would need AAC.
   - **External state.** Telegram and hosted reads and writes 0; nothing uploaded; the derivative was deleted. Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.1". Where the derivative lives is the next checkpoint's decision.
-- E3.2 production media architecture (2026-09-30): **DECIDED — Hybrid B-prime.**
+- E3.2 production media architecture (2026-09-30): **DECIDED — Hybrid B-prime. Superseded by E3.2A: deferred, not implemented; the research is kept as the future scaling path.**
   - **Playback** comes from a private **Cloudflare R2** bucket: one browser-canonical fast-start MP4 per version, through 10-minute presigned GETs issued by the unchanged E2 boundary (`{ streamUrl, expiresAt }`, same player).
   - **Local masters are authoritative.** **Telegram** keeps the original only as an **archive** (existing C2 uploader, off the playback path).
   - The **Media Gateway** leaves production playback. Its reader is kept for archive restore and as a fallback.
@@ -143,7 +143,16 @@ The first Velora UG task is reconciliation, not feature construction.
     - The gateway is cheapest at ≤ 20 TB but puts every byte on Velora infrastructure and on Telegram's untested throughput and unaddressed terms.
   - **Trade-off.** Publication withdrawal takes effect at the next renewal (≤ 10 min) instead of per request; deleting the object is the immediate lever.
   - **Ingestion policy.** Classes 1–5: none / remux / AAC audio only / stop / review, with the E3.1 identity check after every copy.
-  - **Next:** the E3.3 one-object R2 playback proof. No storage was created; nothing changed externally. Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.2".
+  - **Next:** the E3.3 one-object R2 playback proof (never run; superseded by E3.2A). No storage was created; nothing changed externally. Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.2".
+- E3.2A architecture reconciliation (2026-09-30): **PASS.** There is one active production playback architecture: **Telegram + Media Gateway**.
+  - **Path.** Local master (authoritative) → inspect and normalize → browser-ready fast-start MP4 → existing C2 uploader → Telegram Movies channel → dedicated MTProto reader → Media Gateway → HTTP 206 → native `<video>`.
+  - **Authorization.** E2 is unchanged: entitlement, catalogue eligibility, and a 10-minute stream-only capability.
+  - **Why.** E3 and E3.1 showed a packaging defect (MP3 in Matroska for Firefox), fixed by a lossless remux, not a storage defect. B-prime (R2) is deferred.
+  - **Scaling.** The gateway stays in the byte path. Telegram throughput, gateway bandwidth and Telegram dependence are recorded as scaling risks, not demonstrated blockers. E3.2's R2 research is the migration path if they become material.
+  - **Boundary.** The player sees only `{ streamUrl, expiresAt }`, so an origin change never touches the player.
+  - **Ingestion.** Normalization classes 1–5 are active: none, remux (stream copy with an identity check), audio only (not built), stop, and review.
+  - **Safari/iOS.** Not tested; a real Apple-device test is a pre-launch gate.
+  - **Not introduced:** R2, HLS and player libraries. Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.2A".
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules

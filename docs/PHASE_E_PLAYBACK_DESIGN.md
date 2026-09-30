@@ -460,6 +460,8 @@ Where that file is stored, whether it replaces or sits beside the original in Te
 
 ## E3.2 — Production media storage and delivery architecture (2026-09-30)
 
+> **Superseded by E3.2A (below).** The B-prime decision in this section is **deferred, not implemented**: Telegram + Media Gateway stays the production playback path. The research here (providers, cost, bandwidth, failure domains, security) is kept unchanged as the documented future scaling and migration path. Section 8 (normalization policy) and section 9 (canonical format) carry forward into E3.2A. Section 16's R2 proof was never run.
+
 **Result: `E3.2 PRODUCTION MEDIA ARCHITECTURE: DECIDED` — Hybrid "B-prime".**
 
 - Playback is served from **private Cloudflare R2**: one browser-canonical MP4 per movie version, through short-lived presigned URLs issued by the existing E2 boundary.
@@ -693,6 +695,8 @@ RESTORE (rare): MTProto reader (E1.2 code) reads the Telegram original ─► re
 
 ### 16. Next checkpoint: E3.3 one-object R2 playback proof
 
+**Superseded (E3.2A): not run.** E3.3 became the Telegram MP4 playback proof. The steps below are kept as the outline of a future R2 proof, should the migration path be taken.
+
 Smallest proof; operator-authorized account and bucket; no catalogue change.
 
 1. The operator creates one private R2 bucket (Standard, location hint `weur` or automatic) and a bucket-scoped key (object read and write) with CORS limited to the local development origin. The secret stays in `.env.local` only.
@@ -728,3 +732,100 @@ Telegram reads 0, writes 0; hosted reads 0, writes 0; object storage: none creat
 - [Hetzner price adjustment 2026](https://docs.hetzner.com/general/infrastructure-and-availability/price-adjustment/)
 - [Hetzner billing FAQ](https://docs.hetzner.com/cloud/billing/faq/)
 - [Telegram API terms](https://core.telegram.org/api/terms)
+
+## E3.2A — Architecture reconciliation (2026-09-30)
+
+**Result: `E3.2A ARCHITECTURE RECONCILIATION: PASS`.** Starting HEAD `c3477f0`. Documentation only.
+
+E3.2's Hybrid B-prime (R2 playback, Telegram as archive) is **superseded: deferred, not implemented**. There is exactly one active production playback architecture:
+
+```text
+local authoritative master
+  ↓ inspect (ffprobe) and classify: 1 none | 2 remux | 3 audio only | 4/5 stop
+browser-ready fast-start MP4 (identity-checked)
+  ↓ existing C2 uploader (fingerprint, checkpoint, uncertain-outcome recovery)
+Telegram Movies channel
+  ↓ dedicated MTProto media reader (read-only, `other`-only rights)
+Velora Media Gateway (publication re-checked per request, bounded ranges)
+  ↓ HTTP Range / 206
+native <video>
+
+Browser → Next.js (session → E2 entitlement → catalogue eligibility)
+        → short-lived stream capability (10 min, stream-only, version- and user-bound)
+        → Media Gateway (token → limits → readiness → publication → Range) → Telegram
+```
+
+| Piece | Role now |
+| --- | --- |
+| Local masters | Authoritative; the regeneration source for every derivative. Not a backup. |
+| Telegram | The **production playback origin**. It holds the browser-ready file used for playback. |
+| Media Gateway | In the **normal production byte path**, not archive-restore only. |
+| E2 | Unchanged authorization layer: entitlement, catalogue eligibility, 10-minute capability, renewal. |
+| Cloudflare R2 | Researched and technically viable (E3.2 §§2–15). **Not selected, not implemented, not required before launch.** No account, bucket, SDK, environment variable, schema or code exists. |
+
+### Why B-prime was deferred
+
+The evidence shows a **packaging** defect, not a storage or delivery defect:
+
+- **E3.** Telegram MTProto delivery and the gateway's bounded Range delivery worked end to end. Chrome played the original MKV with video, audio and seeks. Firefox failed only on MP3 audio inside Matroska.
+- **E3.1.** MKV/H.264/MP3 → fast-start MP4/H.264/MP3 with `-c copy`. Video and audio were bit-for-bit identical, with no transcoding. The file grew by 0.30%, packaging took about 4–7 s, and Chrome and Firefox then had video, audio and seeking with bounded progressive ranges.
+
+So the demonstrated defect is fixed by **normalizing media before upload**. It does not require replacing Telegram as the origin, so migrating storage now would add cost and a new vendor without fixing a demonstrated problem.
+
+### Scaling position (no claim of unlimited scale)
+
+The gateway stays in the byte path (Telegram → gateway → viewer). Known constraints, in the order E3.2 §4 gives them:
+
+- Telegram throughput per reader session and per DC, which is untested beyond a few streams and undocumented;
+- gateway network bandwidth and concurrency;
+- MTProto behaviour at much larger scale;
+- operational dependence on Telegram and its unaddressed API terms (E3.2 §2).
+
+These are **scaling risks, not demonstrated production blockers**. The system is not redesigned for hypothetical 1,000-viewer concurrency. If real usage makes them material, E3.2's R2 research is the documented migration path.
+
+### Abstraction boundary (what keeps that migration cheap)
+
+`player → POST /api/media/stream-token (E2) → { streamUrl, expiresAt } → origin`. The player knows only an opaque, expiring URL. It has no Telegram, gateway-internal or storage-provider concept. A future origin change replaces what sits behind `streamUrl` (gateway → Telegram) without touching the player or entitlement model. No R2 concept enters the player.
+
+### Normalization policy (active for ingestion)
+
+Before a new movie is publishable, inspect it (E3.2 §8 fields) and classify it:
+
+| Class | When | Action |
+| --- | --- | --- |
+| 1: canonical | Fast-start MP4 (`moov` before `mdat`), H.264 8-bit yuv420p progressive ≤ High@4.1, AAC-LC or MP3 ≤ 2 channels | none; verify the layout |
+| 2: remux | codecs as class 1, container or layout not (MKV, AVI, MP4 without fast-start) | `ffmpeg -i <source> -map 0:v:0 -map 0:a:0 -c copy -movflags +faststart -f mp4 <temporary>.mp4`. No re-encoding. |
+| 3: audio only | video as class 1, audio not (AC-3, E-AC-3, DTS, Opus, Vorbis, FLAC, PCM, > 2 channels) | copy video, audio → AAC-LC. **Not implemented** until a target movie needs it. |
+| 4: incompatible video | HEVC, VP9, AV1, 10-bit, interlaced, level > 4.1, MPEG-4 Part 2 … | **stop**; a separate transcoding checkpoint |
+| 5: review | corrupt, ambiguous audio choice, missing streams, duration mismatch, unknown codec | **stop** for manual review |
+
+**Safety (class 2).** Verify after every job:
+
+- the source is unchanged (size, mtime, SHA-256);
+- the codecs are unchanged;
+- packet counts, order, sizes and per-packet MD5s are identical;
+- the whole-stream payload hashes are identical;
+- duration, resolution, frame rate, sample rate and channels are unchanged;
+- `moov` comes before `mdat`;
+- the output size is recorded.
+
+A stream-copy failure **stops**; it never falls back to transcoding.
+
+**Canonical playback target.**
+
+- Progressive fast-start MP4, one video stream and one audio stream.
+- Video: H.264.
+- Audio: MP3 or AAC, where verified compatible.
+- Proven: H.264 + MP3 in MP4 in Chrome and Firefox (E3.1).
+- **Safari/iOS: NOT TESTED.** A **real Safari / iOS device playback test is a pre-launch gate**. If MP3-in-MP4 fails there, MP3 sources become class 3 (H.264 copied, MP3 → AAC).
+
+**Telegram retention.**
+
+- For new ingestion, Telegram holds the browser-ready file. Where normalization is needed it holds **only** the derivative; the local master stays the regeneration source.
+- Existing Telegram originals (On The Hunt's MKV, Fuze's MKV) stay until a separately approved cleanup checkpoint.
+
+**Players and formats.** Native `<video>`, no player library, no HLS or DASH, progressive MP4 + HTTP Range.
+
+### External state
+
+Documentation only: Telegram 0, hosted 0, no storage created.
