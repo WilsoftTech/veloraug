@@ -180,6 +180,22 @@ The first Velora UG task is reconciliation, not feature construction.
   - **External state.** Telegram writes 0, hosted writes 0, Series untouched; On The Hunt plays unchanged in Chrome and Firefox.
   - **Next.** Production Media Gateway hosting and deployment. The operator's plan names it E4, but the E4 work item below is series continuity, so the numbering needs a decision.
   - Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.5".
+- E3.6 multi-stream media selection and library readiness (2026-10-02): **PASS.**
+  - **Numbering (decided).** E4 keeps its meaning, series continuity (below). Movie production and ingestion checkpoints continue as E3.x. Gateway hosting will get an E3.x number when it is scheduled.
+  - **Covers.** The six E3.5 cover-art MP4s carry a 500×500 MJPEG that ffprobe flags `attached_pic` (1 packet). It is an iTunes `covr` metadata atom, not a track: each file has exactly two `trak` boxes.
+  - **Selection** (`selectPlaybackStreams`, policy v2) works from stream meaning, never position.
+    - The film is the one video stream not flagged as cover art.
+    - The flag is trusted only together with a still-image codec.
+    - Two motion-video or two audio streams stay `manual_review`.
+  - **Class 2** maps the selected streams by index (`-map 0:<n>`, not `0:v:0`, which can be the cover). Verified cover art is left out of the rendition, so a file with a cover is `remux`, never canonical. Packet identity follows the selected streams. The local master keeps its artwork.
+  - **Proof.** On The Hunt re-normalized byte-identical to message 27 (`adopt_server`). Synthetic fixtures cover the cover first, the audio first, two video streams and two audio streams.
+  - **Library (read-only, 14 files).**
+    - Classes: 12 remux, 2 HEVC (`video_transcode_required`; Desert Warrior was hidden by the E3.5 cover stop), 0 manual review, 0 canonical.
+    - **9 ready after stream copy** (7 new titles, plus On The Hunt (live) and Fuze (replacement decision)).
+    - **5 blocked**: 3 over the 2000 MiB ceiling, 2 HEVC.
+  - **External state.** Telegram writes 0, Series 0, hosted writes 0; the library is unchanged.
+  - **Next:** E3.7, controlled batch normalization and Telegram ingestion of the 7 new titles, one at a time (not started).
+  - Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.6".
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules

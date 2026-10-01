@@ -1341,3 +1341,180 @@ Existing fixtures gained canonical media; no expectation was weakened.
 - **Lost journal.** If the journal is lost and a different FFmpeg build is used, a regenerated rendition might not be byte-identical to an uploaded one. It would then get a new fingerprint, and only duplicate review (same title and VJ) would hold it. The tool version is recorded with every rendition; keep the verified build.
 - **The C2 design document** (`docs/PHASE_C_INGESTION_DESIGN.md`) was not edited, because it has unrelated uncommitted work in the working tree. This section is the E3.5 record, and the CLI header documents the commands.
 - **Next checkpoint:** production Media Gateway hosting and deployment, including `MEDIA_GATEWAY_ALLOWED_ORIGINS` and a non-residential uplink. The operator's checkpoint plan calls it E4, but the roadmap's own E4 work item is series continuity, so the numbering needs a decision. The real Safari/iOS test is still owed before launch.
+
+## E3.6 — Multi-stream media selection and library readiness (2026-10-02)
+
+**Result: `E3.6 MULTI-STREAM MEDIA SELECTION + LIBRARY READINESS: PASS`.** Starting HEAD `1603793` (E3.5).
+
+E3.5 stopped six library MP4s on `attached_picture`: its Class 2 arguments mapped `0:v:0`, which can be a cover image. E3.6 selects the film's streams by what they are, not where they sit, and re-scans the library read-only. Nothing was normalized in the library, and nothing was uploaded.
+
+- **Telegram writes:** 0. **Hosted database writes:** 0. **Library:** unchanged.
+
+### 1. What the six covers are (measured, read-only)
+
+ffprobe of Blades of the Guardians, Call of Heroes, Desert Warrior, Sakra, The Furious and Wild Cat gives the same picture for all six:
+
+| Stream | Codec | Size | Disposition | Packets | Tag / handler |
+| --- | --- | --- | --- | --- | --- |
+| 0 | H.264 (Desert Warrior: HEVC Main 10) | 1918–1920 wide | `default` | 134,472–187,570 | `avc1`/`hev1`, `VideoHandler` |
+| 1 | MP3 or AAC-LC, stereo | — | `default` | 214,706–336,580 | `mp4a`, `SoundHandler` |
+| 2 | MJPEG, Baseline, `yuvj420p` | 500×500 | **`attached_pic`** | **1** | tag `0`, no handler, `r_frame_rate` 90000/1, no frame count |
+
+A walk of the box headers proves what stream 2 is. Every file has exactly **two** `trak` boxes (handlers `vide`, `soun`), and the cover is a 9,307-byte iTunes **`covr`** atom at `moov/udta/meta/ilst/covr`. So it is metadata, not a track: no player can select it as video. All seven library MP4s (the six plus The Protector, which has no cover) are also **not fast-start** (`ftyp, free, mdat, moov`).
+
+**`attached_pic` is therefore sufficient as the primary signal, with one guard.** FFmpeg defines an attached-picture stream as a single still picture. The policy trusts the flag only together with a still-image codec (MJPEG, PNG, BMP, GIF, WebP). A flagged stream in any other codec is malformed metadata, and the file goes to review.
+
+### 2. Selection policy (`selectPlaybackStreams`, `lib/ingestion/media.ts`, policy version 2)
+
+```text
+video streams ─▶ drop streams flagged attached_pic with a still-image codec (cover art)
+             ─▶ exactly one motion-video stream left?  ─ no ─▶ manual_review
+audio streams ─▶ exactly one?                            ─ no ─▶ manual_review
+any attached_pic stream that is not a still image?       ─ yes ▶ manual_review
+             ─▶ selection { video: <index>, audio: <index>, artwork: [<indexes>] }
+```
+
+- **Order plays no part.** Indexes come from the streams' meaning. Tests cover the cover first, the audio first, the film last, and covers on both sides.
+- **No extra stream is ever dropped by heuristic.** A second unflagged video stream stays `multiple_video_streams`, whatever its size, length or order. A real case: the Matroska muxer turns a mapped JPEG into an ordinary MJPEG track and drops the flag, so it is a second video stream, and stays in review. Subtitle, data and attachment streams still stop the file.
+- **Audio is unchanged.** One audio stream is selected. Two or more stay `multiple_audio_streams`, with or without a cover. There is no language or order rule, because none existed, and a second VJ track is never silently dropped.
+
+### 3. Classification
+
+- **Cover art makes a file `remux`, never `canonical`** (reason `attached_picture`). The browser-proven shape (E3.1, E3.3) is exactly one H.264 and one audio stream. Playback has no need for the cover, and an uploaded cover would rely on untested browser handling of `covr` (or, in other containers, of an image track). Stripping it costs one stream copy of a few seconds. For this library it changes nothing, because all seven MP4s need repackaging for fast start anyway.
+- **Stripping verified cover art is container normalization, not editing.** The film's video and audio packets are carried unchanged and proven so (section 4). The authoritative local master is never written and keeps its artwork.
+- **Unchanged meanings.** `mp4_not_fast_start` is still `remux` (stream copy, no encoding). HEVC is still `video_transcode_required`, with or without a cover. Audio outside policy is still `audio_normalization`. MP3 stays approved; Safari/iOS remains the pre-launch gate.
+- **Policy version 1 → 2.** Stored classifications are recomputed from stored inspections on the next scan, with no re-probe. The upload gate (`mediaAllowsUpload`) refuses a version-1 record. A rendition made under version 1 and never sent is regenerated and re-verified rather than reused. One with upload history is never redone.
+
+### 4. Class 2 mapping and identity
+
+- **Mapping by index.** `remuxArguments` and `packetListArguments` take the selection and map `-map 0:<video> -map 0:<audio>`, video first. Indexes must be distinct, non-negative safe integers or the builder throws. The arguments are still an array (no shell), copy-only, with no codec, filter or bitrate option.
+- **`normalizeEntry`** selects before any write (`stream_selection_ambiguous` refuses, even when a stale record says `remux`). It digests the source by its selection and the output by the output's own selection (`output_streams_unselectable` discards).
+- **`verifyRemux`** compares the selected source streams with the selected output streams:
+  - video: codec, profile, level, dimensions, pixel format and frame rate;
+  - audio: codec, profile, rate, channels and layout;
+  - duration within 0.5 s;
+  - per-stream packet digests over the codec configuration and every (size, payload MD5).
+
+  The output must be canonical, so a rendition that still carried the cover fails (`output_not_canonical:attached_picture`). The cover's absence is never a false failure, because the cover is never compared.
+
+### 5. Operator output
+
+`show` and `normalize` list every stream with its role. Classification and plan lines are as before; scan adds a `media:` line with the Class 2 reasons.
+
+```text
+media          REMUX  (mp4_not_fast_start, attached_picture)
+streams        stream 0  video h264 High L4.1 1920x816 24/1 fps yuv420p  (selected)
+               stream 1  audio mp3 44100 Hz 2 ch stereo  (selected)
+               stream 2  video mjpeg 500x500 image  (attached artwork: ignored for playback, kept in the source)
+action         stream copy (-c copy) of stream 0 (video) and stream 1 (audio) into a fast-start MP4; artwork stream 2 left out
+encoding       none
+```
+
+An ambiguous file shows `MANUAL_REVIEW (multiple_video_streams)`, marks each candidate `one of several candidates: review, never guessed`, prints `action none`, and the upload line reads `blocked by media policy`. One small fix: the stream level is shown for H.264 only, so HEVC no longer prints as "L12.0".
+
+### 6. Tests
+
+| Case | Synthetic fixture (FFmpeg test sources, nothing committed) | Result |
+| --- | --- | --- |
+| A | MP4: H.264 + MP3 + `covr` cover, not fast-start | `remux` (`mp4_not_fast_start`, `attached_picture`); selection {0, 1, artwork 2} |
+| B | The same file with `udta` moved before the tracks, so the **cover is stream 0** | selection {1, 2, artwork 0}. FFmpeg's `v:0` on this file is the MJPEG, which is the E3.5 hazard reproduced |
+| Order | MP4 with audio 0, film 1, cover 2; Matroska with a cover attachment | selection follows meaning |
+| C | Two unflagged video streams (and an MJPEG muxed as an ordinary track) | `manual_review` (`multiple_video_streams`), no selection |
+| D | Two audio streams, with and without a cover | `manual_review` (`multiple_audio_streams`), no selection |
+| E | Real `normalize` of A, B, audio-first and Matroska-cover | canonical output with exactly `[video h264, audio mp3]` and no `covr` box; packets equal to an independent digest of the source's selected streams; a digest that took the cover as video differs (1 packet); source SHA-256 and mtime unchanged |
+| Guards | A flagged non-image stream; a cover as the only video; HEVC or AC-3 beside a cover; bad or equal indexes | review, `no_video`, `video_transcode_required` / `audio_normalization`, and the builder throws |
+
+- **Upload gate** (`uploader.test.ts`): `media_not_verified` before any server read, preflight or send for:
+  - not inspected (pre-E3.5);
+  - Matroska;
+  - an outdated policy (0, and v1);
+  - an unverified rendition or one with no derivation;
+  - a cover-art source (Class 2);
+  - an ambiguous film;
+  - HEVC beside a cover.
+- **Unit tests:** 756 passing, all with the real FFmpeg 9.0.2 build (729 at E3.5). No expectation was weakened. The two E3.5 cover-art cases changed meaning by design (`manual_review` → `remux` for a verified cover). The E3.5 normalize CLI test now reads the per-stream lines.
+
+### 7. Regression on real files (scratch only)
+
+- **On The Hunt.** Normalized from the library MKV into a scratch directory on C: (never under `G:\Movies`) with the new index mapping:
+  - **12.1 s**, 1,007,441,962 bytes;
+  - 124,997 video and 199,380 audio packets identical;
+  - SHA-256 `c475dcfcde063ee8…`, fingerprint `sf1-fbc665a8…5905bb`: **byte-identical to message 27**.
+- **Exactly once.** `resume --server` (dry run, the read-only `ingest_upload_status` only) returned:
+  - the regenerated rendition: `adopt_server` → **message 27**;
+  - the MKV: `adopt_server` → message 23;
+  - Fuze: `adopt_server` → message 25;
+  - every other file: nothing on the server.
+
+  Nothing would be re-sent. Fingerprint, checkpoint, recovery, uncertain-outcome and adoption code are unchanged.
+- The derivative, the scratch journal (it holds the intended channel id) and its directory were deleted.
+
+### 8. Library readiness (read-only scan of `G:\Movies`, 14 files)
+
+The scan used an isolated scratch journal and no `--match`, Telegram or database. It read ffprobe headers and MP4 box headers only. Before and after, the library's names, sizes and mtimes were identical, with no new entries.
+
+| File | sf1 | Class | Container | Video (selected) | Audio | Artwork | Action | Upload |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 100 Yards | `b974dc0f24f9` | remux | Matroska | #0 H.264 Main 1920×800 | #1 AAC-LC | no | stream copy | after normalization |
+| Beast | `e3c515fbac29` | remux | Matroska | #0 H.264 High 1280×534 | #1 MP3 | no | stream copy | after normalization |
+| Blades of the Guardians | `60672106b465` | remux | MP4, moov after mdat | #0 H.264 High 1920×804 | #1 AAC-LC | #2 | — | **blocked:** `file_too_large` (2,253,661,001 B) |
+| Call of Heroes | `2a913ae1af15` | remux | MP4, moov after mdat | #0 H.264 High 1920×816 | #1 MP3 | #2 | stream copy, cover left out | after normalization |
+| Desert Warrior | `e123e721dc26` | video_transcode_required | MP4, moov after mdat | #0 HEVC Main 10 1920×800 | #1 MP3 | #2 | — | **blocked:** `video_codec_hevc` |
+| Fuze | `33472dfeba50` | remux | Matroska | #0 H.264 Main 1920×804 | #1 AAC-LC | no | stream copy | MKV already message 25: replacement decision |
+| On The Hunt | `a9a1b20b0f4d` | remux | Matroska | #0 H.264 High 1920×1080 | #1 MP3 | no | — | live: rendition = message 27 (adopts) |
+| Sakra | `d4e79eea6742` | remux | MP4, moov after mdat | #0 H.264 High 1920×804 | #1 AAC-LC | #2 | — | **blocked:** `file_too_large` (2,320,223,941 B) |
+| The Furious | `c1b987e9b6e4` | remux | MP4, moov after mdat | #0 H.264 High 1920×800 | #1 MP3 48 kHz | #2 | — | **blocked:** `file_too_large` (2,132,230,094 B) |
+| The Killer | `5a470bde4b64` | remux | Matroska | #0 H.264 High 1920×1040 | #1 MP3 | no | stream copy | after normalization |
+| The Protector | `035a441efa64` | remux | MP4, moov after mdat | #0 H.264 High 1280×486 | #1 AAC-LC | no | stream copy | after normalization |
+| TIMUR | `e91d7bd0ee29` | remux | Matroska | #0 H.264 High 1920×1040 | #1 MP3 | no | stream copy | after normalization |
+| Jack Ryan: Ghost War | `d14f58a922c1` | video_transcode_required | Matroska | #0 HEVC Main 10 1920×800 | #1 MP3 48 kHz | no | — | **blocked:** `video_codec_hevc` |
+| Wild Cat | `c768989e0f53` | remux | MP4, moov after mdat | #0 H.264 High 1918×1036 | #1 MP3 | #2 | stream copy, cover left out | after normalization |
+
+```text
+Total:                     14
+Canonical:                  0
+Remux:                     12
+Audio normalization:        0
+Video transcode required:   2   (Desert Warrior, Jack Ryan)
+Manual review:              0
+
+Ready after stream-copy normalization:  9   (7 new titles, plus On The Hunt — already live — and Fuze — replacement decision)
+Blocked from upload:                    5   (3 over the 2000 MiB ceiling, 2 HEVC)
+```
+
+- **Correction to E3.5.** Desert Warrior is HEVC Main 10 as well. E3.5's blanket cover-art stop hid this, so the library has two HEVC titles, not one.
+- **Over the ceiling.** Blades, Sakra and The Furious are acceptable media, but larger than Telegram's 2000 MiB document limit. A stream copy cannot shrink them: the cover is 9.3 KB. They need a separate decision (a size-reducing encode, splitting, or another origin), which is out of scope here.
+
+### 9. External state
+
+| | Count |
+| --- | --- |
+| **Telegram Movies** | reads 0 and writes **0** by this checkpoint (no Bot API call, no MTProto read). The already running dev gateway container was not touched |
+| **Telegram Series** | reads 0, writes 0 |
+| **Hosted database** | writes **0** (no migration). Reads: 15 `ingest_upload_status` worker RPCs (`resume --server` dry run) |
+| **Library** | 14 sources unchanged (names, sizes, mtimes). No derivative was written under `G:\Movies`; the one scratch derivative on C: was deleted |
+
+### 10. Open items and next
+
+- **FFmpeg paths.** `.env.local` does not set them, so the CLI fails closed. Add:
+  - `VELORA_FFPROBE_PATH=<home>\.velora-ingest\tools\ffmpeg-9.0.2-essentials\bin\ffprobe.exe`
+  - `VELORA_FFMPEG_PATH=<home>\.velora-ingest\tools\ffmpeg-9.0.2-essentials\bin\ffmpeg.exe`
+
+  Absolute paths are required. This checkpoint passed them per command.
+- **Next movie checkpoint: E3.7 — Controlled batch movie normalization and Telegram ingestion** (not started).
+  - **Scope:** the 7 new titles: 100 Yards, Beast, Call of Heroes, The Killer, The Protector, TIMUR, Wild Cat.
+  - **Per title, one at a time:**
+    1. `normalize --execute`;
+    2. `show`;
+    3. `upload --fingerprint` with the one-command authorization;
+    4. `resume` if uncertain;
+    5. `cleanup`.
+  - **Start with Call of Heroes.** It is the first real cover-stripping rendition.
+  - **Expect `uncertain` and marker recovery** on files over roughly 1 GB, because of the Bot API's 500 s idle timeout (E3.3).
+  - **Excluded:**
+    - On The Hunt (live);
+    - Fuze (an E3.3-style replacement decision for message 25);
+    - the three over-ceiling files;
+    - the two HEVC files.
+  - **Separate per title:** evaluation, review, rights and publication.
+- Safari/iOS real-device verification remains a pre-launch gate.
