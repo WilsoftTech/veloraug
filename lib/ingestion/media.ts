@@ -20,9 +20,17 @@ import type { MediaVerdict } from "@/types/ingestion";
  *   an AAC conversion, which is not automated: it stops for the operator.
  * - video_transcode_required: the video is not H.264 8-bit 4:2:0 in policy.
  *   Stops; there is no video transcoding.
- * - manual_review: anything ambiguous or unsafe (no or several video/audio
- *   streams, subtitles, attachments, cover art, unknown duration, a size that
- *   does not match). Never guessed.
+ * - manual_review: anything ambiguous or unsafe (no or several motion-video or
+ *   audio streams, subtitles, attachments, cover art that is not provably a
+ *   still image, unknown duration, a size that does not match). Never guessed.
+ *
+ * Streams are selected by meaning, never by position (E3.6). The film is the
+ * one video stream not flagged `attached_pic`; a flagged stream is cover art
+ * only if its codec is a still-image codec, and is then left out of the
+ * playback rendition (the local master keeps it). Any other extra video or
+ * audio stream is never dropped: it stops the file for review. A file with
+ * cover art is `remux`, not canonical, so every uploaded file has exactly the
+ * two-stream shape proven in browsers.
  *
  * MP3 audio stays approved: E3.1/E3.3 proved H.264 + MP3 in fast-start MP4 in
  * Chrome and Firefox. Safari/iOS on a real device remains a pre-launch gate; if
@@ -30,7 +38,7 @@ import type { MediaVerdict } from "@/types/ingestion";
  */
 
 /** Bump when the rules change: stored classifications are then recomputed from the stored inspection. */
-export const MEDIA_POLICY_VERSION = 1;
+export const MEDIA_POLICY_VERSION = 2;
 
 export type MediaClass = MediaVerdict["class"];
 
@@ -183,8 +191,35 @@ const MAX_CHANNELS = 2;
 /** ISO base media brands; QuickTime ("qt  ") and anything else is repackaged. */
 const MP4_BRANDS = new Set(["isom", "iso2", "iso3", "iso4", "iso5", "iso6", "mp41", "mp42", "avc1", "M4V", "M4V "]);
 
+/** Still-image codecs: what cover art is stored as. A flagged stream in any other codec is not trusted as artwork. */
+const STILL_IMAGE_CODECS = new Set(["mjpeg", "png", "bmp", "gif", "webp"]);
+
 export const playableVideo = (inspection: MediaInspection) => inspection.streams.filter((s) => s.type === "video" && !s.attachedPicture);
 export const audioStreams = (inspection: MediaInspection) => inspection.streams.filter((s) => s.type === "audio");
+/** Cover art proven by the container's own flag and a still-image codec: safe to leave out of the rendition. */
+export const artworkStreams = (inspection: MediaInspection) => inspection.streams.filter((s) => s.type === "video" && s.attachedPicture && STILL_IMAGE_CODECS.has(s.codec ?? ""));
+const unverifiedArtwork = (inspection: MediaInspection) => inspection.streams.filter((s) => s.type === "video" && s.attachedPicture && !STILL_IMAGE_CODECS.has(s.codec ?? ""));
+
+/** The streams a playback rendition carries, by their index in the file. */
+export interface PlaybackSelection {
+  video: number;
+  audio: number;
+  /** Verified cover art, left out of the rendition. */
+  artwork: number[];
+}
+
+/**
+ * The film's video and audio stream, when the choice is unambiguous: exactly
+ * one motion-video stream (cover art excluded), exactly one audio stream, and
+ * no flagged stream that is not a still image. Null otherwise. Stream order
+ * plays no part.
+ */
+export function selectPlaybackStreams(inspection: MediaInspection): PlaybackSelection | null {
+  const video = playableVideo(inspection);
+  const audio = audioStreams(inspection);
+  if (video.length !== 1 || audio.length !== 1 || unverifiedArtwork(inspection).length > 0) return null;
+  return { video: video[0].index, audio: audio[0].index, artwork: artworkStreams(inspection).map((s) => s.index) };
+}
 
 function topologyReasons(inspection: MediaInspection): string[] {
   const reasons: string[] = [];
@@ -193,7 +228,7 @@ function topologyReasons(inspection: MediaInspection): string[] {
   if (inspection.streams.length === 0) reasons.push("no_streams");
   if (video.length === 0) reasons.push("no_video");
   if (video.length > 1) reasons.push("multiple_video_streams");
-  if (inspection.streams.some((s) => s.type === "video" && s.attachedPicture)) reasons.push("attached_picture");
+  if (unverifiedArtwork(inspection).length > 0) reasons.push("attached_picture_not_still_image");
   if (audio.length === 0) reasons.push("no_audio");
   if (audio.length > 1) reasons.push("multiple_audio_streams");
   for (const type of ["subtitle", "data", "attachment", "other"] as const) {
@@ -263,7 +298,7 @@ export function classifyMedia(inspection: MediaInspection): MediaClassification 
   // Audio reasons travel with a video stop so the operator sees everything at once.
   if (v.length > 0) return result("video_transcode_required", [...v, ...a]);
   if (a.length > 0) return result("audio_normalization", a);
-  const c = containerReasons(inspection, video);
+  const c = [...containerReasons(inspection, video), ...(artworkStreams(inspection).length > 0 ? ["attached_picture"] : [])];
   return c.length > 0 ? result("remux", c) : result("canonical", []);
 }
 
@@ -324,20 +359,31 @@ export async function readMp4Layout(sizeBytes: number, read: ReadRange): Promise
 // Class 2: stream-copy repackaging and its verification
 // ---------------------------------------------------------------------------
 
-/**
- * FFmpeg arguments for a Class 2 repackage: the one video and one audio stream,
- * copied, into a fast-start MP4. Built from fixed strings and the two paths,
- * passed as an argument array (never through a shell). Nothing from the file's
- * metadata can add an argument, and there is no codec, filter or bitrate option
- * an encoder could act on. The same arguments as the E3.1/E3.3 proof.
- */
-export function remuxArguments(sourcePath: string, outputPath: string): string[] {
-  return ["-hide_banner", "-nostdin", "-v", "error", "-n", "-i", sourcePath, "-map", "0:v:0", "-map", "0:a:0", "-c", "copy", "-movflags", "+faststart", "-f", "mp4", outputPath];
+/** `-map` arguments for the selected streams, by absolute index: video first, then audio. */
+function mapArguments(selection: PlaybackSelection): string[] {
+  for (const index of [selection.video, selection.audio]) {
+    if (!Number.isSafeInteger(index) || index < 0) throw new Error("stream index must be a non-negative integer");
+  }
+  if (selection.video === selection.audio) throw new Error("video and audio must be different streams");
+  return ["-map", `0:${selection.video}`, "-map", `0:${selection.audio}`];
 }
 
-/** FFmpeg arguments that list every packet of the selected video and audio stream, copied (no decoding). */
-export function packetListArguments(path: string): string[] {
-  return ["-hide_banner", "-nostdin", "-v", "error", "-i", path, "-map", "0:v:0", "-map", "0:a:0", "-c", "copy", "-f", "framemd5", "-"];
+/**
+ * FFmpeg arguments for a Class 2 repackage: the selected video and audio
+ * stream, copied, into a fast-start MP4; any other stream (verified cover art)
+ * is not mapped. Built from fixed strings, the two paths and two integers,
+ * passed as an argument array (never through a shell). Nothing from the
+ * file's metadata can add an argument, and there is no codec, filter or
+ * bitrate option an encoder could act on. The E3.1/E3.3 arguments, with the
+ * streams chosen by index rather than `0:v:0`, which can be a cover image.
+ */
+export function remuxArguments(sourcePath: string, outputPath: string, selection: PlaybackSelection): string[] {
+  return ["-hide_banner", "-nostdin", "-v", "error", "-n", "-i", sourcePath, ...mapArguments(selection), "-c", "copy", "-movflags", "+faststart", "-f", "mp4", outputPath];
+}
+
+/** FFmpeg arguments that list every packet of the selected video and audio stream, copied (no decoding): video is framemd5 stream 0, audio stream 1. */
+export function packetListArguments(path: string, selection: PlaybackSelection): string[] {
+  return ["-hide_banner", "-nostdin", "-v", "error", "-i", path, ...mapArguments(selection), "-c", "copy", "-f", "framemd5", "-"];
 }
 
 export interface StreamDigest {
@@ -407,20 +453,20 @@ export interface RemuxVerification {
 const DURATION_TOLERANCE_SECONDS = 0.5;
 
 /**
- * Proves a Class 2 output carries the source's streams unchanged: the output
- * is canonical (fast-start MP4), both streams keep their codec parameters,
- * and every packet of both streams is present, in order, byte-identical
- * (equal digests). Any difference fails it; nothing is tolerated except a
- * container-level duration rounding of half a second.
+ * Proves a Class 2 output carries the source's selected streams unchanged:
+ * the output is canonical (fast-start MP4, so no cover art either), both
+ * streams keep their codec parameters, and every packet of both streams is
+ * present, in order, byte-identical (equal digests, each taken over the
+ * selected streams of its own file). Any difference fails it; nothing is
+ * tolerated except a container-level duration rounding of half a second.
  */
 export function verifyRemux(source: MediaInspection, output: MediaInspection, sourcePackets: PacketDigest, outputPackets: PacketDigest): RemuxVerification {
   const failures: string[] = [];
   const outputClass = classifyMedia(output);
   if (outputClass.class !== "canonical") failures.push(`output_not_canonical:${outputClass.reasons.join("+")}`);
-  const [sv] = playableVideo(source);
-  const [ov] = playableVideo(output);
-  const [sa] = audioStreams(source);
-  const [oa] = audioStreams(output);
+  const [ss, os] = [selectPlaybackStreams(source), selectPlaybackStreams(output)];
+  const pick = (inspection: MediaInspection, index: number | undefined) => inspection.streams.find((s) => s.index === index);
+  const [sv, ov, sa, oa] = [pick(source, ss?.video), pick(output, os?.video), pick(source, ss?.audio), pick(output, os?.audio)];
   if (!sv || !ov || !sa || !oa) {
     failures.push("streams_missing");
   } else {

@@ -14,6 +14,8 @@ const stream = (overrides: Partial<MediaStream>): MediaStream => ({
 
 export const H264_HIGH_1080P = stream({ index: 0, type: "video", codec: "h264", codecTag: "avc1", profile: "High", level: 40, width: 1920, height: 1080, pixelFormat: "yuv420p", fieldOrder: "progressive", frameRate: "24/1", timeBase: "1/12288" });
 export const MP3_STEREO = stream({ index: 1, type: "audio", codec: "mp3", codecTag: "mp4a", sampleRate: 44100, channels: 2, channelLayout: "stereo", bitRate: 128000, timeBase: "1/44100" });
+/** Cover art as ffprobe reports the library MP4s' iTunes `covr` image (E3.6). */
+export const COVER_ART = stream({ index: 2, type: "video", codec: "mjpeg", codecTag: "[0][0][0][0]", profile: "Baseline", width: 500, height: 500, pixelFormat: "yuvj420p", frameRate: "90000/1", timeBase: "1/90000", attachedPicture: true });
 
 /** A fast-start ISO MP4 with one H.264 and one MP3 stream: the E3.3 playback shape. */
 export function canonicalInspection(sizeBytes = 1_000_000, overrides: Partial<MediaInspection> = {}): MediaInspection {

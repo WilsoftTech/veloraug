@@ -21,6 +21,10 @@
 // <TELEGRAM_BOT_API_PATH_MAP local root>/.velora-renditions) and journals that
 // rendition as its own entry, which `upload --fingerprint` then sends like any
 // other. `normalize` and `cleanup` never call Telegram or a database.
+// The film's video and audio stream are chosen by meaning, not position
+// (E3.6): verified cover art is left out of the rendition, and any other
+// extra stream stops the file for review. `show` and `normalize` list every
+// stream with its role.
 //
 // Dry run is the default. `upload`/`resume --execute` need the runtime
 // authorization (REAL_TELEGRAM_UPLOADS_AUTHORIZED exactly "true", set for that
@@ -53,7 +57,7 @@ import { planSource } from "@/lib/ingestion/plan";
 import { titleKey } from "@/lib/ingestion/duplicates";
 import { resolveVj } from "@/lib/ingestion/vj";
 import { buildUploadCaption, TELEGRAM_MAX_FILE_BYTES } from "@/lib/ingestion/telegram";
-import { classifyMedia, MEDIA_POLICY_VERSION, playableVideo, audioStreams, unreadableMedia, type MediaInspection } from "@/lib/ingestion/media";
+import { artworkStreams, classifyMedia, MEDIA_POLICY_VERSION, playableVideo, audioStreams, selectPlaybackStreams, unreadableMedia, type MediaInspection, type MediaStream } from "@/lib/ingestion/media";
 import { createLocalBotApiClient, loadLocalBotApiConfig, toServerFileUri, type LocalBotApiConfig } from "@/lib/telegram/local-bot-api";
 import { longRunningFetch } from "@/lib/telegram/long-running-fetch";
 import { isTmdbConfigured } from "@/lib/tmdb/client";
@@ -206,17 +210,43 @@ async function sourceMedia(path: string, existing: JournalEntry | null, tools: M
 const CLASS_LABEL: Record<string, string> = { canonical: "CANONICAL", remux: "REMUX", audio_normalization: "AUDIO_NORMALIZATION", video_transcode_required: "VIDEO_TRANSCODE_REQUIRED", manual_review: "MANUAL_REVIEW" };
 const mediaLabel = (media: JournalMedia | null) => (media === null ? "NOT_INSPECTED" : CLASS_LABEL[media.classification.class]);
 
+function describeStream(s: MediaStream): string {
+  if (s.type === "audio") return `${s.codec ?? "?"}${s.profile ? ` ${s.profile}` : ""} ${s.sampleRate ?? "?"} Hz ${s.channels ?? "?"} ch${s.channelLayout ? ` ${s.channelLayout}` : ""}`;
+  if (s.type !== "video") return s.codec ?? "?";
+  if (s.attachedPicture) return `${s.codec ?? "?"} ${s.width ?? "?"}x${s.height ?? "?"} image`;
+  // ffprobe reports H.264 levels × 10 (40 = 4.0); other codecs use other scales, so only H.264 shows one.
+  const level = s.level === null || s.codec !== "h264" ? "" : ` L${(s.level / 10).toFixed(1)}`;
+  return `${s.codec ?? "?"} ${s.profile ?? ""}${level} ${s.width ?? "?"}x${s.height ?? "?"} ${s.frameRate ?? "?"} fps ${s.pixelFormat ?? ""}`.replace(/\s+/g, " ").trim();
+}
+
 function describeVideo(inspection: MediaInspection | null): string {
-  const [v] = inspection ? playableVideo(inspection) : [];
-  if (!v) return "none";
-  const level = v.level === null ? "" : ` L${(v.level / 10).toFixed(1)}`;
-  return `${v.codec ?? "?"} ${v.profile ?? ""}${level} ${v.width ?? "?"}x${v.height ?? "?"} ${v.frameRate ?? "?"} fps ${v.pixelFormat ?? ""}`.replace(/\s+/g, " ").trim();
+  const video = inspection ? playableVideo(inspection) : [];
+  return video.length === 0 ? "none" : video.map(describeStream).join("; ");
 }
 
 function describeAudio(inspection: MediaInspection | null): string {
   const audio = inspection ? audioStreams(inspection) : [];
-  if (audio.length === 0) return "none";
-  return audio.map((a) => `${a.codec ?? "?"}${a.profile ? ` ${a.profile}` : ""} ${a.sampleRate ?? "?"} Hz ${a.channels ?? "?"} ch${a.channelLayout ? ` ${a.channelLayout}` : ""}`).join("; ");
+  return audio.length === 0 ? "none" : audio.map(describeStream).join("; ");
+}
+
+/** Every stream and what playback does with it (E3.6), so a cover-art or ambiguity decision reads without ffprobe JSON. */
+function streamRoles(inspection: MediaInspection): string[] {
+  const selection = selectPlaybackStreams(inspection);
+  const artwork = new Set(artworkStreams(inspection).map((s) => s.index));
+  return inspection.streams.map((s) => {
+    const role =
+      selection !== null && (s.index === selection.video || s.index === selection.audio) ? "selected"
+      : artwork.has(s.index) ? "attached artwork: ignored for playback, kept in the source"
+      : s.type === "video" && s.attachedPicture ? "flagged as artwork but not a still image: review"
+      : selection === null && (s.type === "video" || s.type === "audio") ? "one of several candidates: review, never guessed"
+      : "not carried by playback: review";
+    return `stream ${s.index}  ${s.type} ${describeStream(s)}  (${role})`;
+  });
+}
+
+function printStreams(inspection: MediaInspection | null) {
+  if (inspection === null) return line("streams", "not inspected");
+  streamRoles(inspection).forEach((text, i) => line(i === 0 ? "streams" : "", text));
 }
 
 async function scan() {
@@ -253,7 +283,7 @@ async function scan() {
       await store.put({ ...base, fileName: file.fileName, relativePath: file.relativePath, absolutePath: file.absolutePath, modifiedAtMs: file.modifiedAtMs, discoveryKey: file.discoveryKey, intendedChannelId: base.intendedChannelId ?? channelId, plan: { action: plan.action, stopReasons: plan.stopReasons }, media, updatedAt: now.toISOString() });
       counts.set(plan.action, (counts.get(plan.action) ?? 0) + 1);
       const unit = plan.season !== null || plan.episode !== null ? ` S${plan.season ?? "?"}E${plan.episode ?? "?"}` : "";
-      console.log(`${plan.action.padEnd(18)} ${mib(file.sizeBytes).padStart(12)}  ${mediaLabel(media).padEnd(24)} ${plan.title ?? "?"}${plan.year ? ` (${plan.year})` : ""}${unit}  VJ:${plan.vjText ?? "?"}  ${file.relativePath}${plan.stopReasons.length ? `\n${" ".repeat(20)}stop: ${plan.stopReasons.join(", ")}` : ""}`);
+      console.log(`${plan.action.padEnd(18)} ${mib(file.sizeBytes).padStart(12)}  ${mediaLabel(media).padEnd(24)} ${plan.title ?? "?"}${plan.year ? ` (${plan.year})` : ""}${unit}  VJ:${plan.vjText ?? "?"}  ${file.relativePath}${plan.stopReasons.length ? `\n${" ".repeat(20)}stop: ${plan.stopReasons.join(", ")}` : ""}${plan.action === "normalize" && media?.classification.reasons.length ? `\n${" ".repeat(20)}media: ${media.classification.reasons.join(", ")}` : ""}`);
     }
 
     console.log(`\n${[...counts].map(([action, count]) => `${action}: ${count}`).join("  ") || "no media files found"}`);
@@ -635,8 +665,8 @@ function normalizeDeps(store: Journal, tools: MediaTools, root: string, vjs: Kno
     tools,
     renditionsRoot: root,
     probe: (path) => probeMedia(tools.ffprobe, path),
-    digest: (path) => digestPackets(tools.ffmpeg, path),
-    remux: (source, output) => remux(tools.ffmpeg, source, output),
+    digest: (path, selection) => digestPackets(tools.ffmpeg, path, selection),
+    remux: (source, output, selection) => remux(tools.ffmpeg, source, output, selection),
     freeBytes,
     fingerprint: fingerprintFile,
     fileFacts,
@@ -670,8 +700,7 @@ async function normalize() {
   line("source", `${source.relativePath}  ${mib(source.sizeBytes)} (${source.sizeBytes} bytes)`);
   line("fingerprint", source.fingerprint);
   line("media", `${mediaLabel(media)}${media?.classification.reasons.length ? `  (${media.classification.reasons.join(", ")})` : ""}`);
-  line("video", describeVideo(media?.inspection ?? null));
-  line("audio", describeAudio(media?.inspection ?? null));
+  printStreams(media?.inspection ?? null);
   line("tools", resolved.ok ? `ffmpeg ${resolved.tools.ffmpeg.version} (${resolved.tools.ffmpeg.source}), ffprobe ${resolved.tools.ffprobe.version} (${resolved.tools.ffprobe.source})` : `unavailable: ${resolved.errors.join("; ")}`);
 
   const reasons: string[] = [];
@@ -685,7 +714,10 @@ async function normalize() {
   else {
     const config = telegramConfig();
     const reachable = config !== null && toServerFileUri(target.path, config.pathMap) !== null;
-    line("action", "stream copy (-c copy) of the one video and one audio stream into a fast-start MP4; no encoding");
+    const selection = media?.inspection ? selectPlaybackStreams(media.inspection) : null;
+    if (media?.inspection && selection === null) reasons.push("stream_selection_ambiguous");
+    line("action", selection === null ? "none: the film's video and audio stream cannot be selected unambiguously" : `stream copy (-c copy) of stream ${selection.video} (video) and stream ${selection.audio} (audio) into a fast-start MP4${selection.artwork.length ? `; artwork stream ${selection.artwork.join(", ")} left out` : ""}`);
+    line("encoding", "none");
     line("rendition", `${target.path}${media?.rendition ? `  (recorded ${media.rendition.fingerprint}${media.rendition.removedAt ? ", file removed" : ""})` : ""}`);
     line("telegram", reachable ? `readable by the local Bot API; the ${source.kind} channel after a separate, authorized upload` : "NOT under the local Bot API path map: the rendition could not be uploaded from there");
     try {
@@ -738,8 +770,7 @@ async function show() {
   const source = media?.derivedFrom ? await store.get(media.derivedFrom.fingerprint) : null;
   line("item", `${entry.relativePath}  ${mib(entry.sizeBytes)}  (${media?.role ?? "source"})`);
   line("media", `${mediaLabel(media)}${media?.classification.reasons.length ? `  (${media.classification.reasons.join(", ")})` : ""}`);
-  line("video", describeVideo(media?.inspection ?? null));
-  line("audio", describeAudio(media?.inspection ?? null));
+  printStreams(media?.inspection ?? null);
   if (media?.role === "rendition" && media.derivedFrom) {
     const v = media.derivedFrom.verification;
     line("derived from", `${source?.relativePath ?? media.derivedFrom.fingerprint}  (stream copy ${v.passed ? `verified: ${v.source.video.packets} video + ${v.source.audio.packets} audio packets identical` : `FAILED: ${v.failures.join(", ")}`})`);

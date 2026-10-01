@@ -7,6 +7,7 @@ import {
   packetListArguments,
   readMp4Layout,
   remuxArguments,
+  selectPlaybackStreams,
   unreadableMedia,
   verifyRemux,
   type MediaInspection,
@@ -73,7 +74,9 @@ describe("classifyMedia (E3.5 policy)", () => {
       [[h264, mp3, { index: 2, codec_type: "subtitle", codec_name: "subrip" }], "subtitle_streams"],
       [[h264, mp3, { index: 2, codec_type: "attachment", codec_name: "ttf" }], "attachment_streams"],
       [[h264, mp3, { index: 2, codec_type: "data", codec_name: "bin_data" }], "data_streams"],
-      [[h264, mp3, { index: 2, codec_type: "video", codec_name: "mjpeg", disposition: { attached_pic: 1 } }], "attached_picture"],
+      // A stream flagged as cover art that is not a still image is not trusted as artwork (malformed metadata).
+      [[h264, mp3, { ...h264, index: 2, disposition: { attached_pic: 1 } }], "attached_picture_not_still_image"],
+      [[h264, mp3, { index: 2, codec_type: "video", codec_name: "mjpeg", disposition: { attached_pic: 0 } }], "multiple_video_streams"],
     ];
     for (const [streams, reason] of cases) {
       const result = classOf(inspect(streams));
@@ -83,9 +86,7 @@ describe("classifyMedia (E3.5 policy)", () => {
   });
 
   it("manual_review also lists the video and audio findings that are already known", () => {
-    const cover = { index: 2, codec_type: "video", codec_name: "mjpeg", profile: "Baseline", pix_fmt: "yuvj420p", disposition: { attached_pic: 1 } };
-    expect(classOf(inspect([{ ...h264, codec_name: "hevc", profile: "Main 10", pix_fmt: "yuv420p10le" }, mp3, cover]))).toMatchObject({ class: "manual_review", reasons: ["attached_picture", "video_codec_hevc"] });
-    expect(classOf(inspect([h264, mp3, cover])).reasons).toEqual(["attached_picture"]);
+    expect(classOf(inspect([h264, { ...h264, index: 2 }, { ...mp3, codec_name: "ac3" }]))).toMatchObject({ class: "manual_review", reasons: ["multiple_video_streams", "audio_codec_ac3"] });
   });
 
   it("manual_review: unknown or inconsistent duration, unknown frame rate, a probe size that is not the file's", () => {
@@ -109,6 +110,86 @@ describe("classifyMedia (E3.5 policy)", () => {
   it("refuses output that is not a probe result", () => {
     expect(() => inspectionFromProbe({ streams: "nope" }, 1, null)).toThrow();
     expect(() => inspectionFromProbe(null, 1, null)).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("selectPlaybackStreams and cover art (E3.6)", () => {
+  /** As ffprobe reports the library's covers: an iTunes `covr` image, flagged attached_pic, one packet. */
+  const cover = (index: number) => ({ index, codec_type: "video", codec_name: "mjpeg", codec_tag_string: "[0][0][0][0]", profile: "Baseline", width: 500, height: 500, pix_fmt: "yuvj420p", r_frame_rate: "90000/1", time_base: "1/90000", duration: "5208.293719", disposition: { default: 0, attached_pic: 1 } });
+  const at = (stream: object, index: number) => ({ ...stream, index });
+
+  it("A: film video + approved audio + attached cover: the film and the audio are selected, the cover is left out", () => {
+    const inspection = inspect([h264, mp3, cover(2)], mp4Format(), SLOW);
+    expect(selectPlaybackStreams(inspection)).toEqual({ video: 0, audio: 1, artwork: [2] });
+    expect(classOf(inspection)).toEqual({ class: "remux", reasons: ["mp4_not_fast_start", "attached_picture"], policyVersion: MEDIA_POLICY_VERSION });
+  });
+
+  it("B: the cover before the film in stream order changes nothing but the indexes", () => {
+    const inspection = inspect([cover(0), at(h264, 1), at(mp3, 2)], mp4Format(), SLOW);
+    expect(selectPlaybackStreams(inspection)).toEqual({ video: 1, audio: 2, artwork: [0] });
+    expect(classOf(inspection).class).toBe("remux");
+  });
+
+  it("no order is assumed: audio first, film last, covers anywhere", () => {
+    const orders: Array<[object[], { video: number; audio: number; artwork: number[] }]> = [
+      [[at(mp3, 0), at(h264, 1)], { video: 1, audio: 0, artwork: [] }],
+      [[at(mp3, 0), cover(1), at(h264, 2)], { video: 2, audio: 0, artwork: [1] }],
+      [[cover(0), at(mp3, 1), cover(2), at(h264, 3)], { video: 3, audio: 1, artwork: [0, 2] }],
+    ];
+    for (const [streams, expected] of orders) {
+      const inspection = inspect(streams, mkvFormat(), null);
+      expect(selectPlaybackStreams(inspection)).toEqual(expected);
+      expect(classOf(inspection).class).toBe("remux");
+      // The arguments map exactly those indexes, video first.
+      expect(remuxArguments("in.mkv", "out.mp4", expected).join(" ")).toContain(`-map 0:${expected.video} -map 0:${expected.audio} -c copy`);
+    }
+  });
+
+  it("a fast-start MP4 with a cover is still remux, never canonical: the uploaded shape is exactly film + audio", () => {
+    expect(classOf(inspect([h264, mp3, cover(2)]))).toMatchObject({ class: "remux", reasons: ["attached_picture"] });
+  });
+
+  it("C: two unflagged video streams are never resolved, whatever their size, length or order", () => {
+    const short = { ...h264, index: 1, width: 320, height: 180, duration: "30.0" };
+    for (const streams of [[h264, short, at(mp3, 2)], [at(short, 0), at(h264, 1), at(mp3, 2)]]) {
+      const inspection = inspect(streams);
+      expect(selectPlaybackStreams(inspection)).toBeNull();
+      expect(classOf(inspection)).toMatchObject({ class: "manual_review" });
+      expect(classOf(inspection).reasons).toContain("multiple_video_streams");
+    }
+    // A cover beside them does not help.
+    expect(classOf(inspect([h264, { ...h264, index: 1 }, at(mp3, 2), cover(3)])).reasons).toContain("multiple_video_streams");
+  });
+
+  it("D: two audio streams stop for review; no language or order rule picks one", () => {
+    const second = { ...aac, index: 2, tags: { language: "eng" } };
+    for (const streams of [[h264, mp3, second], [h264, mp3, second, cover(3)]]) {
+      const inspection = inspect(streams);
+      expect(selectPlaybackStreams(inspection)).toBeNull();
+      expect(classOf(inspection)).toMatchObject({ class: "manual_review" });
+      expect(classOf(inspection).reasons).toContain("multiple_audio_streams");
+    }
+  });
+
+  it("a flag alone is not enough: an attached_pic stream that is not a still-image codec blocks selection", () => {
+    const flaggedMotion = { ...h264, index: 2, disposition: { attached_pic: 1 } };
+    const inspection = inspect([h264, mp3, flaggedMotion]);
+    expect(selectPlaybackStreams(inspection)).toBeNull();
+    expect(classOf(inspection).reasons).toEqual(["attached_picture_not_still_image"]);
+  });
+
+  it("only the film can be the film: a file whose only video is a cover has no video", () => {
+    expect(classOf(inspect([cover(0), at(mp3, 1)])).reasons).toContain("no_video");
+    expect(selectPlaybackStreams(inspect([cover(0), at(mp3, 1)]))).toBeNull();
+  });
+
+  it("the other classes keep their meaning with a cover beside them (HEVC stays blocked, AC-3 stays audio_normalization)", () => {
+    const hevc = { ...h264, codec_name: "hevc", codec_tag_string: "hev1", profile: "Main 10", pix_fmt: "yuv420p10le" };
+    expect(classOf(inspect([hevc, mp3, cover(2)], mp4Format(), SLOW))).toMatchObject({ class: "video_transcode_required", reasons: ["video_codec_hevc"] });
+    expect(classOf(inspect([h264, { ...mp3, codec_name: "ac3" }, cover(2)]))).toMatchObject({ class: "audio_normalization", reasons: ["audio_codec_ac3"] });
+    expect(classOf(inspect([h264, mp3, cover(2), { index: 3, codec_type: "subtitle", codec_name: "mov_text" }])).class).toBe("manual_review");
   });
 });
 
@@ -187,16 +268,25 @@ describe("Class 2 FFmpeg arguments", () => {
   const evil = "C:\\Movies\\It's a \"Test\" [2024] -c:v libx264 & del *.mkv; $(rm -rf).mkv";
 
   it("copy only: no codec, filter, bitrate or encoder option can appear", () => {
-    const args = remuxArguments(evil, "G:\\Movies\\.velora-renditions\\sf1-0\\out.mp4.partial");
-    expect(args).toEqual(["-hide_banner", "-nostdin", "-v", "error", "-n", "-i", evil, "-map", "0:v:0", "-map", "0:a:0", "-c", "copy", "-movflags", "+faststart", "-f", "mp4", "G:\\Movies\\.velora-renditions\\sf1-0\\out.mp4.partial"]);
+    const args = remuxArguments(evil, "G:\\Movies\\.velora-renditions\\sf1-0\\out.mp4.partial", { video: 0, audio: 1, artwork: [] });
+    expect(args).toEqual(["-hide_banner", "-nostdin", "-v", "error", "-n", "-i", evil, "-map", "0:0", "-map", "0:1", "-c", "copy", "-movflags", "+faststart", "-f", "mp4", "G:\\Movies\\.velora-renditions\\sf1-0\\out.mp4.partial"]);
     const options = args.filter((arg) => arg !== evil);
     expect(options.join(" ")).not.toMatch(/-c:[va]|-codec|-vcodec|-acodec|lib(x26|mp3|fdk)|-b:|-crf|-vf|-af|-filter|-preset|-ar |-ac /);
     // A hostile file name is exactly one argument, never parsed.
     expect(args.filter((arg) => arg.includes("libx264"))).toEqual([evil]);
   });
 
-  it("the packet listing also copies (never decodes) the same two streams", () => {
-    expect(packetListArguments("x.mkv")).toEqual(["-hide_banner", "-nostdin", "-v", "error", "-i", "x.mkv", "-map", "0:v:0", "-map", "0:a:0", "-c", "copy", "-f", "framemd5", "-"]);
+  it("the packet listing also copies (never decodes) the same two streams, selected by index", () => {
+    expect(packetListArguments("x.mkv", { video: 2, audio: 0, artwork: [1] })).toEqual(["-hide_banner", "-nostdin", "-v", "error", "-i", "x.mkv", "-map", "0:2", "-map", "0:0", "-c", "copy", "-f", "framemd5", "-"]);
+  });
+
+  it("never maps by position (0:v:0 could be a cover) and refuses an index that is not a stream number", () => {
+    expect(remuxArguments("a", "b", { video: 1, audio: 2, artwork: [0] }).join(" ")).not.toMatch(/0:v|0:a/);
+    for (const bad of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => remuxArguments("a", "b", { video: bad, audio: 1, artwork: [] })).toThrow();
+      expect(() => packetListArguments("a", { video: 0, audio: bad, artwork: [] })).toThrow();
+    }
+    expect(() => remuxArguments("a", "b", { video: 1, audio: 1, artwork: [] })).toThrow();
   });
 });
 
@@ -253,6 +343,16 @@ describe("packet digests and remux verification", () => {
 
   it("passes only for a canonical output with identical streams and packets", () => {
     expect(verifyRemux(source, output, same, structuredClone(same))).toMatchObject({ passed: true, failures: [] });
+  });
+
+  it("follows the selected streams: a source with a cover first verifies against the cover-less output; an output still carrying it fails", () => {
+    const cover = { index: 0, codec_type: "video", codec_name: "mjpeg", width: 500, height: 500, pix_fmt: "yuvj420p", disposition: { attached_pic: 1 } };
+    const withCover = inspect([cover, { ...h264, index: 1 }, { ...mp3, index: 2 }], mp4Format(1_004_462_878), SLOW, 1_004_462_878);
+    expect(verifyRemux(withCover, output, same, same)).toMatchObject({ passed: true, failures: [] });
+    const coverKept = inspect([h264, mp3, { ...cover, index: 2 }], mp4Format(1_007_441_962), FAST, 1_007_441_962);
+    expect(verifyRemux(withCover, coverKept, same, same).failures).toEqual(["output_not_canonical:attached_picture"]);
+    // An ambiguous source cannot be verified at all.
+    expect(verifyRemux(inspect([h264, { ...h264, index: 1 }, { ...mp3, index: 2 }]), output, same, same).failures).toContain("streams_missing");
   });
 
   it("fails on any re-encode signal: packets, codec parameters, duration, or a non-canonical output", () => {

@@ -9,7 +9,8 @@ import { createLocalBotApiClient, loadLocalBotApiConfig, type LocalBotApiClient 
 import { newJournalEntry, openJournal, resolveJournalDir, type Journal, type JournalEntry } from "@/lib/uploader/journal";
 import { fingerprintFile } from "@/lib/uploader/scan";
 import { offlineStore, type IngestionStore } from "@/lib/uploader/store";
-import { canonicalInspection, matroskaInspection, sourceMedia } from "@/lib/uploader/test-media";
+import { canonicalInspection, COVER_ART, H264_HIGH_1080P, matroskaInspection, MP3_STEREO, sourceMedia } from "@/lib/uploader/test-media";
+import { MEDIA_POLICY_VERSION } from "@/lib/ingestion/media";
 import { isRealTelegramUploadAuthorized, planResume, REAL_UPLOADS_ENV, resumeEntry, selectUploadEntries, uploadEntry, verifySourceFingerprint, type UploaderDeps } from "@/lib/uploader/upload";
 import type { ChannelProbeResult, ServerUploadStatus, SourceFingerprint, TelegramMediaRecord, UploadFailureOutcome, UploadOutcome } from "@/types/ingestion";
 
@@ -463,7 +464,14 @@ describe("media gate (E3.5)", () => {
       { ...stale, classification: { ...stale.classification, policyVersion: 0 } },
       rendition(false),
       { ...rendition(true), derivedFrom: null },
+      // E3.6: a source with cover art is Class 2 (only its verified rendition uploads), an ambiguous film is
+      // manual review, HEVC beside a cover stays video_transcode_required, and an E3.5 (v1) record is outdated.
+      sourceMedia(canonicalInspection(SIZE, { streams: [{ ...COVER_ART, index: 0 }, { ...H264_HIGH_1080P, index: 1 }, { ...MP3_STEREO, index: 2 }] })),
+      sourceMedia(canonicalInspection(SIZE, { streams: [H264_HIGH_1080P, { ...H264_HIGH_1080P, index: 1 }, { ...MP3_STEREO, index: 2 }] })),
+      sourceMedia(canonicalInspection(SIZE, { streams: [{ ...H264_HIGH_1080P, codec: "hevc", codecTag: "hev1", profile: "Main 10", pixelFormat: "yuv420p10le" }, MP3_STEREO, COVER_ART] })),
+      { ...stale, classification: { ...stale.classification, policyVersion: MEDIA_POLICY_VERSION - 1 } },
     ];
+    expect(refused.slice(-4, -1).map((m) => m?.classification.class)).toEqual(["remux", "manual_review", "video_transcode_required"]);
     for (const value of refused) {
       expect(await uploadEntry(entry({ media: value }), CAPTION, deps(store, api))).toEqual({ result: "refused", code: "media_not_verified" });
     }

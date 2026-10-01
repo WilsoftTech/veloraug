@@ -2,7 +2,7 @@ import "server-only";
 import { spawn } from "node:child_process";
 import { stat, statfs } from "node:fs/promises";
 import { basename, delimiter, isAbsolute, join } from "node:path";
-import { createPacketDigest, inspectionFromProbe, packetListArguments, readMp4Layout, remuxArguments, type MediaInspection, type PacketDigest } from "@/lib/ingestion/media";
+import { createPacketDigest, inspectionFromProbe, packetListArguments, readMp4Layout, remuxArguments, type MediaInspection, type PacketDigest, type PlaybackSelection } from "@/lib/ingestion/media";
 import { withReadRange } from "@/lib/uploader/scan";
 
 /**
@@ -160,10 +160,10 @@ export async function probeMedia(ffprobe: MediaTool, path: string, run: Runner =
   }
 }
 
-/** Packet digests of the first video and audio stream, read by stream copy (no decoding). */
-export async function digestPackets(ffmpeg: MediaTool, path: string, run: Runner = runProcess): Promise<PacketDigest | null> {
+/** Packet digests of the selected video and audio stream, read by stream copy (no decoding). */
+export async function digestPackets(ffmpeg: MediaTool, path: string, selection: PlaybackSelection, run: Runner = runProcess): Promise<PacketDigest | null> {
   const digest = createPacketDigest();
-  const result = await run(ffmpeg.path, packetListArguments(path), { timeoutMs: 60 * 60 * 1000, maxStdoutBytes: 0, onLine: (line) => digest.push(line) });
+  const result = await run(ffmpeg.path, packetListArguments(path, selection), { timeoutMs: 60 * 60 * 1000, maxStdoutBytes: 0, onLine: (line) => digest.push(line) });
   return result.code === 0 ? digest.result() : null;
 }
 
@@ -173,10 +173,10 @@ export async function digestPackets(ffmpeg: MediaTool, path: string, run: Runner
  * so the precondition is checked here, and success also requires the output
  * to exist afterwards.
  */
-export async function remux(ffmpeg: MediaTool, sourcePath: string, outputPath: string, run: Runner = runProcess): Promise<{ ok: true } | { ok: false; code: "output_exists" | "ffmpeg_failed" | "ffmpeg_timeout"; detail: string }> {
+export async function remux(ffmpeg: MediaTool, sourcePath: string, outputPath: string, selection: PlaybackSelection, run: Runner = runProcess): Promise<{ ok: true } | { ok: false; code: "output_exists" | "ffmpeg_failed" | "ffmpeg_timeout"; detail: string }> {
   const outputSize = () => stat(outputPath).then((facts) => (facts.isFile() ? facts.size : -1), () => null);
   if ((await outputSize()) !== null) return { ok: false, code: "output_exists", detail: "" };
-  const result = await run(ffmpeg.path, remuxArguments(sourcePath, outputPath), { timeoutMs: 2 * 60 * 60 * 1000, maxStdoutBytes: 64 * 1024 });
+  const result = await run(ffmpeg.path, remuxArguments(sourcePath, outputPath, selection), { timeoutMs: 2 * 60 * 60 * 1000, maxStdoutBytes: 64 * 1024 });
   if (result.timedOut) return { ok: false, code: "ffmpeg_timeout", detail: "" };
   const detail = result.stderrTail.trim().split(/\r?\n/).slice(-3).join(" | ");
   if (result.code !== 0) return { ok: false, code: "ffmpeg_failed", detail };

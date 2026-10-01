@@ -1,7 +1,7 @@
 import "server-only";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { discoveryKey } from "@/lib/ingestion/fingerprint";
-import { classifyMedia, verifyRemux, MEDIA_POLICY_VERSION, type PacketDigest, type RemuxVerification } from "@/lib/ingestion/media";
+import { classifyMedia, selectPlaybackStreams, verifyRemux, MEDIA_POLICY_VERSION, type PacketDigest, type PlaybackSelection, type RemuxVerification } from "@/lib/ingestion/media";
 import { TELEGRAM_MAX_FILE_BYTES } from "@/lib/ingestion/telegram";
 import { newJournalEntry, type Journal, type JournalEntry, type JournalMedia } from "@/lib/uploader/journal";
 import { remuxSpaceNeeded, type MediaTools, type ProbeResult } from "@/lib/uploader/media-tools";
@@ -17,9 +17,11 @@ import type { PlannedAction, SourceFingerprint } from "@/types/ingestion";
  *
  * Order, each step failing closed before the next:
  * source is Class 2 and has no upload history -> an earlier rendition is
- * reused if it is intact or already uploaded -> source bytes re-fingerprinted
- * -> free space -> FFmpeg stream copy into `<stem>.mp4.partial` -> output
- * probed (must be canonical) -> every packet of both streams compared ->
+ * reused if it is intact or already uploaded -> the film's video and audio
+ * stream selected by meaning (E3.6; verified cover art is left out) -> source
+ * bytes re-fingerprinted -> free space -> FFmpeg stream copy of exactly those
+ * two streams into `<stem>.mp4.partial` -> output probed (must be canonical)
+ * -> every packet of both selected streams compared ->
  * source re-fingerprinted (unchanged) -> rename to `<stem>.mp4` -> rendition
  * fingerprinted and journaled -> source linked to it.
  *
@@ -34,8 +36,8 @@ export interface NormalizeDeps {
   /** Renditions root, e.g. G:\Movies\.velora-renditions. */
   renditionsRoot: string;
   probe(path: string): Promise<ProbeResult>;
-  digest(path: string): Promise<PacketDigest | null>;
-  remux(sourcePath: string, outputPath: string): Promise<{ ok: true } | { ok: false; code: string; detail: string }>;
+  digest(path: string, selection: PlaybackSelection): Promise<PacketDigest | null>;
+  remux(sourcePath: string, outputPath: string, selection: PlaybackSelection): Promise<{ ok: true } | { ok: false; code: string; detail: string }>;
   freeBytes(dir: string): Promise<number>;
   fingerprint(path: string, sizeBytes: number): Promise<SourceFingerprint>;
   /** Size and mtime, or null when the path is not a regular file. */
@@ -93,7 +95,8 @@ async function existingRendition(source: JournalEntry, deps: NormalizeDeps): Pro
   const entry = await deps.journal.get(recorded.fingerprint);
   if (entry === null) return null;
   if (hasUploadHistory(entry)) return { result: "already_normalized", rendition: entry, reason: "rendition_has_upload_history" };
-  if (recorded.removedAt !== null) return null;
+  // Made under an older policy and never sent: regenerated and re-verified under this one.
+  if (recorded.removedAt !== null || entry.media?.classification.policyVersion !== MEDIA_POLICY_VERSION) return null;
   const facts = await deps.fileFacts(entry.absolutePath);
   if (facts === null || facts.sizeBytes !== entry.sizeBytes) return null;
   return (await deps.fingerprint(entry.absolutePath, entry.sizeBytes)) === entry.fingerprint ? { result: "already_normalized", rendition: entry, reason: "rendition_intact" } : null;
@@ -110,6 +113,8 @@ export async function normalizeEntry(source: JournalEntry, deps: NormalizeDeps):
   const earlier = await existingRendition(source, deps);
   if (earlier !== null) return earlier;
 
+  const selection = selectPlaybackStreams(media.inspection);
+  if (selection === null) return { result: "refused", code: "stream_selection_ambiguous" };
   const target = renditionTarget(source, deps.renditionsRoot);
   if (target === null) return { result: "refused", code: "rendition_name_unsafe" };
 
@@ -129,14 +134,16 @@ export async function normalizeEntry(source: JournalEntry, deps: NormalizeDeps):
     return recordFailure(deps, source, code, details);
   };
 
-  const made = await deps.remux(source.absolutePath, target.partialPath);
+  const made = await deps.remux(source.absolutePath, target.partialPath, selection);
   if (!made.ok) return discard(made.code, made.detail ? [made.detail] : []);
 
   const probed = await deps.probe(target.partialPath);
   if (!probed.ok) return discard("output_probe_failed", [probed.code]);
   if (probed.inspection.sizeBytes > TELEGRAM_MAX_FILE_BYTES) return discard("rendition_too_large", [`${probed.inspection.sizeBytes} bytes`]);
 
-  const [sourcePackets, outputPackets] = [await deps.digest(source.absolutePath), await deps.digest(target.partialPath)];
+  const outputSelection = selectPlaybackStreams(probed.inspection);
+  if (outputSelection === null) return discard("output_streams_unselectable", []);
+  const [sourcePackets, outputPackets] = [await deps.digest(source.absolutePath, selection), await deps.digest(target.partialPath, outputSelection)];
   if (sourcePackets === null || outputPackets === null) return discard("packet_digest_failed", [sourcePackets === null ? "source" : "output"]);
   const verification = verifyRemux(media.inspection, probed.inspection, sourcePackets, outputPackets);
   if (!verification.passed) return discard("verification_failed", verification.failures);

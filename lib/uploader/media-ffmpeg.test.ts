@@ -4,7 +4,7 @@ import { mkdir, rename, stat, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { classifyMedia, readMp4Layout, verifyRemux, type MediaInspection } from "@/lib/ingestion/media";
+import { classifyMedia, readMp4Layout, selectPlaybackStreams, verifyRemux, type MediaInspection, type PlaybackSelection } from "@/lib/ingestion/media";
 import { newJournalEntry, openJournal, type JournalEntry } from "@/lib/uploader/journal";
 import { digestPackets, freeBytes, probeMedia, remux, resolveMediaTools, runProcess, type MediaTools } from "@/lib/uploader/media-tools";
 import { normalizeEntry, type NormalizeDeps } from "@/lib/uploader/normalize";
@@ -12,7 +12,7 @@ import { fingerprintFile, withReadRange } from "@/lib/uploader/scan";
 import type { SourceFingerprint } from "@/types/ingestion";
 
 /**
- * The media pipeline against real FFmpeg and ffprobe (E3.5), on tiny
+ * The media pipeline against real FFmpeg and ffprobe (E3.5, E3.6), on tiny
  * synthetic fixtures made here from FFmpeg's own test sources: no movie, no
  * copyrighted content, nothing committed. The fixtures are encoded; the
  * pipeline under test never encodes. Runs when the tools resolve
@@ -35,6 +35,31 @@ async function ffmpeg(args: string[]) {
   if (result.code !== 0) throw new Error(`fixture: ${result.stderrTail}`);
 }
 
+/**
+ * Moves `udta` (where an MP4 keeps its iTunes `covr` cover) ahead of the
+ * tracks inside `moov`, so ffprobe numbers the cover stream 0. Only valid for
+ * a non-fast-start file (moov after mdat): no media offset moves. FFmpeg's
+ * muxer never writes this order itself; other tools do.
+ */
+function coverFirst(from: string, to: string) {
+  const file = readFileSync(from);
+  const children = (start: number, end: number) => {
+    const out: Array<{ type: string; start: number; end: number }> = [];
+    for (let at = start; at < end; ) {
+      const size = file.readUInt32BE(at);
+      out.push({ type: file.toString("latin1", at + 4, at + 8), start: at, end: at + size });
+      at += size;
+    }
+    return out;
+  };
+  const top = children(0, file.length);
+  const moov = top[top.length - 1];
+  if (moov.type !== "moov" || !top.some((box) => box.type === "mdat")) throw new Error("fixture: expected a non-fast-start MP4");
+  const inner = children(moov.start + 8, moov.end);
+  const order = [...inner.filter((b) => b.type === "mvhd"), ...inner.filter((b) => b.type === "udta"), ...inner.filter((b) => b.type !== "mvhd" && b.type !== "udta")];
+  writeFileSync(to, Buffer.concat([file.subarray(0, moov.start + 8), ...order.map((b) => file.subarray(b.start, b.end))]));
+}
+
 const video = ["-f", "lavfi", "-i", "testsrc2=size=160x120:rate=24:duration=2"];
 const tone = (freq = 440) => ["-f", "lavfi", "-i", `sine=frequency=${freq}:sample_rate=44100:duration=2`];
 const h264 = ["-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p", "-g", "24"];
@@ -53,6 +78,23 @@ beforeAll(async () => {
   const srt = join(work, "subs.srt");
   writeFileSync(srt, "1\n00:00:00,000 --> 00:00:01,000\nhello\n");
   await ffmpeg([...video, ...tone(), "-i", srt, "-map", "0:v", "-map", "1:a", "-map", "2:s", ...h264, "-c:a", "libmp3lame", "-c:s", "srt", at("Subtitled.VJ Test.2024.mkv")]);
+  // E3.6 cover art: a still JPEG stored as the container stores cover art.
+  const cover = join(work, "cover.jpg");
+  const base = join(work, "base.mkv");
+  await ffmpeg(["-f", "lavfi", "-i", "color=red:size=64x64", "-frames:v", "1", cover]);
+  await ffmpeg([...video, ...tone(), ...h264, "-c:a", "libmp3lame", "-ac", "2", base]);
+  // A: film 0, audio 1, cover 2 (an iTunes covr image, like the six library MP4s); not fast-start.
+  await ffmpeg(["-i", base, "-i", cover, "-map", "0:v", "-map", "0:a", "-map", "1", "-c", "copy", "-disposition:2", "attached_pic", at("Cover Art.VJ Test.2024.mp4")]);
+  // Audio 0, film 1, cover 2.
+  await ffmpeg(["-i", base, "-i", cover, "-map", "0:a", "-map", "0:v", "-map", "1", "-c", "copy", "-disposition:2", "attached_pic", at("Audio First Cover.VJ Test.2024.mp4")]);
+  // B: cover 0, film 1, audio 2.
+  coverFirst(fixtures["Cover Art.VJ Test.2024.mp4"], at("Cover First.VJ Test.2024.mp4"));
+  // Matroska keeps cover art as an attachment, which FFmpeg exposes as a flagged video stream.
+  await ffmpeg(["-i", base, "-map", "0", "-c", "copy", "-attach", cover, "-metadata:s:t", "mimetype=image/jpeg", at("Matroska Cover.VJ Test.2024.mkv")]);
+  // The same JPEG muxed as an ordinary track (Matroska drops the flag): a second video stream, not cover art.
+  await ffmpeg(["-i", base, "-i", cover, "-map", "1", "-map", "0:a", "-map", "0:v", "-c", "copy", "-disposition:0", "attached_pic", at("Mjpeg Track.VJ Test.2024.mkv")]);
+  // D with cover art beside it: two audio streams stay ambiguous.
+  await ffmpeg(["-i", base, ...tone(880), "-i", cover, "-map", "0:v", "-map", "0:a", "-map", "1:a", "-map", "2", "-c:v", "copy", "-c:a", "libmp3lame", "-disposition:3", "attached_pic", at("Two Audio Cover.VJ Test.2024.mp4")]);
   writeFileSync(at("Broken.VJ Test.2024.mkv"), createHash("sha256").update("not a movie").digest().toString("hex").repeat(64));
 }, 120_000);
 afterAll(() => rmSync(work, { recursive: true, force: true }));
@@ -74,6 +116,12 @@ describe.skipIf(!tools)("real ffprobe classification of synthetic fixtures", () 
     ["Two Audio.VJ Test.2024.mkv", "manual_review", ["multiple_audio_streams"]],
     ["Two Video.VJ Test.2024.mkv", "manual_review", ["multiple_video_streams"]],
     ["Subtitled.VJ Test.2024.mkv", "manual_review", ["subtitle_streams"]],
+    ["Cover Art.VJ Test.2024.mp4", "remux", ["mp4_not_fast_start", "attached_picture"]],
+    ["Audio First Cover.VJ Test.2024.mp4", "remux", ["mp4_not_fast_start", "attached_picture"]],
+    ["Cover First.VJ Test.2024.mp4", "remux", ["mp4_not_fast_start", "attached_picture"]],
+    ["Matroska Cover.VJ Test.2024.mkv", "remux", ["container_matroska", "attached_picture"]],
+    ["Mjpeg Track.VJ Test.2024.mkv", "manual_review", ["multiple_video_streams"]],
+    ["Two Audio Cover.VJ Test.2024.mp4", "manual_review", ["multiple_audio_streams"]],
   ])("%s -> %s", async (name, cls, reasons) => {
     const result = classifyMedia(await probe(name));
     expect(result.class).toBe(cls);
@@ -83,6 +131,23 @@ describe.skipIf(!tools)("real ffprobe classification of synthetic fixtures", () 
   it("an unreadable file is a probe failure (ffprobe exits non-zero), which the scan records as manual review", async () => {
     expect(await probeMedia(tools!.ffprobe, fixtures["Broken.VJ Test.2024.mkv"])).toEqual({ ok: false, code: "probe_failed" });
     expect(await probeMedia(tools!.ffprobe, join(library, "missing.mkv"))).toEqual({ ok: false, code: "source_unreadable" });
+  });
+
+  it("E3.6: real ffprobe flags the covers attached_pic, and selection follows meaning, not position", async () => {
+    const expected: Record<string, PlaybackSelection | null> = {
+      "Cover Art.VJ Test.2024.mp4": { video: 0, audio: 1, artwork: [2] },
+      "Audio First Cover.VJ Test.2024.mp4": { video: 1, audio: 0, artwork: [2] },
+      "Cover First.VJ Test.2024.mp4": { video: 1, audio: 2, artwork: [0] },
+      "Matroska Cover.VJ Test.2024.mkv": { video: 0, audio: 1, artwork: [2] },
+      "Mjpeg Track.VJ Test.2024.mkv": null,
+      "Two Audio Cover.VJ Test.2024.mp4": null,
+      "Two Video.VJ Test.2024.mkv": null,
+      "Two Audio.VJ Test.2024.mkv": null,
+    };
+    for (const [name, selection] of Object.entries(expected)) expect(selectPlaybackStreams(await probe(name)), name).toEqual(selection);
+    // The hazard E3.5 stopped on: in this file FFmpeg's positional 0:v:0 is the cover, not the film.
+    const first = await runProcess(tools!.ffprobe.path, ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=index,codec_name", "-of", "csv=p=0", fixtures["Cover First.VJ Test.2024.mp4"]], { timeoutMs: 20_000, maxStdoutBytes: 1024 });
+    expect(first.stdout.trim()).toBe("0,mjpeg");
   });
 
   it("the classification is the same on every run", async () => {
@@ -109,8 +174,8 @@ describe.skipIf(!tools)("real Class 2 normalization", () => {
       tools: tools!,
       renditionsRoot: renditions,
       probe: (p) => probeMedia(tools!.ffprobe, p),
-      digest: (p) => digestPackets(tools!.ffmpeg, p),
-      remux: (s, o) => remux(tools!.ffmpeg, s, o),
+      digest: (p, selection) => digestPackets(tools!.ffmpeg, p, selection),
+      remux: (s, o, selection) => remux(tools!.ffmpeg, s, o, selection),
       freeBytes,
       fingerprint: fingerprintFile,
       fileFacts: async (p) => stat(p).then((f) => (f.isFile() ? { sizeBytes: f.size, modifiedAtMs: f.mtimeMs } : null), () => null),
@@ -154,11 +219,41 @@ describe.skipIf(!tools)("real Class 2 normalization", () => {
     expect(again).toMatchObject({ result: "already_normalized", reason: "rendition_intact" });
   }, 120_000);
 
+  it.each(["Cover Art.VJ Test.2024.mp4", "Audio First Cover.VJ Test.2024.mp4", "Cover First.VJ Test.2024.mp4", "Matroska Cover.VJ Test.2024.mkv"])("E: %s: the film and audio are copied, the cover is left out, packets identical, source untouched", async (name) => {
+    const before = { sha: sha256(fixtures[name]), mtime: statSync(fixtures[name]).mtimeMs };
+    const { source, deps } = await run(name);
+    const result = await normalizeEntry(source, deps);
+    if (result.result !== "normalized") throw new Error(JSON.stringify(result));
+    expect(sha256(fixtures[name])).toBe(before.sha);
+    expect(statSync(fixtures[name]).mtimeMs).toBe(before.mtime);
+
+    // The rendition is exactly film + audio: canonical, no picture stream, no covr box.
+    const output = (await probeMedia(tools!.ffprobe, result.rendition.absolutePath) as { inspection: MediaInspection }).inspection;
+    expect(classifyMedia(output)).toMatchObject({ class: "canonical", reasons: [] });
+    expect(output.streams.map((s) => [s.type, s.codec, s.attachedPicture])).toEqual([["video", "h264", false], ["audio", "mp3", false]]);
+    expect(readFileSync(result.rendition.absolutePath).includes(Buffer.from("covr"))).toBe(false);
+
+    // Identity is proven against the source's selected streams, independently of the pipeline's own digest call.
+    const sourceSelection = selectPlaybackStreams(source.media!.inspection!)!;
+    const independent = await digestPackets(tools!.ffmpeg, fixtures[name], sourceSelection);
+    expect(result.verification.passed).toBe(true);
+    expect(result.verification.source).toEqual(independent);
+    expect(result.verification.output).toEqual(independent);
+    expect(independent!.video.packets).toBeGreaterThan(40);
+    // A digest that wrongly took the cover as the video would not match.
+    if (sourceSelection.artwork.length) {
+      const wrong = await digestPackets(tools!.ffmpeg, fixtures[name], { ...sourceSelection, video: sourceSelection.artwork[0] });
+      expect(wrong?.video.packets).toBe(1);
+      expect(wrong?.video.sha256).not.toBe(independent!.video.sha256);
+    }
+  }, 120_000);
+
   it("the verifier catches a re-encode that keeps the codec, container and duration", async () => {
     const source = fixtures[UNUSUAL];
     const reencoded = join(work, "reencoded.mp4");
     await ffmpeg(["-i", source, "-map", "0:v:0", "-map", "0:a:0", ...h264, "-crf", "40", "-c:a", "copy", "-movflags", "+faststart", reencoded]);
-    const [a, b] = [await digestPackets(tools!.ffmpeg, source), await digestPackets(tools!.ffmpeg, reencoded)];
+    const selection = { video: 0, audio: 1, artwork: [] };
+    const [a, b] = [await digestPackets(tools!.ffmpeg, source, selection), await digestPackets(tools!.ffmpeg, reencoded, selection)];
     const verification = verifyRemux(await probe(UNUSUAL), (await probeMedia(tools!.ffprobe, reencoded) as { inspection: MediaInspection }).inspection, a!, b!);
     expect(verification.passed).toBe(false);
     expect(verification.failures).toContain("video_packets_changed");
@@ -169,7 +264,7 @@ describe.skipIf(!tools)("real Class 2 normalization", () => {
   it("FFmpeg failure on unreadable input: a clean failure, no rendition left behind", async () => {
     const broken = fixtures["Broken.VJ Test.2024.mkv"];
     const output = join(work, "never.mp4.partial");
-    const result = await remux(tools!.ffmpeg, broken, output);
+    const result = await remux(tools!.ffmpeg, broken, output, { video: 0, audio: 1, artwork: [] });
     expect(result).toMatchObject({ ok: false, code: "ffmpeg_failed" });
     expect(() => statSync(output)).toThrow();
   });
@@ -178,7 +273,7 @@ describe.skipIf(!tools)("real Class 2 normalization", () => {
     // FFmpeg 9.0.2 with -n refuses to overwrite yet exits 0, so remux() checks itself.
     const output = join(work, "exists.mp4.partial");
     writeFileSync(output, "keep me");
-    expect(await remux(tools!.ffmpeg, fixtures[UNUSUAL], output)).toEqual({ ok: false, code: "output_exists", detail: "" });
+    expect(await remux(tools!.ffmpeg, fixtures[UNUSUAL], output, { video: 0, audio: 1, artwork: [] })).toEqual({ ok: false, code: "output_exists", detail: "" });
     expect(readFileSync(output, "utf8")).toBe("keep me");
   });
 

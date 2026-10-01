@@ -7,7 +7,7 @@ import { computeFingerprint } from "@/lib/ingestion/fingerprint";
 import { parseFilename } from "@/lib/ingestion/parser";
 import { buildUploadCaption } from "@/lib/ingestion/telegram";
 import { newJournalEntry, openJournal } from "@/lib/uploader/journal";
-import { canonicalInspection, matroskaInspection, sourceMedia } from "@/lib/uploader/test-media";
+import { canonicalInspection, COVER_ART, H264_HIGH_1080P, matroskaInspection, MP3_STEREO, sourceMedia } from "@/lib/uploader/test-media";
 import type { SourceFingerprint } from "@/types/ingestion";
 
 /**
@@ -242,9 +242,10 @@ describe("upload --fingerprint on plain Node (C2B.2C.2)", () => {
       const dry = ingest({ ...TELEGRAM, VELORA_RENDITIONS_DIR: renditions }, "normalize", "--fingerprint", B);
       expect(dry.status).toBe(0);
       expect(dry.stdout).toContain("media          REMUX  (container_matroska)");
-      expect(dry.stdout).toContain("video          h264 High L4.0 1920x1080 24/1 fps yuv420p");
-      expect(dry.stdout).toContain("audio          mp3 44100 Hz 2 ch stereo");
-      expect(dry.stdout).toContain("stream copy (-c copy)");
+      expect(dry.stdout).toContain("streams        stream 0  video h264 High L4.0 1920x1080 24/1 fps yuv420p  (selected)");
+      expect(dry.stdout).toContain("               stream 1  audio mp3 44100 Hz 2 ch stereo  (selected)");
+      expect(dry.stdout).toContain("stream copy (-c copy) of stream 0 (video) and stream 1 (audio)");
+      expect(dry.stdout).toContain("encoding       none");
       expect(dry.stdout).toContain("no Telegram call, no database write");
       expect(dry.stdout).toContain("would not normalize (media_tools_unavailable)");
       expect(existsSync(renditions)).toBe(false);
@@ -263,6 +264,43 @@ describe("upload --fingerprint on plain Node (C2B.2C.2)", () => {
 
       expect(ingest({}, "cleanup", "--fingerprint", B, "--execute").stderr).toContain("cleanup removes rendition files only");
       expect(snapshot()).toEqual(before);
+    } finally {
+      await journal.put(original);
+    }
+  }, 120_000);
+
+  it("show and normalize explain cover art and ambiguity per stream (E3.6), and write nothing", async () => {
+    const journal = await openJournal(dir);
+    const original = (await journal.get(B))!;
+    const noTools = { PATH: "", VELORA_FFPROBE_PATH: "", VELORA_FFMPEG_PATH: "" };
+    const ingest = (...args: string[]) => cliWith({ VELORA_INGEST_JOURNAL_DIR: dir, VELORA_RENDITIONS_DIR: join(media, "renditions-not-created"), ...noTools, ...TELEGRAM }, ...args);
+    const slow = { boxes: ["ftyp", "free", "mdat", "moov"], fastStart: false, fragmented: false, complete: true };
+    try {
+      const covered = canonicalInspection(original.sizeBytes, { streams: [{ ...COVER_ART, index: 0 }, { ...H264_HIGH_1080P, index: 1 }, { ...MP3_STEREO, index: 2 }], layout: slow });
+      await journal.put({ ...original, plan: { action: "normalize", stopReasons: ["media_remux_required"] }, media: sourceMedia(covered) });
+      const before = snapshot();
+      const show = ingest("show", "--fingerprint", B);
+      expect(show.stdout).toContain("media          REMUX  (mp4_not_fast_start, attached_picture)");
+      expect(show.stdout).toContain("streams        stream 0  video mjpeg 500x500 image  (attached artwork: ignored for playback, kept in the source)");
+      expect(show.stdout).toContain("               stream 1  video h264 High L4.0 1920x1080 24/1 fps yuv420p  (selected)");
+      expect(show.stdout).toContain("               stream 2  audio mp3 44100 Hz 2 ch stereo  (selected)");
+      const dry = ingest("normalize", "--fingerprint", B);
+      expect(dry.stdout).toContain("stream copy (-c copy) of stream 1 (video) and stream 2 (audio) into a fast-start MP4; artwork stream 0 left out");
+      expect(dry.stdout).toContain("encoding       none");
+      expect(snapshot()).toEqual(before);
+
+      const ambiguous = canonicalInspection(original.sizeBytes, { streams: [H264_HIGH_1080P, { ...H264_HIGH_1080P, index: 1, width: 640, height: 360 }, { ...MP3_STEREO, index: 2 }] });
+      await journal.put({ ...original, plan: { action: "hold", stopReasons: ["media_manual_review", "media_multiple_video_streams"] }, media: sourceMedia(ambiguous) });
+      const beforeReview = snapshot();
+      const review = ingest("show", "--fingerprint", B);
+      expect(review.stdout).toContain("media          MANUAL_REVIEW  (multiple_video_streams)");
+      expect(review.stdout).toContain("stream 1  video h264 High L4.0 640x360 24/1 fps yuv420p  (one of several candidates: review, never guessed)");
+      expect(review.stdout).toContain("upload         blocked by media policy");
+      const refused = ingest("normalize", "--fingerprint", B);
+      expect(refused.stdout).toContain("action         none: the film's video and audio stream cannot be selected unambiguously");
+      expect(refused.stdout).toContain("would not normalize (media_manual_review");
+      expect(refused.stdout).toContain("stream_selection_ambiguous");
+      expect(snapshot()).toEqual(beforeReview);
     } finally {
       await journal.put(original);
     }

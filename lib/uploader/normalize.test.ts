@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MEDIA_POLICY_VERSION, type PacketDigest } from "@/lib/ingestion/media";
 import { newJournalEntry, openJournal, type Journal, type JournalEntry } from "@/lib/uploader/journal";
 import { cleanupRendition, normalizeEntry, renditionTarget, type NormalizeDeps } from "@/lib/uploader/normalize";
-import { canonicalInspection, matroskaInspection, sourceMedia } from "@/lib/uploader/test-media";
+import { canonicalInspection, COVER_ART, H264_HIGH_1080P, matroskaInspection, MP3_STEREO, sourceMedia } from "@/lib/uploader/test-media";
 import type { SourceFingerprint } from "@/types/ingestion";
 
 /**
@@ -168,6 +168,42 @@ describe("normalizeEntry (Class 2)", () => {
     ];
     for (const [overrides, code] of cases) expect(await normalizeEntry(source(overrides), deps), code).toMatchObject({ result: "refused", code });
     expect(deps.remux).not.toHaveBeenCalled();
+  });
+
+  it("E3.6: maps the film and audio by their index, whatever the order, and leaves verified cover art out", async () => {
+    const { deps } = world();
+    // As in the library MP4s, but with the cover first: 0 cover, 1 film, 2 audio; not fast-start.
+    const inspection = canonicalInspection(SOURCE_SIZE, { streams: [{ ...COVER_ART, index: 0 }, { ...H264_HIGH_1080P, index: 1 }, { ...MP3_STEREO, index: 2 }], layout: { boxes: ["ftyp", "free", "mdat", "moov"], fastStart: false, fragmented: false, complete: true } });
+    const withCover = source({ media: sourceMedia(inspection) });
+    expect(withCover.media?.classification).toMatchObject({ class: "remux", reasons: ["mp4_not_fast_start", "attached_picture"] });
+    await journal.put(withCover);
+    expect(await normalizeEntry(withCover, deps)).toMatchObject({ result: "normalized", verification: { passed: true } });
+    expect(deps.remux).toHaveBeenCalledWith(SOURCE_PATH, expect.any(String), { video: 1, audio: 2, artwork: [0] });
+    // Each file's digest follows its own selection: the source's film is stream 1, the rendition's stream 0.
+    expect(deps.digest).toHaveBeenNthCalledWith(1, SOURCE_PATH, { video: 1, audio: 2, artwork: [0] });
+    expect(deps.digest).toHaveBeenNthCalledWith(2, expect.stringMatching(/\.partial$/), { video: 0, audio: 1, artwork: [] });
+  });
+
+  it("E3.6: a source whose film cannot be selected is refused even if a stale record calls it remux", async () => {
+    const { deps } = world();
+    const ambiguous = canonicalInspection(SOURCE_SIZE, { streams: [H264_HIGH_1080P, { ...H264_HIGH_1080P, index: 1 }, { ...MP3_STEREO, index: 2 }] });
+    const media = { ...sourceMedia(ambiguous), classification: { class: "remux" as const, reasons: ["container_matroska"], policyVersion: MEDIA_POLICY_VERSION } };
+    expect(await normalizeEntry(source({ media }), deps)).toMatchObject({ result: "refused", code: "stream_selection_ambiguous" });
+    expect(deps.remux).not.toHaveBeenCalled();
+  });
+
+  it("E3.6: an output whose streams cannot be selected is discarded before any digest", async () => {
+    await failsWith((w) => vi.mocked(w.deps.probe).mockResolvedValueOnce({ ok: true, inspection: canonicalInspection(OUT_SIZE, { streams: [H264_HIGH_1080P, { ...H264_HIGH_1080P, index: 1 }, { ...MP3_STEREO, index: 2 }] }) }), "output_streams_unselectable");
+  });
+
+  it("E3.6: a never-uploaded rendition made under an older policy is regenerated and re-verified, not reused", async () => {
+    const { deps } = world();
+    await normalizeEntry(source(), deps);
+    const rendition = (await journal.get(OUT))!;
+    await journal.put({ ...rendition, media: { ...rendition.media!, classification: { ...rendition.media!.classification, policyVersion: MEDIA_POLICY_VERSION - 1 } } });
+    expect(await normalizeEntry((await journal.get(SRC))!, deps)).toMatchObject({ result: "normalized" });
+    expect(deps.remux).toHaveBeenCalledTimes(2);
+    expect((await journal.get(OUT))!.media?.classification.policyVersion).toBe(MEDIA_POLICY_VERSION);
   });
 
   it("refuses before writing anything when the source bytes changed since the scan, or there is not enough space", async () => {
