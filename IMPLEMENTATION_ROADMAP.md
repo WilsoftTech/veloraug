@@ -163,6 +163,13 @@ The first Velora UG task is reconciliation, not feature construction.
   - **Resources.** Gateway peak 74.3 MiB of its 256 MiB cap.
   - **External state.** Telegram Movies writes: 1 document and 1 marker, plus 1 forward and 1 delete in the recovery group. Series 0. Hosted: 0 migrations and 1 cutover. The old MKV is retained and unlinked; Fuze is unchanged. Throwaway auth users were created and deleted.
   - **Next:** the real Safari/iOS device test (a pre-launch gate), then roadmap E3 progress persistence (bounded, throttled, idempotent writes). Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.3".
+- E3.4 gateway recovery and player error classification (2026-10-01): **PASS.**
+  - **Cause.** "This movie can't be played in this browser." on On The Hunt came from a stopped media gateway, not the media. Chrome and Firefox report `MediaError` 4 for a refused connection, any HTTP error status and undecodable bytes alike, and the player mapped 4 to "unsupported".
+  - **Fix.** An error before metadata is now diagnosed with at most two bounded requests straight to the gateway (a two-byte read of the stream URL, then a no-cors `/healthz`). "Unsupported" now requires the gateway to be serving the file. Unreachable, 5xx and 429 show "temporarily unavailable", 404 "isn't available", 401 gets one renewal, and anything unknown gets a neutral "Playback failed". There is no new automatic retry.
+  - **Startup.** `npm run gateway:dev` runs the existing image from `.env.local`, passing only gateway variables and never a login token, and waits for readiness. `next dev` warns when the gateway is down. The README documents the two commands.
+  - **Proof.** Started from a stopped machine. The restricted role resolves version 1 to the E3.3 MP4 (message 27). Chrome and Firefox play with video, audio and a seek to 30:00, all responses 206 ≤ 8 MiB.
+  - **External state.** Telegram writes 0, Series 0, hosted writes 0, persistent auth writes 0; nothing re-uploaded or remapped.
+  - **Open.** Set `MEDIA_GATEWAY_ALLOWED_ORIGINS` on the deployed gateway; Safari and iOS are still the pre-launch gate. Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.4".
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules

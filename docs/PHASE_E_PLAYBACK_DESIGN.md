@@ -997,3 +997,141 @@ The Bot API container, which had been stopped before this checkpoint, was starte
 - **Bot API 500 s idle timeout.** Decide whether to raise `IDLE_TIMEOUT` in the pinned build or keep recovery as the normal path for long uploads.
 - **Old MKV (message 23) and Fuze's MKV.** Retention or cleanup needs a separately approved checkpoint.
 - **Replacement command.** The replacement was a guarded one-off owner script. If more legacy titles need it, a reusable owner command (a migration) should replace the script.
+
+## E3.4 — Gateway recovery and player error classification (2026-10-01)
+
+**Result: `E3.4 GATEWAY RECOVERY + PLAYER ERROR CLASSIFICATION: PASS`.** Starting HEAD `6520d2a` (E3.3 PASS). E3.3 was not repeated: no remux, no upload and no media cutover.
+
+### 1. Original failure
+
+The player showed "This movie can't be played in this browser." for On The Hunt. Reproduced on the operator's `next dev` (`http://localhost:3000`) with Docker Desktop stopped, one throwaway hosted user, Chrome 154 and Playwright Firefox 155 (Gecko):
+
+- the issuer answered 200 with `{ expiresAt, streamUrl }` on `http://127.0.0.1:8787` and a 600 s lifetime;
+- the media element requested `bytes=0-` and got `ERR_CONNECTION_REFUSED` (Chrome) or `NS_ERROR_CONNECTION_REFUSED` (Gecko);
+- `MediaError` code 4, `readyState` 0, `networkState` 3, then the "can't be played in this browser" message.
+
+**Diagnosis: B, an unreachable gateway.** The media was never at fault. `failureFromMediaError` mapped code 4 to `unsupported`.
+
+### 2. What the browser can tell (measured)
+
+A bare `<video>` against a local HTTP server in both engines:
+
+| Failure | `MediaError` (Chrome and Gecko) | CORS `Range: bytes=0-1` fetch | `no-cors` `/healthz` |
+| --- | --- | --- | --- |
+| Connection refused | 4 | rejects | **rejects** |
+| 401, 403, 404, 429, 503 | 4 | status readable only if the gateway allows the origin | resolves (opaque) |
+| 206 undecodable bytes | 4 | 206 readable only if allowed | resolves |
+
+Code 4 is identical for every class, so it never proves incompatibility on its own. Chrome's `MediaError.message` differs ("Format error" for HTTP errors, empty for demux failures), but it is engine-specific diagnostic text and is not used.
+
+### 3. Error model (`lib/playback/player.ts`)
+
+- `classifyMediaError(code, metadataLoaded)`. Code 1 is ignored. **Before metadata** from the current source, any error is diagnosed. After metadata, 2 is `network` (the existing renew-once path) and anything else is `playback_error`.
+- `diagnoseMediaFailure(streamUrl)`: at most two requests, straight to the gateway (never through Next.js), each with a 5 s timeout, no credentials and no referrer.
+  1. The stream URL for `bytes=0-1`. A readable status decides: 206/200 → `unsupported`, 401 → `capability_rejected`, 404 → `unavailable`, 429/5xx → `temporarily_unavailable`, anything else → `playback_error`.
+  2. If that is unreadable (unreachable, timed out, or the origin is not allowed), `GET /healthz` in `no-cors` mode. A failure means the gateway is unreachable (`temporarily_unavailable`); success means it is up and the reason is unknown (`playback_error`, a neutral message).
+- **`unsupported` now requires the gateway to be serving the file's bytes.**
+- `capability_rejected` uses the existing single renewal. If that chance is spent, it shows `temporarily_unavailable`.
+- The diagnosis is aborted when the player closes. The `/healthz` probe carries no capability and causes no catalogue or Telegram work. Probe 1 causes at most one small read, and only after a failure.
+
+| Failure | Message |
+| --- | --- |
+| Signed out (issuer 401) | Sign in to watch this movie. (unchanged) |
+| Gateway unreachable, 5xx, 429, rejected capability after renewal | Playback is temporarily unavailable. Try again in a moment. |
+| Gateway 404 | This movie isn't available to watch right now. |
+| Gateway serves bytes the browser cannot play | This movie can't be played in this browser. |
+| Undetermined (gateway up, status unreadable), or an error after metadata | Playback failed. Try again. (was "Playback stopped because of an error. Try again.") |
+
+**Retry.** There is no new automatic retry. Each Play allows at most one renewal, under the existing 30 s minimum interval, and at most two diagnostic requests per failure. After an error the capability is dropped and Play reappears, which is the user's retry.
+
+**Precision depends on configuration.** The status is readable only when the gateway lists the site's origin in `MEDIA_GATEWAY_ALLOWED_ORIGINS` (the existing CORS allow-list). Production must set it to the site's origin; otherwise service errors other than "unreachable" show the neutral message, never "unsupported".
+
+### 4. Development startup
+
+- **`npm run gateway:dev`** (`scripts/media-gateway-dev.mjs`) runs the existing gateway image with the E3.3 hardening: read-only root filesystem, 256 MiB, 1 CPU, `127.0.0.1` only, the existing session directory mounted. It then waits for `/readyz`.
+  - It reads `.env.local`, the file Next.js reads, so both hold the same token secret by construction.
+  - Only the gateway's own variables are passed, **by name**. The reader bot token and `MEDIA_GATEWAY_ALLOW_BOT_LOGIN` are never passed, so it cannot log in. It refuses to run without an existing session file.
+  - It never starts Docker Desktop; without Docker it says so and exits.
+  - It defaults `MEDIA_GATEWAY_ALLOWED_ORIGINS` to the two loopback app origins.
+  - `--stop` sends SIGTERM (graceful drain and session persistence) before removing; `--build` rebuilds the image.
+- **`instrumentation.ts`** (development and Node runtime only) checks `/healthz` in the background once at startup and warns with the origin and the command. It never blocks startup and never prints a secret. The logic is in `lib/playback/gateway-dev-check.ts`.
+- The README has a "Playback (local)" section.
+
+**Harness finding.** On `http://127.0.0.1:3000`, Next.js development refuses its HMR connection and the page never hydrates, so Play does nothing. `localhost` works. The README records this.
+### 5. Recovery from a stopped machine
+
+- **Stopped state.** Docker Desktop was not running and `next dev` (the operator's own, on `localhost:3000`) was. Starting Docker Desktop did not start the local Bot API container: it stayed `Exited`, so the ingestion bot was not touched.
+- **Image.** `velora-media-gateway:e3.3` matched HEAD for all 15 gateway source files (line endings normalized). `npm run gateway:dev` then built `velora-media-gateway:dev` from this checkout and became ready in one run. A later stop and restart from the stopped state was ready in 19 s.
+- **Readiness.**
+  - Container: read-only root filesystem, `node` user, 256 MiB, `127.0.0.1:8787` only.
+  - Startup log: `catalogue_state reachable` (which requires the restricted identity), MTProto `connected`, `reader_ready`.
+  - Container environment: gateway names only. There was no owner `DATABASE_URL`, service-role key, bot token or login flag.
+- **Restricted identity, checked independently as the role (hosted, read-only).**
+  - `current_user` and `session_user` are `velora_media_gateway`: no inherit, no elevated attribute, no `postgres` or `service_role` membership, transaction read-only.
+  - `resolve_movie_version(1)` returns five columns: message **27**, 1,007,441,962 bytes, `video/mp4`, registered Movies channel. **This is the E3.3 MP4.**
+  - Versions 2 (Fuze) and 999999 return nothing.
+  - Reading `private.telegram_media` and `public.movie_versions` is refused with 42501.
+- **Shared secret.** Both processes read `.env.local`, and nothing was generated or rotated. Correspondence is proven by the gateway answering 206 to app-issued capabilities. The value was never printed.
+
+### 6. Browser proofs (real player, real gateway, Telegram message 27)
+
+| | Chrome 154 | Firefox 155 (Gecko) |
+| --- | --- | --- |
+| Before Play | 0 issuer, 0 gateway requests | same |
+| Issuer | 200, `{ expiresAt, streamUrl }` on the gateway origin | 200 (plus 1 for the audio probe) |
+| Metadata | `bytes=0-` only; 1920×1080, 5208.29 s; 7.5 s | same; 5.5 s |
+| Playback (6 s) | +6.01 s, 144 frames, 0 dropped | +6.01 s, 144 frames, 0 dropped |
+| Audio | decoded bytes 13,793 → 109,923 → 206,889 | `mozHasAudio` true; CORS probe peak RMS 0.242 |
+| Seek 30:00 | `bytes=334200832-`, resumed at 1801.6 s | same range, resumed at 1801.5 s |
+| Responses | 3 × 206 `video/mp4`, max 8,388,608 B, 0 full-file | 6 × 206, same bounds |
+| Close | 0 video elements, 0 requests afterwards | same |
+
+The same proof also passed before the code change. One earlier post-fix attempt failed on the host's link, which dropped to 1.8–154 KB/s: 8 MiB windows exceeded the gateway's 30 s request timeout (504 `upstream_timeout`), and the player correctly showed the neutral message. That is the Telegram/uplink throughput risk recorded in E3.2A, appearing as a real outage, not a defect. It was re-run once the link recovered.
+
+**Failure scenarios.** The real issuer was used, with the browser's view of the gateway replaced through Playwright routes. Both engines gave the same results before and after the fix:
+
+| Scenario | Before | After |
+| --- | --- | --- |
+| Gateway unreachable | can't be played in this browser | temporarily unavailable |
+| 503 | can't be played | temporarily unavailable |
+| 404 | can't be played | isn't available to watch right now |
+| 401 | can't be played | exactly 1 renewal (2 issuer calls), then temporarily unavailable |
+| 206 undecodable bytes | can't be played | can't be played in this browser (correct) |
+
+- **Real gateway stopped** (`npm run gateway:dev -- --stop`), fixed player: both engines show "Playback is temporarily unavailable. Try again in a moment.", with 1 issuer call and 3 refused attempts (media element, two-byte probe, `/healthz`).
+- **Neutral path.** It cannot be simulated with Playwright, whose `route.fulfill` adds CORS headers by itself. It is covered by unit tests and by the measured probe behaviour in section 2.
+
+### 7. External state
+
+| | Count |
+| --- | --- |
+| **Telegram Movies writes** | **0** |
+| **Telegram Movies reads** | gateway reads of message 27 only, all bounded 8 MiB windows: 30 media requests, about 134 MB served, 164 `upload.getFile` reads, 138 RPCs |
+| **Telegram Series** | reads 0, writes 0 |
+| **Local Bot API** | not started |
+| **Hosted database writes** | **0** (no migration, no catalogue or ingestion write) |
+| **Hosted database reads** | the gateway's resolver as `velora_media_gateway`, and two read-only identity/resolver checks as that role |
+| **Hosted auth** | 11 throwaway users, one per harness run, each created and deleted (lookup 404). Persistent writes 0. Needed because the issuer requires a signed-in session. |
+| **Media and mapping** | unchanged: version 1 → MP4 (message 27); the MKV (message 23) is retained and unlinked; Fuze unchanged |
+
+### 8. Tests and gates
+
+- **Unit:** 660 passing. This includes the new `classifyMediaError`, `diagnoseMediaFailure` and `gateway-dev-check` tests, a successful-playback state path, and a check that only `unsupported` mentions the browser.
+- **Static checks:** application typecheck, gateway `tsc` and lint all pass on every tracked and new file. Lint errors remain only in Git-ignored `.velora-ingest/` scratch scripts.
+- **Build:** the production build passes with a random stand-in secret.
+- **Secret scan.** It checked 25 values (every `.env.local` secret, database passwords, channel ids in both forms, the canary, the reader session and the MP4's `file_unique_id`) against:
+  - `.next/static` (27 files) and `.next/server` (387);
+  - the diff and new files, and the docs;
+  - the harness logs;
+  - the gateway container log.
+
+  Result: **0 hits**. No issued token appears in the gateway log.
+- **Turbopack cache.** The operator's `next dev` ran without `VELORA_DISABLE_DEV_FS_CACHE`, so its dev cache holds `.env.local` values, as recorded since E2. E3.4 put no new secret on disk.
+
+Unchanged by design: E2 policy, the token format and 10-minute lifetime, the gateway, resolver and role, the range planner and limits, the media mapping and the publication state.
+
+### 9. Open items
+
+- **Production gateway origin allow-list.** Set `MEDIA_GATEWAY_ALLOWED_ORIGINS` to the site's origin on the deployed gateway, so the player can read failure statuses.
+- **Throughput.** A slow operator uplink makes 8 MiB windows exceed the 30 s request timeout (504). Production hosting of the gateway must not depend on a residential link. A smaller window under poor throughput is a possible later tuning.
+- **Unchanged pre-launch gate.** Safari and iOS real-device playback.
