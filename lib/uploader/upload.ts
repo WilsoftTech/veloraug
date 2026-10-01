@@ -3,7 +3,7 @@ import { isFingerprint } from "@/lib/ingestion/fingerprint";
 import { decideAfterReconcile, decideResume, reconcileUpload, resolveRecoveryFloor, type RecoveryPacing } from "@/lib/ingestion/recovery";
 import { MAX_UPLOAD_ATTEMPTS, transition } from "@/lib/ingestion/state";
 import type { LocalBotApiClient } from "@/lib/telegram/local-bot-api";
-import type { Journal, JournalEntry, UploadAttempt } from "@/lib/uploader/journal";
+import { mediaAllowsUpload, type Journal, type JournalEntry, type UploadAttempt } from "@/lib/uploader/journal";
 import type { IngestionStore } from "@/lib/uploader/store";
 import type { CatalogueKind } from "@/types/catalogue";
 import type { IngestionEvent, ReconcileDecision, ReconciliationResult, ResumeAction, ServerUploadStatus, SourceFingerprint, TelegramMediaRecord, UploadFailureOutcome } from "@/types/ingestion";
@@ -206,6 +206,8 @@ export async function uploadEntry(entry: JournalEntry, caption: string, deps: Up
   // First, before any server read, journal write, upload start or Telegram call.
   if (!isRealTelegramUploadAuthorized()) return { result: "refused", code: "telegram_uploads_not_authorized" };
   if (!isUploadPlanned(entry)) return { result: "refused", code: `plan_${entry.plan?.action ?? "missing"}` };
+  // Playback media only (E3.5): canonical bytes, or a verified stream-copy rendition.
+  if (!mediaAllowsUpload(entry.media)) return { result: "refused", code: "media_not_verified" };
   if (entry.intendedChannelId === null) return { result: "refused", code: "channel_not_planned" };
   if (!deps.store.available) return { result: "refused", code: "server_boundary_unavailable" };
 

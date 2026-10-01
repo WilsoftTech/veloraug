@@ -9,6 +9,7 @@ import type {
   IngestionState,
   KnownVj,
   MatchOutcome,
+  MediaVerdict,
   ParsedFilename,
   PlannedAction,
   SourceFile,
@@ -31,9 +32,23 @@ export interface PlanInput {
   known: readonly DuplicateSubject[];
   /** This file's local journal entry, if a previous run recorded one. */
   journal: Pick<IngestionState, "upload" | "failure" | "uploadAttempts"> | null;
+  /** This file's media verdict (E3.5). Null: not inspected, so never uploaded. */
+  media: MediaVerdict | null;
 }
 
-export function planSource({ source, parse, vjs, match, known, journal }: PlanInput): DryRunEntry {
+/**
+ * Media gate (E3.5): only bytes already classified canonical may be uploaded.
+ * Class 2 is repackaged first (its rendition is a separate, verified entry);
+ * every other class stops for the operator with its reasons.
+ */
+function mediaStop(media: MediaVerdict | null): { action: PlannedAction; reasons: string[] } | null {
+  if (media === null) return { action: "hold", reasons: ["media_not_inspected"] };
+  if (media.class === "canonical") return null;
+  if (media.class === "remux") return { action: "normalize", reasons: [media.renditionRecorded ? "media_rendition_recorded" : "media_remux_required"] };
+  return { action: "hold", reasons: [`media_${media.class}`, ...media.reasons.map((reason) => `media_${reason}`)] };
+}
+
+export function planSource({ source, parse, vjs, match, known, journal, media }: PlanInput): DryRunEntry {
   const kind = decideKind(source.declaredKind, parse);
   const vj = resolveVj(parse.vjText, vjs);
   const unitKind = kind.status === "conflict" ? kind.declared : kind.kind;
@@ -50,6 +65,7 @@ export function planSource({ source, parse, vjs, match, known, journal }: PlanIn
   const duplicate = classifyDuplicate(subject, known);
 
   const stopReasons: string[] = [];
+  const mediaGate = mediaStop(media);
   let action: PlannedAction;
   if (duplicateIsNoop(duplicate)) {
     action = "skip";
@@ -69,6 +85,9 @@ export function planSource({ source, parse, vjs, match, known, journal }: PlanIn
   } else if (journal?.upload === "upload_failed" && journal.uploadAttempts >= MAX_UPLOAD_ATTEMPTS) {
     action = "skip";
     stopReasons.push("upload_attempts_exhausted");
+  } else if (mediaGate !== null) {
+    action = mediaGate.action;
+    stopReasons.push(...mediaGate.reasons);
   } else {
     const blockers = [
       ...parse.issues.filter((issue) => issue.blocking).map((issue) => `parse_${issue.code}`),

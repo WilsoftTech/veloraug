@@ -4,9 +4,10 @@ import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import * as z from "zod";
 import { isFingerprint } from "@/lib/ingestion/fingerprint";
+import { MEDIA_POLICY_VERSION, type MediaClassification, type MediaInspection, type RemuxVerification } from "@/lib/ingestion/media";
 import { initialState } from "@/lib/ingestion/state";
 import type { CatalogueKind } from "@/types/catalogue";
-import type { IngestionState, PlannedAction, SourceFingerprint, TelegramMediaRecord } from "@/types/ingestion";
+import type { IngestionState, MediaVerdict, PlannedAction, SourceFingerprint, TelegramMediaRecord } from "@/types/ingestion";
 
 /**
  * The uploader's local operational journal (C2). One JSON file per source
@@ -61,9 +62,86 @@ export interface JournalEntry {
   telegram: TelegramMediaRecord | null;
   dbAcknowledgedAt: string | null;
   updatedAt: string;
+  /**
+   * Media inspection of this entry's own bytes (E3.5). Null for entries written
+   * before E3.5 or not yet inspected: such an entry is never uploaded.
+   */
+  media: JournalMedia | null;
+}
+
+/**
+ * What the media policy found for this exact file (lib/ingestion/media.ts).
+ * A library file is a `source`; a verified Class 2 repackage is a `rendition`,
+ * which is its own journal entry (own fingerprint, own upload track), so the
+ * existing exactly-once upload and recovery apply to it unchanged.
+ */
+export interface JournalMedia {
+  role: "source" | "rendition";
+  inspectedAt: string;
+  /** Versions of the tools that produced this record. */
+  tools: { ffprobe: string | null; ffmpeg: string | null };
+  /** Null when the file could not be probed; the classification then says why. */
+  inspection: MediaInspection | null;
+  classification: MediaClassification;
+  /** Source of class remux: its verified rendition, once created (removedAt: the file was deleted by `cleanup`). */
+  rendition: { fingerprint: SourceFingerprint; absolutePath: string; sizeBytes: number; createdAt: string; removedAt: string | null } | null;
+  /** Rendition: the source it repackages and the proof that nothing was re-encoded. */
+  derivedFrom: { fingerprint: SourceFingerprint; sizeBytes: number; verification: RemuxVerification } | null;
+  /** The last failed normalization of this source, if any. */
+  normalizationFailure: { code: string; details: string[]; at: string } | null;
 }
 
 const fingerprint = z.string().refine(isFingerprint);
+const nullableNumber = z.number().nullable();
+const streamDigest = z.object({ packets: z.number().int().nonnegative(), bytes: z.number().int().nonnegative(), sha256: z.string().regex(/^[0-9a-f]{64}$/) });
+const packetDigest = z.object({ video: streamDigest, audio: streamDigest });
+const mediaSchema = z.object({
+  role: z.enum(["source", "rendition"]),
+  inspectedAt: z.string(),
+  tools: z.object({ ffprobe: z.string().nullable(), ffmpeg: z.string().nullable() }),
+  inspection: z.object({
+    formatName: z.string(),
+    majorBrand: z.string().nullable(),
+    durationSeconds: nullableNumber,
+    sizeBytes: z.number().int().nonnegative(),
+    probeSizeBytes: nullableNumber,
+    streams: z.array(z.object({
+      index: z.number().int().nonnegative(),
+      type: z.enum(["video", "audio", "subtitle", "data", "attachment", "other"]),
+      codec: z.string().nullable(),
+      codecTag: z.string().nullable(),
+      profile: z.string().nullable(),
+      level: nullableNumber,
+      width: nullableNumber,
+      height: nullableNumber,
+      pixelFormat: z.string().nullable(),
+      fieldOrder: z.string().nullable(),
+      frameRate: z.string().nullable(),
+      timeBase: z.string().nullable(),
+      startSeconds: nullableNumber,
+      durationSeconds: nullableNumber,
+      sampleRate: nullableNumber,
+      channels: nullableNumber,
+      channelLayout: z.string().nullable(),
+      bitRate: nullableNumber,
+      attachedPicture: z.boolean(),
+    })),
+    layout: z.object({ boxes: z.array(z.string()), fastStart: z.boolean(), fragmented: z.boolean(), complete: z.boolean() }).nullable(),
+  }).nullable(),
+  classification: z.object({
+    class: z.enum(["canonical", "remux", "audio_normalization", "video_transcode_required", "manual_review"]),
+    reasons: z.array(z.string()),
+    policyVersion: z.number().int().positive(),
+  }),
+  rendition: z.object({ fingerprint, absolutePath: z.string().min(1), sizeBytes: z.number().int().positive(), createdAt: z.string(), removedAt: z.string().nullable() }).nullable(),
+  derivedFrom: z.object({
+    fingerprint,
+    sizeBytes: z.number().int().positive(),
+    verification: z.object({ passed: z.boolean(), failures: z.array(z.string()), source: packetDigest, output: packetDigest }),
+  }).nullable(),
+  normalizationFailure: z.object({ code: z.string(), details: z.array(z.string()), at: z.string() }).nullable(),
+});
+
 const record = z.object({
   botType: z.enum(["movie", "series"]),
   chatId: z.number().int(),
@@ -101,7 +179,7 @@ const entrySchema = z.object({
     uploadAttempts: z.number().int().nonnegative(),
     telegram: z.object({ chatId: z.number().int(), messageId: z.number().int() }).nullable(),
   }),
-  plan: z.object({ action: z.enum(["skip", "upload", "verify_upload", "retry_upload", "upload_then_review", "hold", "reject"]), stopReasons: z.array(z.string()) }).nullable(),
+  plan: z.object({ action: z.enum(["skip", "upload", "verify_upload", "retry_upload", "upload_then_review", "hold", "reject", "normalize"]), stopReasons: z.array(z.string()) }).nullable(),
   attempts: z.array(z.object({
     number: z.number().int().positive(),
     startedAt: z.string(),
@@ -114,6 +192,8 @@ const entrySchema = z.object({
   telegram: record.nullable(),
   dbAcknowledgedAt: z.string().nullable(),
   updatedAt: z.string(),
+  // Entries written before E3.5 have none: they read as not inspected.
+  media: mediaSchema.nullable().default(null),
 });
 
 /** Resolves and checks the journal directory. `projectRoot` is the repository. */
@@ -128,8 +208,25 @@ export function resolveJournalDir(configured: string | undefined, projectRoot: s
   return dir;
 }
 
-export function newJournalEntry(fields: Omit<JournalEntry, "version" | "state" | "plan" | "attempts" | "telegram" | "dbAcknowledgedAt" | "updatedAt">, now: Date): JournalEntry {
-  return { version: JOURNAL_VERSION, ...fields, state: initialState(), plan: null, attempts: [], telegram: null, dbAcknowledgedAt: null, updatedAt: now.toISOString() };
+export function newJournalEntry(fields: Omit<JournalEntry, "version" | "state" | "plan" | "attempts" | "telegram" | "dbAcknowledgedAt" | "updatedAt" | "media">, now: Date): JournalEntry {
+  return { version: JOURNAL_VERSION, ...fields, state: initialState(), plan: null, attempts: [], telegram: null, dbAcknowledgedAt: null, updatedAt: now.toISOString(), media: null };
+}
+
+/**
+ * The upload gate's media condition: this entry's own bytes were classified
+ * canonical under the current policy, and a rendition carries a passed
+ * stream-copy verification. Anything else (not inspected, another class, an
+ * older policy, an unverified rendition) is never uploaded.
+ */
+export function mediaAllowsUpload(media: JournalMedia | null): boolean {
+  if (media === null || media.classification.class !== "canonical" || media.classification.policyVersion !== MEDIA_POLICY_VERSION) return false;
+  return media.role === "source" || media.derivedFrom?.verification.passed === true;
+}
+
+/** The planner's view of an entry's media. */
+export function mediaVerdict(media: JournalMedia | null): MediaVerdict | null {
+  if (media === null || media.classification.policyVersion !== MEDIA_POLICY_VERSION) return null;
+  return { class: media.classification.class, reasons: media.classification.reasons, renditionRecorded: media.rendition !== null };
 }
 
 export interface Journal {

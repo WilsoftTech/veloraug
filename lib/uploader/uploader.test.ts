@@ -9,6 +9,7 @@ import { createLocalBotApiClient, loadLocalBotApiConfig, type LocalBotApiClient 
 import { newJournalEntry, openJournal, resolveJournalDir, type Journal, type JournalEntry } from "@/lib/uploader/journal";
 import { fingerprintFile } from "@/lib/uploader/scan";
 import { offlineStore, type IngestionStore } from "@/lib/uploader/store";
+import { canonicalInspection, matroskaInspection, sourceMedia } from "@/lib/uploader/test-media";
 import { isRealTelegramUploadAuthorized, planResume, REAL_UPLOADS_ENV, resumeEntry, selectUploadEntries, uploadEntry, verifySourceFingerprint, type UploaderDeps } from "@/lib/uploader/upload";
 import type { ChannelProbeResult, ServerUploadStatus, SourceFingerprint, TelegramMediaRecord, UploadFailureOutcome, UploadOutcome } from "@/types/ingestion";
 
@@ -103,7 +104,8 @@ function entry(overrides: Partial<JournalEntry> = {}): JournalEntry {
     fingerprint: FP, kind: "movie", intendedChannelId: MOVIES, fileName: "John.Wick.2014.VJ.Junior.mkv", relativePath: "John.Wick.2014.VJ.Junior.mkv",
     absolutePath: "C:\\Media\\Movies\\John.Wick.2014.VJ.Junior.mkv", sizeBytes: SIZE, modifiedAtMs: 1, discoveryKey: "e".repeat(64),
   }, T0);
-  return { ...fresh, plan: { action: "upload", stopReasons: [] }, ...overrides };
+  // Canonical media unless a test says otherwise: the E3.5 gate is tested on its own below.
+  return { ...fresh, plan: { action: "upload", stopReasons: [] }, media: sourceMedia(canonicalInspection(SIZE)), ...overrides };
 }
 
 describe("local journal", () => {
@@ -436,6 +438,64 @@ describe("crash and recovery", () => {
     expect(await uploadEntry(entry({ plan: { action: "hold", stopReasons: ["duplicate_same_title_same_vj"] } }), CAPTION, deps(new FakeStore(), api))).toEqual({ result: "refused", code: "plan_hold" });
     expect(await uploadEntry(entry({ intendedChannelId: null }), CAPTION, deps(new FakeStore(), api))).toEqual({ result: "refused", code: "channel_not_planned" });
     expect(api.sendDocument).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Media gate (E3.5): only verified playback media reaches the upload path
+// ---------------------------------------------------------------------------
+
+describe("media gate (E3.5)", () => {
+  const digest = { video: { packets: 10, bytes: 1000, sha256: "a".repeat(64) }, audio: { packets: 20, bytes: 500, sha256: "b".repeat(64) } };
+  const rendition = (passed: boolean) => ({
+    ...sourceMedia(canonicalInspection(SIZE)),
+    role: "rendition" as const,
+    derivedFrom: { fingerprint: OTHER, sizeBytes: SIZE - 1000, verification: { passed, failures: passed ? [] : ["video_packets_changed"], source: digest, output: digest } },
+  });
+
+  it("refuses anything but canonical bytes or a verified rendition, before the server, preflight or Telegram", async () => {
+    const store = new FakeStore();
+    const api = telegram(async () => ({ status: "succeeded", record: media(41) }));
+    const stale = sourceMedia(canonicalInspection(SIZE));
+    const refused = [
+      null,
+      sourceMedia(matroskaInspection(SIZE)),
+      { ...stale, classification: { ...stale.classification, policyVersion: 0 } },
+      rendition(false),
+      { ...rendition(true), derivedFrom: null },
+    ];
+    for (const value of refused) {
+      expect(await uploadEntry(entry({ media: value }), CAPTION, deps(store, api))).toEqual({ result: "refused", code: "media_not_verified" });
+    }
+    expect(store.calls).toEqual([]);
+    expect(api.preflight).not.toHaveBeenCalled();
+    expect(api.sendDocument).not.toHaveBeenCalled();
+    expect(await journal.list()).toEqual([]);
+  });
+
+  it("the authorization gate still comes first: an unauthorized process is refused for that, whatever the media", async () => {
+    vi.stubEnv(REAL_UPLOADS_ENV, "false");
+    const api = telegram(async () => ({ status: "succeeded", record: media(41) }));
+    expect(await uploadEntry(entry({ media: null }), CAPTION, deps(new FakeStore(), api))).toEqual({ result: "refused", code: "telegram_uploads_not_authorized" });
+  });
+
+  it("a verified rendition goes through the unchanged upload path: one start, one send, recorded", async () => {
+    const store = new FakeStore();
+    const api = telegram(async () => ({ status: "succeeded", record: media(41) }));
+    expect(await uploadEntry(entry({ media: rendition(true) }), CAPTION, deps(store, api))).toEqual({ result: "uploaded", acknowledged: true });
+    expect(store.calls).toEqual(["markUploadStarted", "recordUploadSucceeded"]);
+    expect(api.sendDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("an uncertain rendition upload is never repeated: the next upload reconciles instead of sending", async () => {
+    const store = new FakeStore();
+    const api = telegram(async () => ({ status: "uncertain", code: "network_error" }));
+    expect(await uploadEntry(entry({ media: rendition(true) }), CAPTION, deps(store, api))).toEqual({ result: "uncertain", code: "network_error" });
+    const after = (await journal.get(FP))!;
+    expect(after.state.upload).toBe("uploading");
+    const second = await uploadEntry(after, CAPTION, deps(store, api));
+    expect(second).toMatchObject({ result: "resume", action: { action: "reconcile" } });
+    expect(api.sendDocument).toHaveBeenCalledTimes(1);
   });
 });
 

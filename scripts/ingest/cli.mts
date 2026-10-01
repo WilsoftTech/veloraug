@@ -9,6 +9,18 @@
 //   status
 //   evaluate --fingerprint sf1-… --kind movie --vjs vjs.json [--execute]
 //   publication-sql --fingerprint sf1-… --tmdb-id <n> --out <file.sql> [--rights-cleared]
+//   normalize --fingerprint sf1-… [--vjs vjs.json] [--execute]   (E3.5, local only)
+//   show --fingerprint sf1-…                                     (E3.5, read-only)
+//   cleanup --fingerprint sf1-… [--execute]                      (E3.5, local only)
+//
+// Media (E3.5): `scan` probes every file with ffprobe (VELORA_FFPROBE_PATH or
+// PATH) and classifies it (lib/ingestion/media.ts); only canonical bytes are
+// ever planned for upload. A Class 2 source plans `normalize`: `normalize
+// --execute` repackages it by stream copy into a verified fast-start MP4
+// under the renditions root (VELORA_RENDITIONS_DIR, default
+// <TELEGRAM_BOT_API_PATH_MAP local root>/.velora-renditions) and journals that
+// rendition as its own entry, which `upload --fingerprint` then sends like any
+// other. `normalize` and `cleanup` never call Telegram or a database.
 //
 // Dry run is the default. `upload`/`resume --execute` need the runtime
 // authorization (REAL_TELEGRAM_UPLOADS_AUTHORIZED exactly "true", set for that
@@ -29,8 +41,8 @@
 // one source from its TMDB snapshot; the worker key cannot run it, and it
 // touches no database itself.
 // Tokens are never printed. Paths are shown only in this terminal.
-import { readFile, stat, writeFile } from "node:fs/promises";
-import { basename, extname, resolve } from "node:path";
+import { mkdir, readFile, rename, rmdir, stat, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import * as z from "zod";
@@ -41,13 +53,16 @@ import { planSource } from "@/lib/ingestion/plan";
 import { titleKey } from "@/lib/ingestion/duplicates";
 import { resolveVj } from "@/lib/ingestion/vj";
 import { buildUploadCaption, TELEGRAM_MAX_FILE_BYTES } from "@/lib/ingestion/telegram";
-import { createLocalBotApiClient, loadLocalBotApiConfig, type LocalBotApiConfig } from "@/lib/telegram/local-bot-api";
+import { classifyMedia, MEDIA_POLICY_VERSION, playableVideo, audioStreams, unreadableMedia, type MediaInspection } from "@/lib/ingestion/media";
+import { createLocalBotApiClient, loadLocalBotApiConfig, toServerFileUri, type LocalBotApiConfig } from "@/lib/telegram/local-bot-api";
 import { longRunningFetch } from "@/lib/telegram/long-running-fetch";
 import { isTmdbConfigured } from "@/lib/tmdb/client";
 import { fetchMovieSnapshot, searchTmdbForIngestion } from "@/lib/tmdb/ingestion-search";
 import { publicationScript } from "@/lib/uploader/publication";
-import { JOURNAL_DIR_ENV, newJournalEntry, openJournal, resolveJournalDir, type Journal, type JournalEntry } from "@/lib/uploader/journal";
-import { fingerprintFile, hashFile, toSourceFile, walkMedia, type DiscoveredFile } from "@/lib/uploader/scan";
+import { JOURNAL_DIR_ENV, mediaAllowsUpload, mediaVerdict, newJournalEntry, openJournal, resolveJournalDir, type Journal, type JournalEntry, type JournalMedia } from "@/lib/uploader/journal";
+import { digestPackets, freeBytes, probeMedia, remux, remuxSpaceNeeded, resolveMediaTools, type MediaTools } from "@/lib/uploader/media-tools";
+import { cleanupRendition, normalizeEntry, renditionTarget, type NormalizeDeps } from "@/lib/uploader/normalize";
+import { fingerprintFile, hashFile, walkMedia, type DiscoveredFile } from "@/lib/uploader/scan";
 import { createRpcIngestionStore, evaluationPayload, offlineStore, supabaseRpcTransport, type EvaluationEvidence, type IngestionStore } from "@/lib/uploader/store";
 import { isRealTelegramUploadAuthorized, isUploadPlanned, planResume, REAL_UPLOADS_ENV, resumeEntry, selectUploadEntries, uploadEntry, verifySourceFingerprint, type UploaderDeps, type UploadSelectionError } from "@/lib/uploader/upload";
 import type { CatalogueKind } from "@/types/catalogue";
@@ -141,17 +156,67 @@ async function journal(): Promise<Journal> {
   return openJournal(resolveJournalDir(process.env[JOURNAL_DIR_ENV], PROJECT_ROOT));
 }
 
-async function planFile(file: DiscoveredFile, kind: CatalogueKind, fingerprint: JournalEntry["fingerprint"], entries: JournalEntry[], vjs: KnownVj[], existing: JournalEntry | null) {
-  const source = toSourceFile(file, fingerprint, kind, new Date());
+async function planFile(file: Pick<DiscoveredFile, "fileName" | "relativePath" | "sizeBytes">, kind: CatalogueKind, fingerprint: JournalEntry["fingerprint"], entries: JournalEntry[], vjs: KnownVj[], existing: JournalEntry | null, media: JournalMedia | null) {
   const parse = parseFilename(file.fileName);
   return planSource({
-    source,
+    source: { fileName: file.fileName, relativePath: file.relativePath, sizeBytes: file.sizeBytes, fingerprint, declaredKind: kind },
     parse,
     vjs,
     match: await match(kind, parse.title, parse.year),
     known: knownSubjects(entries, vjs, fingerprint),
     journal: existing ? existing.state : null,
+    media: mediaVerdict(media),
   });
+}
+
+/** The planner's decision for a journal entry as it stands (used after normalize and cleanup). */
+async function planEntry(entry: JournalEntry, vjs: KnownVj[], store: Journal) {
+  const plan = await planFile(entry, entry.kind, entry.fingerprint, await store.list(), vjs, entry, entry.media);
+  return { action: plan.action, stopReasons: plan.stopReasons };
+}
+
+/** Media tools for this process, resolved once. */
+let toolsCache: Promise<Awaited<ReturnType<typeof resolveMediaTools>>> | null = null;
+const mediaTools = () => (toolsCache ??= resolveMediaTools(process.env));
+
+/**
+ * A source file's media record: reused from the journal when its bytes are
+ * unchanged (same fingerprint) and re-classified from the stored inspection if
+ * the policy changed; otherwise probed. Null when no ffprobe is available.
+ */
+async function sourceMedia(path: string, existing: JournalEntry | null, tools: MediaTools | null): Promise<JournalMedia | null> {
+  const stored = existing?.media;
+  if (stored && stored.role === "source" && stored.inspection !== null) {
+    return stored.classification.policyVersion === MEDIA_POLICY_VERSION ? stored : { ...stored, classification: classifyMedia(stored.inspection) };
+  }
+  if (tools === null) return stored ?? null;
+  const probed = await probeMedia(tools.ffprobe, path);
+  return {
+    role: "source",
+    inspectedAt: new Date().toISOString(),
+    tools: { ffprobe: tools.ffprobe.version, ffmpeg: tools.ffmpeg.version },
+    inspection: probed.ok ? probed.inspection : null,
+    classification: probed.ok ? classifyMedia(probed.inspection) : unreadableMedia(probed.code),
+    rendition: stored?.rendition ?? null,
+    derivedFrom: null,
+    normalizationFailure: stored?.normalizationFailure ?? null,
+  };
+}
+
+const CLASS_LABEL: Record<string, string> = { canonical: "CANONICAL", remux: "REMUX", audio_normalization: "AUDIO_NORMALIZATION", video_transcode_required: "VIDEO_TRANSCODE_REQUIRED", manual_review: "MANUAL_REVIEW" };
+const mediaLabel = (media: JournalMedia | null) => (media === null ? "NOT_INSPECTED" : CLASS_LABEL[media.classification.class]);
+
+function describeVideo(inspection: MediaInspection | null): string {
+  const [v] = inspection ? playableVideo(inspection) : [];
+  if (!v) return "none";
+  const level = v.level === null ? "" : ` L${(v.level / 10).toFixed(1)}`;
+  return `${v.codec ?? "?"} ${v.profile ?? ""}${level} ${v.width ?? "?"}x${v.height ?? "?"} ${v.frameRate ?? "?"} fps ${v.pixelFormat ?? ""}`.replace(/\s+/g, " ").trim();
+}
+
+function describeAudio(inspection: MediaInspection | null): string {
+  const audio = inspection ? audioStreams(inspection) : [];
+  if (audio.length === 0) return "none";
+  return audio.map((a) => `${a.codec ?? "?"}${a.profile ? ` ${a.profile}` : ""} ${a.sampleRate ?? "?"} Hz ${a.channels ?? "?"} ch${a.channelLayout ? ` ${a.channelLayout}` : ""}`).join("; ");
 }
 
 async function scan() {
@@ -163,6 +228,9 @@ async function scan() {
     const entries = await store.list();
     const byDiscovery = new Map(entries.map((entry) => [entry.discoveryKey, entry]));
     const channelId = telegramConfig()?.bots[kind].channelId ?? null;
+    const resolved = await mediaTools();
+    const tools = resolved.ok ? resolved.tools : null;
+    if (!resolved.ok) console.log(`note: media tools unavailable (${resolved.errors.join("; ")}); files cannot be inspected and none is planned for upload.\n`);
     const counts = new Map<string, number>();
     let largest: DiscoveredFile | null = null;
 
@@ -177,14 +245,15 @@ async function scan() {
         counts.set("hold", (counts.get("hold") ?? 0) + 1);
         continue;
       }
-      const plan = await planFile(file, kind, fingerprint, entries, vjs, existing);
+      const media = await sourceMedia(file.absolutePath, existing, tools);
+      const plan = await planFile(file, kind, fingerprint, entries, vjs, existing, media);
       const now = new Date();
       const base = existing ?? newJournalEntry({ fingerprint, kind, intendedChannelId: channelId, ...file }, now);
       // A rename or move keeps the fingerprint; the journal follows the file.
-      await store.put({ ...base, fileName: file.fileName, relativePath: file.relativePath, absolutePath: file.absolutePath, modifiedAtMs: file.modifiedAtMs, discoveryKey: file.discoveryKey, intendedChannelId: base.intendedChannelId ?? channelId, plan: { action: plan.action, stopReasons: plan.stopReasons }, updatedAt: now.toISOString() });
+      await store.put({ ...base, fileName: file.fileName, relativePath: file.relativePath, absolutePath: file.absolutePath, modifiedAtMs: file.modifiedAtMs, discoveryKey: file.discoveryKey, intendedChannelId: base.intendedChannelId ?? channelId, plan: { action: plan.action, stopReasons: plan.stopReasons }, media, updatedAt: now.toISOString() });
       counts.set(plan.action, (counts.get(plan.action) ?? 0) + 1);
       const unit = plan.season !== null || plan.episode !== null ? ` S${plan.season ?? "?"}E${plan.episode ?? "?"}` : "";
-      console.log(`${plan.action.padEnd(18)} ${mib(file.sizeBytes).padStart(12)}  ${plan.title ?? "?"}${plan.year ? ` (${plan.year})` : ""}${unit}  VJ:${plan.vjText ?? "?"}  ${file.relativePath}${plan.stopReasons.length ? `\n${" ".repeat(20)}stop: ${plan.stopReasons.join(", ")}` : ""}`);
+      console.log(`${plan.action.padEnd(18)} ${mib(file.sizeBytes).padStart(12)}  ${mediaLabel(media).padEnd(24)} ${plan.title ?? "?"}${plan.year ? ` (${plan.year})` : ""}${unit}  VJ:${plan.vjText ?? "?"}  ${file.relativePath}${plan.stopReasons.length ? `\n${" ".repeat(20)}stop: ${plan.stopReasons.join(", ")}` : ""}`);
     }
 
     console.log(`\n${[...counts].map(([action, count]) => `${action}: ${count}`).join("  ") || "no media files found"}`);
@@ -207,10 +276,14 @@ async function inspect() {
   const [vjs, store] = await Promise.all([loadVjs(), journal()]);
   const file: DiscoveredFile = { absolutePath: path, relativePath: basename(path), fileName: basename(path), extension: extname(path).slice(1).toLowerCase(), sizeBytes: facts.size, modifiedAtMs: facts.mtimeMs, discoveryKey: "" };
   const fingerprint = await fingerprintFile(path, facts.size);
-  const plan = await planFile(file, kind, fingerprint, await store.list(), vjs, await store.get(fingerprint));
+  const existing = await store.get(fingerprint);
+  const resolved = await mediaTools();
+  const media = await sourceMedia(path, existing, resolved.ok ? resolved.tools : null);
+  const plan = await planFile(file, kind, fingerprint, await store.list(), vjs, existing, media);
   const parse = parseFilename(file.fileName);
   console.log(JSON.stringify({
     ...plan,
+    media: media === null ? { class: "not_inspected", tools: resolved.ok ? null : resolved.errors } : { class: media.classification.class, reasons: media.classification.reasons, video: describeVideo(media.inspection), audio: describeAudio(media.inspection), inspection: media.inspection, tools: media.tools },
     ceiling: { maxBytes: TELEGRAM_MAX_FILE_BYTES, headroomBytes: headroom(facts.size) },
     caption: buildUploadCaption({ kind, title: parse.title, year: parse.year, vjName: parse.vjText, season: parse.season, episode: parse.episode, fingerprint }),
     ...(values["full-hash"] ? { fullSha256: await hashFile(path, facts.size) } : {}),
@@ -321,8 +394,10 @@ async function describeSelected(entry: JournalEntry, total: number, text: string
   console.log(`plan         ${entry.plan?.action ?? "none"}${entry.plan?.stopReasons.length ? `  stop: ${entry.plan.stopReasons.join(", ")}` : ""}`);
   console.log(`journal      upload ${entry.state.upload}, attempts ${entry.state.uploadAttempts}, review ${entry.state.review}`);
 
+  console.log(`media        ${mediaLabel(entry.media)}${entry.media?.role === "rendition" ? " rendition (stream copy verified)" : ""}`);
   const reasons: string[] = [];
   if (!isUploadPlanned(entry)) reasons.push(`plan_${entry.plan?.action ?? "missing"}`);
+  if (!mediaAllowsUpload(entry.media)) reasons.push("media_not_verified");
   if (entry.state.upload === "uploading" || entry.state.upload === "uploaded") reasons.push(`journal_${entry.state.upload}`);
   if (entry.intendedChannelId === null) reasons.push("channel_not_planned");
 
@@ -421,6 +496,7 @@ async function status() {
   };
   console.log(`entries: ${entries.length}`);
   console.log(`plan:    ${tally((entry) => entry.plan?.action ?? "unplanned")}`);
+  console.log(`media:   ${tally((entry) => `${entry.media?.role === "rendition" ? "rendition " : ""}${mediaLabel(entry.media)}`)}`);
   console.log(`upload:  ${tally((entry) => entry.state.upload)}`);
   console.log(`db ack:  ${tally((entry) => (entry.telegram === null ? "n/a" : entry.dbAcknowledgedAt ? "acknowledged" : "pending"))}`);
   const reasons = new Map<string, number>();
@@ -502,7 +578,212 @@ async function publicationSql() {
   console.log(`\nwrote the owner script${values["rights-cleared"] ? "" : " WITHOUT the rights attestation (the database will refuse to publish)"}. Nothing was sent to any database.`);
 }
 
-const commands: Record<string, () => Promise<void>> = { scan, inspect, upload, resume, checkpoint, status, evaluate, "publication-sql": publicationSql };
+// ---------------------------------------------------------------------------
+// Media normalization (E3.5): local only, never Telegram or a database
+// ---------------------------------------------------------------------------
+
+const RENDITIONS_ENV = "VELORA_RENDITIONS_DIR";
+const GIB = 1024 * MIB;
+const gib = (bytes: number) => `${(bytes / GIB).toFixed(2)} GiB`;
+
+/**
+ * Where renditions are written: VELORA_RENDITIONS_DIR, else `.velora-renditions`
+ * under the local Bot API's path-map root (the only place it can read files
+ * from). Never inside the repository.
+ */
+function renditionsRoot(): string {
+  const configured = process.env[RENDITIONS_ENV];
+  const mapped = telegramConfig()?.pathMap?.local;
+  const root = configured ? resolve(configured) : mapped ? join(mapped, ".velora-renditions") : null;
+  if (root === null) fail(`set ${RENDITIONS_ENV} (or the local Bot API path map) to choose where renditions are written`);
+  if (!isAbsolute(root)) fail(`${RENDITIONS_ENV} must be an absolute directory`);
+  const inside = relative(PROJECT_ROOT, root);
+  if (inside === "" || (!inside.startsWith("..") && !isAbsolute(inside))) fail("the renditions directory must be outside the repository");
+  return root;
+}
+
+/** Deletes one file; one that is already gone is not an error. */
+async function removeFile(path: string): Promise<void> {
+  await unlink(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+  });
+}
+
+/** The path itself or its closest existing parent: a dry run measures free space without creating anything. */
+async function nearestExisting(path: string): Promise<string> {
+  let current = path;
+  while (!(await stat(current).then(() => true, () => false))) {
+    const parent = resolve(current, "..");
+    if (parent === current) throw new Error("no existing parent");
+    current = parent;
+  }
+  return current;
+}
+
+async function fileFacts(path: string) {
+  try {
+    const facts = await stat(path);
+    return facts.isFile() ? { sizeBytes: facts.size, modifiedAtMs: facts.mtimeMs } : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeDeps(store: Journal, tools: MediaTools, root: string, vjs: KnownVj[]): NormalizeDeps {
+  return {
+    journal: store,
+    tools,
+    renditionsRoot: root,
+    probe: (path) => probeMedia(tools.ffprobe, path),
+    digest: (path) => digestPackets(tools.ffmpeg, path),
+    remux: (source, output) => remux(tools.ffmpeg, source, output),
+    freeBytes,
+    fingerprint: fingerprintFile,
+    fileFacts,
+    mkdir: async (dir) => {
+      await mkdir(dir, { recursive: true });
+    },
+    rename,
+    remove: removeFile,
+    plan: (entry) => planEntry(entry, vjs, store),
+    now: () => new Date(),
+  };
+}
+
+async function entryOrFail(store: Journal, fingerprint: JournalEntry["fingerprint"]): Promise<JournalEntry> {
+  const entry = await store.get(fingerprint);
+  if (entry === null) fail("no journal entry has that fingerprint; scan the library first");
+  return entry;
+}
+
+const line = (label: string, value: string) => console.log(`${label.padEnd(15)}${value}`);
+
+async function normalize() {
+  const fingerprint = oneFingerprint();
+  const store = await journal();
+  const source = await entryOrFail(store, fingerprint);
+  const vjs = await loadVjs();
+  const media = source.media;
+  const root = renditionsRoot();
+  const resolved = await mediaTools();
+
+  line("source", `${source.relativePath}  ${mib(source.sizeBytes)} (${source.sizeBytes} bytes)`);
+  line("fingerprint", source.fingerprint);
+  line("media", `${mediaLabel(media)}${media?.classification.reasons.length ? `  (${media.classification.reasons.join(", ")})` : ""}`);
+  line("video", describeVideo(media?.inspection ?? null));
+  line("audio", describeAudio(media?.inspection ?? null));
+  line("tools", resolved.ok ? `ffmpeg ${resolved.tools.ffmpeg.version} (${resolved.tools.ffmpeg.source}), ffprobe ${resolved.tools.ffprobe.version} (${resolved.tools.ffprobe.source})` : `unavailable: ${resolved.errors.join("; ")}`);
+
+  const reasons: string[] = [];
+  if (media === null) reasons.push("media_not_inspected (scan with media tools first)");
+  else if (media.classification.class !== "remux") reasons.push(`media_${media.classification.class}: only Class 2 (remux) is normalized automatically`);
+  if (source.state.upload !== "not_uploaded" || source.attempts.length > 0) reasons.push("source_has_upload_history (a replacement needs a reviewer, not normalize)");
+  if (!resolved.ok) reasons.push("media_tools_unavailable");
+
+  const target = renditionTarget(source, root);
+  if (target === null) reasons.push("rendition_name_unsafe");
+  else {
+    const config = telegramConfig();
+    const reachable = config !== null && toServerFileUri(target.path, config.pathMap) !== null;
+    line("action", "stream copy (-c copy) of the one video and one audio stream into a fast-start MP4; no encoding");
+    line("rendition", `${target.path}${media?.rendition ? `  (recorded ${media.rendition.fingerprint}${media.rendition.removedAt ? ", file removed" : ""})` : ""}`);
+    line("telegram", reachable ? `readable by the local Bot API; the ${source.kind} channel after a separate, authorized upload` : "NOT under the local Bot API path map: the rendition could not be uploaded from there");
+    try {
+      const free = await freeBytes(await nearestExisting(root));
+      const needed = remuxSpaceNeeded(source.sizeBytes);
+      line("disk", `free ${gib(free)}, needed ${gib(needed)}${free < needed ? "  INSUFFICIENT" : ""}`);
+      if (free < needed) reasons.push("insufficient_disk_space");
+    } catch {
+      line("disk", "unknown (the renditions directory is not reachable)");
+      reasons.push("renditions_directory_unreachable");
+    }
+  }
+  line("writes", "the rendition file and the local journal only: no Telegram call, no database write");
+  line("publication", "none: an uploaded rendition still needs evaluation, review, rights clearance and the owner's publication");
+  if (media?.normalizationFailure) line("last failure", `${media.normalizationFailure.code}${media.normalizationFailure.details.length ? ` (${media.normalizationFailure.details.join(", ")})` : ""} at ${media.normalizationFailure.at}`);
+
+  if (!values.execute) {
+    console.log(`\ndry run: ${reasons.length === 0 ? "would normalize this source" : `would not normalize (${reasons.join("; ")})`}. Nothing was written.`);
+    return;
+  }
+  if (!resolved.ok) fail("media tools are unavailable; nothing was written");
+  const release = await store.lock();
+  try {
+    const started = Date.now();
+    const result = await normalizeEntry(source, normalizeDeps(store, resolved.tools, root, vjs));
+    const seconds = ((Date.now() - started) / 1000).toFixed(1);
+    if (result.result === "normalized") {
+      const { video, audio } = result.verification.source;
+      console.log(`\nnormalized in ${seconds} s: ${result.rendition.relativePath}  ${mib(result.rendition.sizeBytes)} (${result.rendition.sizeBytes} bytes)`);
+      console.log(`verified: fast-start MP4; ${video.packets} video and ${audio.packets} audio packets identical in order, size and content; source unchanged`);
+      console.log(`rendition ${result.rendition.fingerprint}  plan: ${result.rendition.plan?.action}${result.rendition.plan?.stopReasons.length ? ` (${result.rendition.plan.stopReasons.join(", ")})` : ""}`);
+      console.log(`next: upload --fingerprint ${result.rendition.fingerprint} (dry run first; --execute needs ${REAL_UPLOADS_ENV}=true)`);
+    } else if (result.result === "already_normalized") {
+      console.log(`\nalready normalized (${result.reason}): rendition ${result.rendition.fingerprint}, upload ${result.rendition.state.upload}. Nothing was written.`);
+    } else {
+      console.log(`\n${result.result}: ${result.code}${result.details?.length ? ` (${result.details.join(", ")})` : ""}. No rendition was recorded.`);
+      process.exitCode = 1;
+    }
+  } finally {
+    await release();
+  }
+}
+
+/** One item's state, readable without JSON. Read-only. */
+async function show() {
+  const store = await journal();
+  const entry = await entryOrFail(store, oneFingerprint());
+  const media = entry.media;
+  const rendition = media?.rendition ? await store.get(media.rendition.fingerprint) : null;
+  const source = media?.derivedFrom ? await store.get(media.derivedFrom.fingerprint) : null;
+  line("item", `${entry.relativePath}  ${mib(entry.sizeBytes)}  (${media?.role ?? "source"})`);
+  line("media", `${mediaLabel(media)}${media?.classification.reasons.length ? `  (${media.classification.reasons.join(", ")})` : ""}`);
+  line("video", describeVideo(media?.inspection ?? null));
+  line("audio", describeAudio(media?.inspection ?? null));
+  if (media?.role === "rendition" && media.derivedFrom) {
+    const v = media.derivedFrom.verification;
+    line("derived from", `${source?.relativePath ?? media.derivedFrom.fingerprint}  (stream copy ${v.passed ? `verified: ${v.source.video.packets} video + ${v.source.audio.packets} audio packets identical` : `FAILED: ${v.failures.join(", ")}`})`);
+  } else if (media?.classification.class === "remux") {
+    line("normalization", media.rendition ? `complete: rendition ${media.rendition.fingerprint}${media.rendition.removedAt ? " (file removed after use)" : ""}` : media.normalizationFailure ? `failed: ${media.normalizationFailure.code}` : "not started (normalize --fingerprint …)");
+    if (rendition) line("rendition", `upload ${rendition.state.upload}${rendition.telegram ? `, Telegram message ${rendition.telegram.messageId}` : ""}`);
+  }
+  line("plan", `${entry.plan?.action ?? "none"}${entry.plan?.stopReasons.length ? `  (${entry.plan.stopReasons.join(", ")})` : ""}`);
+  line("upload", mediaAllowsUpload(media) ? `allowed by media policy; ${realUploadsState()}` : "blocked by media policy (only canonical bytes or a verified rendition are uploaded)");
+  line("telegram", entry.telegram ? `uploaded, message ${entry.telegram.messageId}${entry.dbAcknowledgedAt ? ", server acknowledged" : ", server acknowledgement pending (resume)"}` : entry.state.upload === "uploading" ? "uploading or uncertain: settle with resume before anything else" : "not uploaded");
+  line("review", entry.state.review);
+  line("publication", "separate: evaluate, review, rights clearance, then the owner's publication script");
+}
+
+async function cleanup() {
+  const store = await journal();
+  const entry = await entryOrFail(store, oneFingerprint());
+  if (entry.media?.role !== "rendition") fail("cleanup removes rendition files only; that entry is not a rendition");
+  const uploaded = entry.state.upload === "uploaded" && entry.dbAcknowledgedAt !== null;
+  const untouched = entry.state.upload === "not_uploaded" && entry.attempts.length === 0;
+  line("rendition", `${entry.absolutePath}  ${mib(entry.sizeBytes)}`);
+  line("upload", `${entry.state.upload}${entry.dbAcknowledgedAt ? " (server acknowledged)" : ""}, attempts ${entry.attempts.length}`);
+  if (!values.execute) {
+    console.log(`\ndry run: ${uploaded ? "would delete the file (uploaded and acknowledged; playback uses the Telegram copy)" : untouched ? "would delete the file (never uploaded; normalize can recreate it)" : "would NOT delete: the upload is not settled, and recovery may still need the file"}. Nothing was deleted.`);
+    return;
+  }
+  const release = await store.lock();
+  try {
+    const vjs = await loadVjs();
+    const result = await cleanupRendition(entry, { journal: store, remove: removeFile, plan: (next) => planEntry(next, vjs, store), now: () => new Date() });
+    if (result.result === "removed") {
+      // Its fingerprint-named directory too, if now empty (rmdir never removes a non-empty one).
+      await rmdir(dirname(entry.absolutePath)).catch(() => {});
+      console.log(`removed (${result.reason})`);
+    } else {
+      console.log(`refused: ${result.code}. Nothing was deleted.`);
+      process.exitCode = 1;
+    }
+  } finally {
+    await release();
+  }
+}
+
+const commands: Record<string, () => Promise<void>> = { scan, inspect, upload, resume, checkpoint, status, evaluate, "publication-sql": publicationSql, normalize, show, cleanup };
 const run = command ? commands[command] : undefined;
 if (!run) fail(`usage: ingest <${Object.keys(commands).join("|")}> …`);
 await run();

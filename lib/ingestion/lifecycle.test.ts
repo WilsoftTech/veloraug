@@ -268,7 +268,29 @@ describe("dry-run plan", () => {
     match: matched,
     known: [],
     journal: null,
+    media: { class: "canonical", reasons: [], renditionRecorded: false },
     ...overrides,
+  });
+
+  describe("media gate (E3.5)", () => {
+    const ok = "John.Wick.2014.VJ.Junior.mp4";
+    it("never plans an upload for media that was not inspected", () => {
+      expect(planSource(input(ok, { media: null }))).toMatchObject({ action: "hold", stopReasons: ["media_not_inspected"] });
+    });
+
+    it("plans Class 2 for normalization, never for upload, before and after its rendition exists", () => {
+      expect(planSource(input("John.Wick.2014.VJ.Junior.mkv", { media: { class: "remux", reasons: ["container_matroska"], renditionRecorded: false } }))).toMatchObject({ action: "normalize", stopReasons: ["media_remux_required"] });
+      expect(planSource(input("John.Wick.2014.VJ.Junior.mkv", { media: { class: "remux", reasons: ["container_matroska"], renditionRecorded: true } }))).toMatchObject({ action: "normalize", stopReasons: ["media_rendition_recorded"] });
+    });
+
+    it.each(["audio_normalization", "video_transcode_required", "manual_review"] as const)("holds %s with its reasons", (cls) => {
+      expect(planSource(input(ok, { media: { class: cls, reasons: ["why_not"], renditionRecorded: false } }))).toMatchObject({ action: "hold", stopReasons: [`media_${cls}`, "media_why_not"] });
+    });
+
+    it("lets journal facts win: an interrupted or finished upload is never re-planned by media", () => {
+      expect(planSource(input(ok, { media: null, journal: { upload: "uploading", failure: null, uploadAttempts: 1 } }))).toMatchObject({ action: "verify_upload" });
+      expect(planSource(input(ok, { media: null, journal: { upload: "uploaded", failure: null, uploadAttempts: 1 } }))).toMatchObject({ action: "skip" });
+    });
   });
 
   it("plans a clean upload with no stop reasons", () => {

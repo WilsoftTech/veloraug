@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -7,6 +7,7 @@ import { computeFingerprint } from "@/lib/ingestion/fingerprint";
 import { parseFilename } from "@/lib/ingestion/parser";
 import { buildUploadCaption } from "@/lib/ingestion/telegram";
 import { newJournalEntry, openJournal } from "@/lib/uploader/journal";
+import { canonicalInspection, matroskaInspection, sourceMedia } from "@/lib/uploader/test-media";
 import type { SourceFingerprint } from "@/types/ingestion";
 
 /**
@@ -121,6 +122,7 @@ describe("upload --fingerprint on plain Node (C2B.2C.2)", () => {
       await journal.put({
         ...newJournalEntry({ fingerprint: fingerprint as SourceFingerprint, kind: "movie", intendedChannelId: MOVIES, fileName, relativePath: fileName, absolutePath, sizeBytes: fileName.length, modifiedAtMs: 1, discoveryKey: "e".repeat(64) }, new Date("2026-09-27T00:00:00Z")),
         plan: { action: "upload", stopReasons: [] },
+        media: sourceMedia(canonicalInspection(fileName.length)),
       });
     }
   });
@@ -210,6 +212,61 @@ describe("upload --fingerprint on plain Node (C2B.2C.2)", () => {
       writeFileSync(path, original);
     }
   });
+
+  it("an entry whose media was never verified is not uploaded, whatever its plan says (E3.5)", async () => {
+    const journal = await openJournal(dir);
+    const original = (await journal.get(A))!;
+    try {
+      await journal.put({ ...original, media: null });
+      const result = run(TELEGRAM, "--fingerprint", A);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("media        NOT_INSPECTED");
+      expect(result.stdout).toContain("would not upload (media_not_verified)");
+      await journal.put({ ...original, media: sourceMedia(matroskaInspection(original.sizeBytes)) });
+      expect(run(TELEGRAM, "--fingerprint", A).stdout).toContain("would not upload (media_not_verified)");
+    } finally {
+      await journal.put(original);
+    }
+  });
+
+  it("normalize, show and cleanup (E3.5): dry runs that explain themselves and write nothing", async () => {
+    const journal = await openJournal(dir);
+    const original = (await journal.get(B))!;
+    const renditions = join(media, "renditions-not-created");
+    const noTools = { PATH: "", VELORA_FFPROBE_PATH: "", VELORA_FFMPEG_PATH: "" };
+    const ingest = (env: Record<string, string>, ...args: string[]) => cliWith({ VELORA_INGEST_JOURNAL_DIR: dir, ...noTools, ...env }, ...args);
+    try {
+      await journal.put({ ...original, plan: { action: "normalize", stopReasons: ["media_remux_required"] }, media: sourceMedia(matroskaInspection(original.sizeBytes)) });
+      const before = snapshot();
+
+      const dry = ingest({ ...TELEGRAM, VELORA_RENDITIONS_DIR: renditions }, "normalize", "--fingerprint", B);
+      expect(dry.status).toBe(0);
+      expect(dry.stdout).toContain("media          REMUX  (container_matroska)");
+      expect(dry.stdout).toContain("video          h264 High L4.0 1920x1080 24/1 fps yuv420p");
+      expect(dry.stdout).toContain("audio          mp3 44100 Hz 2 ch stereo");
+      expect(dry.stdout).toContain("stream copy (-c copy)");
+      expect(dry.stdout).toContain("no Telegram call, no database write");
+      expect(dry.stdout).toContain("would not normalize (media_tools_unavailable)");
+      expect(existsSync(renditions)).toBe(false);
+      for (const secret of [MOVIE_TOKEN, String(MOVIES)]) expect(dry.stdout + dry.stderr).not.toContain(secret);
+
+      const execute = ingest({ ...TELEGRAM, VELORA_RENDITIONS_DIR: renditions }, "normalize", "--fingerprint", B, "--execute");
+      expect(execute.status).toBe(1);
+      expect(execute.stderr).toContain("media tools are unavailable; nothing was written");
+      expect(ingest({}, "normalize", "--fingerprint", B).stderr).toContain("VELORA_RENDITIONS_DIR");
+      expect(ingest({ VELORA_RENDITIONS_DIR: join(resolve(__dirname, "../.."), "renditions") }, "normalize", "--fingerprint", B).stderr).toContain("must be outside the repository");
+
+      const show = ingest({}, "show", "--fingerprint", B);
+      expect(show.stdout).toContain("media          REMUX");
+      expect(show.stdout).toContain("normalization  not started");
+      expect(show.stdout).toContain("upload         blocked by media policy");
+
+      expect(ingest({}, "cleanup", "--fingerprint", B, "--execute").stderr).toContain("cleanup removes rendition files only");
+      expect(snapshot()).toEqual(before);
+    } finally {
+      await journal.put(original);
+    }
+  }, 120_000);
 
   it("a missing value is a clean usage error, not a stack trace", () => {
     const result = run({}, "--fingerprint");

@@ -23,7 +23,7 @@ function filesUnder(dir: string): string[] {
 
 describe("ingestion boundary (C1)", () => {
   it("has the expected pure modules", () => {
-    expect(MODULES.sort()).toEqual(["duplicates.ts", "fingerprint.ts", "match.ts", "normalize.ts", "parser.ts", "plan.ts", "recovery.ts", "state.ts", "telegram.ts", "vj.ts"]);
+    expect(MODULES.sort()).toEqual(["duplicates.ts", "fingerprint.ts", "match.ts", "media.ts", "normalize.ts", "parser.ts", "plan.ts", "recovery.ts", "state.ts", "telegram.ts", "vj.ts"]);
   });
 
   it("imports only other ingestion modules, domain types, zod and node:crypto", () => {

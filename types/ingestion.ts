@@ -453,9 +453,22 @@ export type PlannedAction =
   | "retry_upload"
   /** Upload may proceed, but the record will wait for review. */
   | "upload_then_review"
-  /** Likely duplicate: no upload until a reviewer decides. */
+  /** Likely duplicate, or media outside policy: no upload until someone decides. */
   | "hold"
-  | "reject";
+  | "reject"
+  /** Class 2 media (E3.5): never uploaded itself; its verified MP4 rendition is. */
+  | "normalize";
+
+/**
+ * The media verdict the planner needs (E3.5, lib/ingestion/media.ts): the
+ * class of this exact file's bytes, and for Class 2 whether a verified
+ * rendition is already recorded. Null means not inspected, which never uploads.
+ */
+export interface MediaVerdict {
+  class: "canonical" | "remux" | "audio_normalization" | "video_transcode_required" | "manual_review";
+  reasons: string[];
+  renditionRecorded: boolean;
+}
 
 export interface DryRunEntry {
   fileName: string;

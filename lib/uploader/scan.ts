@@ -23,7 +23,12 @@ export interface DiscoveredFile {
   discoveryKey: string;
 }
 
-/** Walks `root` for media files, skipping symlinks and anything not a regular file. */
+/**
+ * Walks `root` for media files, skipping symlinks and anything not a regular
+ * file. Hidden directories below the root (a leading dot) are skipped: that is
+ * where normalization writes renditions (`.velora-renditions`), which are
+ * journaled by `normalize` itself and must never look like new library files.
+ */
 export async function* walkMedia(root: string): AsyncGenerator<DiscoveredFile> {
   const pending = [root];
   while (pending.length > 0) {
@@ -31,7 +36,7 @@ export async function* walkMedia(root: string): AsyncGenerator<DiscoveredFile> {
     for await (const dirent of await opendir(dir)) {
       const path = join(dir, dirent.name);
       if (dirent.isDirectory()) {
-        pending.push(path);
+        if (!dirent.name.startsWith(".")) pending.push(path);
         continue;
       }
       if (!dirent.isFile()) continue;

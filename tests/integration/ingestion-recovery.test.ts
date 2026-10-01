@@ -7,6 +7,7 @@ import { buildUploadCaption } from "@/lib/ingestion/telegram";
 import type { LocalBotApiClient } from "@/lib/telegram/local-bot-api";
 import { newJournalEntry, openJournal, type JournalEntry } from "@/lib/uploader/journal";
 import { createRpcIngestionStore, supabaseRpcTransport } from "@/lib/uploader/store";
+import { canonicalInspection, sourceMedia } from "@/lib/uploader/test-media";
 import { REAL_UPLOADS_ENV, resumeEntry, uploadEntry, type UploaderDeps } from "@/lib/uploader/upload";
 import type { ChannelProbeResult, SourceFingerprint, TelegramMediaRecord, UploadOutcome } from "@/types/ingestion";
 
@@ -77,7 +78,8 @@ function entry(): JournalEntry {
     fingerprint: FP, kind: "movie", intendedChannelId: MOVIES, fileName: "Recovery.Drill.2026.VJ.Test.mkv", relativePath: "Recovery.Drill.2026.VJ.Test.mkv",
     absolutePath: "C:\\Media\\Movies\\Recovery.Drill.2026.VJ.Test.mkv", sizeBytes: SIZE, modifiedAtMs: 1, discoveryKey: "f".repeat(64),
   }, new Date());
-  return { ...fresh, plan: { action: "upload", stopReasons: [] } };
+  // Verified playback media (E3.5); the media gate itself is tested in lib/uploader.
+  return { ...fresh, plan: { action: "upload", stopReasons: [] }, media: sourceMedia(canonicalInspection(fresh.sizeBytes)) };
 }
 
 const dirs: string[] = [];
