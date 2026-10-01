@@ -170,6 +170,16 @@ The first Velora UG task is reconciliation, not feature construction.
   - **Proof.** Started from a stopped machine. The restricted role resolves version 1 to the E3.3 MP4 (message 27). Chrome and Firefox play with video, audio and a seek to 30:00, all responses 206 ≤ 8 MiB.
   - **External state.** Telegram writes 0, Series 0, hosted writes 0, persistent auth writes 0; nothing re-uploaded or remapped.
   - **Open.** Set `MEDIA_GATEWAY_ALLOWED_ORIGINS` on the deployed gateway; Safari and iOS are still the pre-launch gate. Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.4".
+- E3.5 production media normalization and automated movie ingestion (2026-10-01): **PASS.** This is the bridge from proven single-movie playback to repeatable production ingestion.
+  - **Inspection.** `scan` inspects every file with ffprobe and the MP4 box headers, never by its extension, and classifies it deterministically (`lib/ingestion/media.ts`): canonical, remux, audio_normalization, video_transcode_required, manual_review.
+  - **Upload gate.** Only canonical bytes are planned for upload, and `uploadEntry` refuses anything else (`media_not_verified`).
+  - **Class 2.** `ingest normalize` repackages by stream copy only into a fast-start MP4 under `.velora-renditions` (inside the Bot API path map). It proves every video and audio packet and the codec configuration identical and the source unchanged, then journals the rendition as its own entry, so the existing exactly-once upload and recovery apply unchanged. `cleanup` deletes a derivative only when that is safe.
+  - **Classes 3–5** stop with reasons. There is no audio or video transcoding; MP3 stays approved, and Safari/iOS remains the pre-launch gate.
+  - **Proof.** Re-running the pipeline on On The Hunt produced a file byte-identical to message 27 (SHA-256 `c475dcfc…`). The server recognizes its fingerprint as already uploaded (`adopt_server`), so it is never sent again. The derivative was deleted.
+  - **Library classification** (read-only): 7 remux, 1 HEVC (transcode required), 6 cover-art MP4s (manual review), 0 canonical.
+  - **External state.** Telegram writes 0, hosted writes 0, Series untouched; On The Hunt plays unchanged in Chrome and Firefox.
+  - **Next.** Production Media Gateway hosting and deployment. The operator's plan names it E4, but the E4 work item below is series continuity, so the numbering needs a decision.
+  - Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.5".
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules

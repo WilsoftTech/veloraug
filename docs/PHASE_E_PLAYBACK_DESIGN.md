@@ -1135,3 +1135,209 @@ Unchanged by design: E2 policy, the token format and 10-minute lifetime, the gat
 - **Production gateway origin allow-list.** Set `MEDIA_GATEWAY_ALLOWED_ORIGINS` to the site's origin on the deployed gateway, so the player can read failure statuses.
 - **Throughput.** A slow operator uplink makes 8 MiB windows exceed the 30 s request timeout (504). Production hosting of the gateway must not depend on a residential link. A smaller window under poor throughput is a possible later tuning.
 - **Unchanged pre-launch gate.** Safari and iOS real-device playback.
+
+## E3.5 — Production media normalization and automated movie ingestion (2026-10-01)
+
+**Result: `E3.5 PRODUCTION MEDIA NORMALIZATION + AUTOMATED MOVIE INGESTION: PASS`.** Starting HEAD `c4d6a02` (E3.4).
+
+E3.1 and E3.3 proved one movie by hand. E3.5 makes that procedure the ingestion path for every movie, inside the existing C2 uploader rather than beside it.
+
+- **Playback.** Unchanged, and generic for every published version. No player, gateway, E2, resolver or catalogue code changed, and nothing in the browser path is title-specific.
+- **Telegram writes:** 0.
+- **Hosted database writes:** 0.
+
+### 1. Flow
+
+```text
+discover (scan) → inspect (ffprobe + MP4 box headers) → classify
+  → canonical: plan upload              → [authorize] upload → recover → record
+  → remux: plan normalize → normalize (stream copy) → verify
+      → rendition journaled as its own entry → [authorize] upload → recover → record
+  → audio_normalization / video_transcode_required / manual_review: hold, with reasons
+record → evaluate → review → rights clearance → owner publication (unchanged, separate)
+```
+
+| Step | Automated | Operator |
+| --- | --- | --- |
+| Inspect, classify, plan | `scan`, every file, read-only | reads the plan (`scan`, `show`) |
+| Class 2 repackage and verification | `normalize --execute`; local files only | chooses which source |
+| Upload | the existing `uploadEntry`, exactly once | `upload --fingerprint … --execute` with `REAL_TELEGRAM_UPLOADS_AUTHORIZED=true` for that one command |
+| Uncertain outcome | the existing marker recovery (`resume`) | runs `resume --execute` |
+| Evaluation, review, publication | unchanged (C2B.2H) | `evaluate`, owner `publication-sql` with the rights attestation |
+| Derivative cleanup | `cleanup --execute`, only when safe | chooses when |
+
+### 2. Inspection (`lib/uploader/media-tools.ts`, `lib/ingestion/media.ts`)
+
+- **ffprobe.** `ffprobe -show_format -show_streams -print_format json` reads headers only.
+- **What is kept.** Only what the policy and its verification need:
+  - container: format and major brand, duration, size on disk and size probed;
+  - every stream: type, codec and tag, profile, level, dimensions, pixel format, field order, frame rate, time base, start and duration, sample rate, channels and layout, bitrate, attached-picture flag.
+- **MP4 layout.** Read from the top-level box headers, one 16-byte read per box, so a 2 GB file costs a few kilobytes. It records box order, fast start (exactly one `moov`, before the first `mdat`), fragmentation (`moof`) and completeness.
+- **Classification never uses the file name or extension.** The inspection does not even contain the name. An `.mp4` that is not ISO-BMFF is not an MP4.
+- **Stored on every journal entry** (`JournalEntry.media`), with the tool versions. On a rescan of unchanged bytes the stored inspection is re-classified, not re-probed, so a policy change (`MEDIA_POLICY_VERSION`) costs no I/O.
+
+### 3. Policy (`classifyMedia`, version 1)
+
+Classification is deterministic, and every class has machine-readable reasons:
+
+| Class | Meaning | Action |
+| --- | --- | --- |
+| `canonical` | ISO MP4 (isom/mp4x/avc1/M4V brand), fast-start, complete, unfragmented; exactly one H.264 (`avc1`) video and one audio stream; nothing else | Uploaded as it is, never remuxed for consistency |
+| `remux` | The same acceptable streams in Matroska, AVI, QuickTime, or a non-fast-start, fragmented or `avc3` MP4 | `normalize` (stream copy) |
+| `audio_normalization` | Video acceptable, audio not: not MP3 or AAC-LC, more than 2 channels, or a rate outside 16–48 kHz | **Stops.** AAC conversion is not automated (see 6) |
+| `video_transcode_required` | Not H.264, or H.264 outside Constrained Baseline/Main/High, 8-bit 4:2:0, level 5.1, 4096×2304, progressive | **Stops.** No video transcoding exists or was invented |
+| `manual_review` | No or several video or audio streams; subtitle, data, attachment or other streams; cover art; unknown or inconsistent duration; unknown frame rate or dimensions; probed size ≠ file size; a probe failure | **Stops.** Known video and audio findings are listed too |
+
+- **MP3 stays approved.** H.264 + MP3 in fast-start MP4 is proven in Chrome and Firefox (E3.1, E3.3).
+- **Safari/iOS real-device verification remains a pre-launch gate.** If it fails, MP3 moves to `audio_normalization` by editing `APPROVED_AUDIO`. Nothing is re-encoded in advance.
+- **Gates enforcing the policy.**
+  - The planner (`planSource`) plans an upload only for canonical bytes. Without a media record it holds (`media_not_inspected`); Class 2 plans `normalize`; the other classes hold with `media_<class>` plus their reasons. Journal facts still win: an uploading entry is still reconciled, and an uploaded one is skipped.
+  - `uploadEntry` checks again, after authorization and plan and before any server read or Telegram call: `mediaAllowsUpload` requires canonical under the current policy, and for a rendition a passed stream-copy verification. Otherwise it returns `media_not_verified`.
+  - Journal entries written before E3.5 read as not inspected, so they fail closed until rescanned.
+
+### 4. Class 2 (`normalizeEntry`, `lib/uploader/normalize.ts`)
+
+**Order of steps.** Each one fails closed:
+
+1. The source is `remux`, under the current policy, with no upload history. A source that was itself uploaded is a replacement decision (E3.3), not routine normalization.
+2. An earlier rendition is reused if it is intact on disk or has any upload history. One with upload history is never redone, even if its file is gone.
+3. The source bytes are re-fingerprinted (the same `sf1` as upload).
+4. Free space is checked: source size + 2% + 256 MiB, via `statfs`.
+5. FFmpeg runs `-n -i <source> -map 0:v:0 -map 0:a:0 -c copy -movflags +faststart -f mp4 <stem>.mp4.partial`. These are the E3.1/E3.3 arguments, an argument array with no shell, and no codec, filter or bitrate option exists in the builder.
+6. The output is probed and must classify `canonical`.
+7. The packet digests of both files must match (section 5).
+8. The source must be unchanged: the same `sf1`, size and mtime.
+9. The partial file is renamed to `<stem>.mp4`, fingerprinted, and journaled as its own entry.
+10. The source is linked to it.
+
+**Every failure** deletes the partial file, records `normalizationFailure` on the source, and journals no rendition.
+
+**Rendition entry.** It has its own fingerprint, upload track and caption token, and `media.role = rendition` with `derivedFrom` holding the source fingerprint and the full verification. So `upload`, the uncertain-outcome rule, marker recovery, `resume --server` after a lost journal, and the server's one-row-per-fingerprint rule all apply to it **unchanged**. E3.3 did exactly this by hand.
+
+**Location.**
+- One directory per source, named after its fingerprint: `VELORA_RENDITIONS_DIR`, default `<Bot API path-map root>/.velora-renditions/sf1-<16 hex>/`. Only there can the local Bot API read it.
+- It is refused inside the repository. Library scans skip hidden directories, so renditions never look like new library files.
+- The file name is the source's own base name with `.mp4`, so title, year and VJ survive for `evaluate`. Names that could leave the directory (`..`, separators) are refused.
+
+**FFmpeg 9 finding.** `-n` refuses to overwrite an existing output but exits **0**. `remux()` therefore refuses an existing output itself and requires a non-empty output afterwards.
+
+**Cleanup** (`cleanupRendition`, `ingest cleanup`) deletes a rendition file only in one of two cases:
+- it was uploaded and the server acknowledged it (playback uses the Telegram copy);
+- it never had an upload attempt, so it can be regenerated.
+
+An uncertain, uploading or failed-with-attempts rendition is never deleted, because recovery may need it. A removed never-uploaded rendition is re-planned `hold` (`rendition_removed`).
+
+### 5. Stream-copy identity
+
+FFmpeg lists every packet of both selected streams by stream copy (`-f framemd5 -c copy`, no decoding). `createPacketDigest` folds each stream into:
+- the packet count;
+- the payload bytes;
+- a SHA-256 over the stream's codec configuration (`#extradata`: avcC/SPS/PPS) and every packet's (size, payload MD5), in order.
+
+Timestamps are excluded, because each container has its own time base. Packet side data (`S=…`, for example MP3 skip samples) is excluded too, because a container may express it differently while the payload is untouched. Memory is constant.
+
+`verifyRemux` passes only if all of the following hold:
+- the output is canonical;
+- video codec, profile, level, dimensions, pixel format and frame rate are unchanged;
+- audio codec, profile, sample rate, channels and layout are unchanged;
+- duration is within 0.5 s;
+- both digests are equal.
+
+A real re-encode (H.264 at another CRF, audio copied) fails it with `video_packets_changed` while the audio still matches.
+
+### 6. Class 3 and 4
+
+- **Class 3.** Classified and stopped. Automatic MP3/other → AAC conversion is **not** enabled: there is no policy evidence yet (Safari untested), and the brief forbids silent transcoding.
+- **Class 4.** Stopped with `video_transcode_required`. No transcoding farm was built or implied.
+
+### 7. Tools, paths, safety
+
+- **Discovery.**
+  - First, `VELORA_FFPROBE_PATH` / `VELORA_FFMPEG_PATH`: absolute, an existing file, and named `ffprobe`/`ffmpeg`.
+  - Otherwise the first match on `PATH`.
+  - Each must report `-version`, and the version is stored with every result. Nothing is downloaded.
+  - The verified gyan 9.0.2 essentials build (E3.1) is kept outside Git at `~/.velora-ingest/tools/ffmpeg-9.0.2-essentials/bin`.
+- **Processes.** Every tool is a direct `spawn` (`shell: false`) with an argument array. Probe output is capped at 4 MiB; packet listings are read line by line. No movie is read into Node memory.
+- **Hostile file names.** Tested end to end with real FFmpeg: `Tom Clancy's [Jack_Ryan] (Ghost war) — Ünïcode & spaces.VJ ICE P.2026.mkv`. A name containing shell syntax (quotes, `&`, `;`, command substitution, a fake `-c:v libx264` option) stays exactly one argument.
+
+### 8. CLI (`npm run ingest -- …`)
+
+- `scan` adds the media class to every line. Without tools it says so, and plans no upload.
+- `inspect` adds `media` (class, reasons, streams, inspection, tools) to its JSON.
+- `normalize --fingerprint <source>` prints, before anything is written: source, fingerprint, class and reasons, video, audio, tools, action, the rendition path, whether the local Bot API can read it, free and needed disk space, the writes it would make (rendition and local journal only, no Telegram or database), and the publication impact (none). The dry run creates nothing, not even the directory. `--execute` does the work and prints the verification summary and the next command.
+- `show --fingerprint <any>` is a readable item state: media class, normalization or derivation, plan, upload permission, Telegram, review and publication.
+- `cleanup --fingerprint <rendition>` is dry run by default.
+- `status` tallies media classes. The `upload --fingerprint` dry run shows the media line and refuses `media_not_verified`.
+
+### 9. Real proof (local only; Telegram writes 0)
+
+**Library scan.** `G:\Movies` was scanned into an isolated scratch journal: reads only, and the library was unchanged (names, sizes, mtimes).
+
+| Class | Files | Reasons |
+| --- | --- | --- |
+| `remux` | 100 Yards, Beast, Fuze, On The Hunt, The Killer, TIMUR | `container_matroska` |
+| `remux` | The Protector | `mp4_not_fast_start` (`ftyp>free>mdat>moov`) |
+| `video_transcode_required` | Jack Ryan | `video_codec_hevc` (Main 10, 10-bit) |
+| `manual_review` | Blades of the Guardians, Call of Heroes, Desert Warrior, Sakra, The Furious, Wild Cat | `attached_picture` (an MJPEG cover image as a second video stream); Desert Warrior is also HEVC 10-bit; Blades, Sakra and The Furious also exceed the 2000 MiB ceiling (`file_too_large`) |
+| `canonical` | none | none |
+
+The cover-art result is a real safety catch: with a picture as a video stream, `-map 0:v:0` could select the picture.
+
+**On The Hunt, end to end** (the only title with a known reference, message 27):
+- **Dry run:** the full report, nothing created.
+- **`--execute`:** 17.0 s. The output was 1,007,441,962 bytes; 124,997 video and 199,380 audio packets were identical; it was fast-start.
+- **The output is byte-identical to message 27.** SHA-256 `c475dcfcde063ee8…` and `sf1-fbc665a8…5905bb`, both equal to E3.3's artifact. The automated path reproduces the production file exactly.
+- **Source:** SHA-256 `1d0dcd00256adc0c…`, size and mtime unchanged.
+- **Idempotency.**
+  - A second `normalize` returned `already_normalized (rendition_intact)` and ran no FFmpeg.
+  - A rescan showed `media_rendition_recorded` and skipped `.velora-renditions`.
+  - The `upload` dry run selected the verified rendition with E3.3's exact caption token.
+- **Exactly once against the real server** (read-only `ingest_upload_status`). The rendition's fingerprint is already **message 27** (`video/mp4`) → `adopt_server`, so an executed upload adopts and never sends. The On The Hunt MKV (message 23) and Fuze (message 25) are recognized too: a lost journal never re-uploads them.
+- **Cleanup:** the dry run, then `--execute` (`never_uploaded` in the isolated journal). The derivative was deleted, along with its directory and the empty `.velora-renditions` root. `G:\Movies` holds exactly its 14 files.
+
+### 10. Regression
+
+- **On The Hunt playback** (the E3.4 harness, `localhost:3000`, the `velora-media-gateway:dev` container):
+  - Chrome 154 decoded audio bytes 14,211 → 109,923 → 207,725, with a seek to 30:00 that resumed at 1801.7 s.
+  - Firefox 155 had `mozHasAudio` true and audio-probe RMS 0.34, with a seek that resumed at 1801.6 s.
+  - Every response was 206 `video/mp4` of at most 8 MiB, with 0 full-file requests, and 0 issued tokens in the gateway log.
+- **Gateway, E2, resolver.** Not touched. The read-only check as `velora_media_gateway` shows version 1 → message 27 (1,007,441,962 bytes, `video/mp4`); versions 2 and 999999 resolve to nothing; private and public reads are refused with 42501. The E3.4 error classification is unchanged.
+
+### 11. Tests and gates
+
+**Unit: 729 passing**, of which 16 run only with real tools and are skipped without them, saying why. New tests:
+- `lib/ingestion/media.test.ts`: classification matrix, determinism, no extension, box layouts including 64-bit and size-0 boxes and corrupt files, copy-only arguments with a hostile name, packet digests with real FFmpeg 9 lines (extradata, side data), and remux verification;
+- `lib/uploader/normalize.test.ts`: success, idempotency, upload history, regeneration, refusals by class/policy/name, changed source, disk, FFmpeg failure, probe failure, non-canonical output, packet mismatch, digest failure, source changed mid-run, over-ceiling output, adopted bytes, and the cleanup rules;
+- `lib/uploader/media-ffmpeg.test.ts`: synthetic fixtures made with FFmpeg's test sources (canonical MP4, MKV H.264+MP3 with a hostile Unicode name, non-fast-start MP4, AC-3, MPEG-4 Part 2, two audio, two video, subtitles, garbage), real classification, real normalization of two inputs with source SHA-256 unchanged, real re-encode detection, FFmpeg failure, existing-output refusal, a derivative changed after verification, and tool discovery;
+- the uploader media gate, including the authorization-first order, a verified rendition uploaded once, and an uncertain one never resent;
+- the planner media gate;
+- CLI dry runs on plain Node.
+
+Existing fixtures gained canonical media; no expectation was weakened.
+
+**Other gates.**
+- Catalogue integration: 56 passing (the recovery integration fixture gained canonical media).
+- pgTAP 482, `db lint` clean.
+- Lint: 0 problems on tracked and new files.
+- Application typecheck, gateway `tsc` and the production build (random stand-in secret) pass.
+
+**Secret scan.** 25 values against `.next/static` and `.next/server`, the diff and new files, the docs, the ingestion source and tests, the harness logs and the gateway log: **0 hits**. The isolated scratch journal holds the Movies channel id by design (the C2 journal records each entry's intended channel); it is Git-ignored scratch and was deleted.
+
+### 12. External state
+
+| | Count |
+| --- | --- |
+| **Telegram Movies** | writes **0** (the local Bot API container stayed stopped). Reads: the playback regression only, 9 gateway requests, 47.6 MB, 59 `upload.getFile` reads, 49 RPCs, all of message 27 |
+| **Telegram Series** | reads 0, writes 0 |
+| **Hosted database** | writes **0** (no migration). Reads: 15 `ingest_upload_status` worker RPCs (`resume --server` dry run), the gateway's resolver and two read-only checks as `velora_media_gateway` |
+| **Hosted auth** | 1 throwaway user, created and deleted (lookup 404); persistent writes 0 |
+| **Media** | 1 real derivative (On The Hunt, byte-identical to message 27), **deleted**. Library unchanged. Message 27 unchanged and active. Message 23 retained. Fuze unchanged (message 25, no version) |
+
+### 13. Limitations and next
+
+- **Cover art.** Six library MP4s stop on `attached_picture`. Allowing a rendition that drops the picture (selecting the film stream explicitly) is a policy decision for a later checkpoint, not a guess here.
+- **Class 3 and 4** are classification only.
+- **Safari/iOS.** The real-device test remains the pre-launch gate for MP3 in MP4.
+- **Lost journal.** If the journal is lost and a different FFmpeg build is used, a regenerated rendition might not be byte-identical to an uploaded one. It would then get a new fingerprint, and only duplicate review (same title and VJ) would hold it. The tool version is recorded with every rendition; keep the verified build.
+- **The C2 design document** (`docs/PHASE_C_INGESTION_DESIGN.md`) was not edited, because it has unrelated uncommitted work in the working tree. This section is the E3.5 record, and the CLI header documents the commands.
+- **Next checkpoint:** production Media Gateway hosting and deployment, including `MEDIA_GATEWAY_ALLOWED_ORIGINS` and a non-residential uplink. The operator's checkpoint plan calls it E4, but the roadmap's own E4 work item is series continuity, so the numbering needs a decision. The real Safari/iOS test is still owed before launch.
