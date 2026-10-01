@@ -58,7 +58,7 @@ export const PLAYER_FAILURE_MESSAGES: Record<PlayerFailure, string> = {
   not_entitled: "Your account can't watch this movie.",
   unavailable: "This movie isn't available to watch right now.",
   unsupported: "This movie can't be played in this browser.",
-  playback_error: "Playback stopped because of an error. Try again.",
+  playback_error: "Playback failed. Try again.",
   network: "Playback was interrupted. Check your connection and try again.",
   temporarily_unavailable: "Playback is temporarily unavailable. Try again in a moment.",
 };
@@ -160,22 +160,85 @@ export function needsRenewal(capability: PlayerCapability, nowMs: number): boole
 }
 
 /**
- * Maps a MediaError code. 4 (source not supported) and 3 (decode) mean the
- * browser cannot play this file; 2 (network) may be an expired capability and
- * is retried once through renewal by the component; 1 (aborted) is ignored.
+ * What a media element error means on its own (E3.4).
+ *
+ * Before metadata has loaded from the current source, the element cannot tell a
+ * gateway that is down, an HTTP error status and a file it cannot decode apart:
+ * Chrome and Firefox report MediaError 4 (source not supported) for all of
+ * them. So such an error is diagnosed (`diagnoseMediaFailure`), never read as
+ * "unsupported". After metadata, the file is known to be playable: 2 (network)
+ * may be an expired capability, which the component renews once; anything else
+ * is a playback error. 1 (aborted) is ignored.
  */
-export function failureFromMediaError(code: number | undefined): PlayerFailure | null {
-  switch (code) {
-    case 1:
-      return null;
-    case 2:
-      return "network";
-    case 3:
-    case 4:
-      return "unsupported";
-    default:
-      return "playback_error";
+export type MediaErrorClass = "diagnose" | "network" | "playback_error";
+
+export function classifyMediaError(code: number | undefined, metadataLoaded: boolean): MediaErrorClass | null {
+  if (code === 1) return null;
+  if (!metadataLoaded) return "diagnose";
+  return code === 2 ? "network" : "playback_error";
+}
+
+/** The gateway refused the capability itself (expired or not accepted): worth one renewal. */
+export type MediaDiagnosis = PlayerFailure | "capability_rejected";
+
+/** Each diagnostic request gives up after this long. */
+export const DIAGNOSIS_TIMEOUT_MS = 5_000;
+
+/**
+ * Works out why a source failed before its metadata loaded, with at most two
+ * requests straight to the media gateway (never through Next.js):
+ *
+ * 1. The stream URL itself, for two bytes. When the gateway allows this site's
+ *    origin (MEDIA_GATEWAY_ALLOWED_ORIGINS), its status is readable: 206 means
+ *    the gateway serves the file and this browser cannot play it, which is the
+ *    only case reported as "unsupported".
+ * 2. If that is unreadable, the gateway's /healthz in no-cors mode: it fails
+ *    only when the gateway cannot be reached at all. It sends no capability
+ *    and causes no catalogue or Telegram work.
+ *
+ * Whatever cannot be established is reported as a plain playback error, never
+ * as a browser problem. Returns null if `signal` aborts (the player closed).
+ */
+export async function diagnoseMediaFailure(
+  streamUrl: string,
+  fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
+  timeoutMs: number = DIAGNOSIS_TIMEOUT_MS,
+): Promise<MediaDiagnosis | null> {
+  // One controller per request, aborted by the caller or the timeout (no AbortSignal.any: older Safari lacks it).
+  const probe = async (url: string, init: RequestInit) => {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const timer = setTimeout(abort, timeoutMs);
+    if (signal?.aborted) abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    try {
+      const response = await fetchImpl(url, { ...init, cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer", signal: controller.signal });
+      void response.body?.cancel().catch(() => {});
+      return response;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+    }
+  };
+
+  try {
+    const { status } = await probe(streamUrl, { headers: { Range: "bytes=0-1" } });
+    if (status === 206 || status === 200) return "unsupported";
+    if (status === 401) return "capability_rejected";
+    if (status === 404) return "unavailable";
+    if (status === 429 || status >= 500) return "temporarily_unavailable";
+    return "playback_error";
+  } catch {
+    // Unreachable, timed out, or a response this origin may not read (no CORS).
   }
+  if (signal?.aborted) return null;
+  try {
+    await probe(new URL("/healthz", streamUrl).href, { mode: "no-cors" });
+  } catch {
+    return signal?.aborted ? null : "temporarily_unavailable";
+  }
+  return signal?.aborted ? null : "playback_error";
 }
 
 /** A catalogue version the viewer can choose between (one per VJ). No media details. */

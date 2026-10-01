@@ -7,9 +7,10 @@ import {
   MIN_RENEWAL_INTERVAL_MS,
   PLAYER_FAILURE_MESSAGES,
   RENEW_BEFORE_EXPIRY_MS,
+  classifyMediaError,
   defaultVersion,
   detachMediaSource,
-  failureFromMediaError,
+  diagnoseMediaFailure,
   needsRenewal,
   playerReducer,
   renewalDelayMs,
@@ -62,6 +63,18 @@ describe("playerReducer", () => {
     expect(playerReducer(playing, { type: "capability_denied", failure: "unavailable" })).toEqual({ status: "error", failure: "unavailable", capability: null });
   });
 
+  it("plays a granted capability through to playing with no failure", () => {
+    const state = run([{ type: "play_requested" }, { type: "capability_granted", capability: CAP }, { type: "media_ready" }, { type: "media_playing" }]);
+    expect(state).toEqual({ status: "playing", failure: null, capability: CAP });
+  });
+
+  it("reports a service failure and drops the capability, so Play can be pressed again", () => {
+    const loading = run([{ type: "play_requested" }, { type: "capability_granted", capability: CAP }]);
+    const failed = playerReducer(loading, { type: "media_failed", failure: "temporarily_unavailable" });
+    expect(failed).toEqual({ status: "error", failure: "temporarily_unavailable", capability: null });
+    expect(playerReducer(failed, { type: "play_requested" }).status).toBe("requesting");
+  });
+
   it("reports unsupported media and drops the capability", () => {
     const loading = run([{ type: "play_requested" }, { type: "capability_granted", capability: CAP }]);
     expect(playerReducer(loading, { type: "media_failed", failure: "unsupported" })).toEqual({ status: "error", failure: "unsupported", capability: null });
@@ -73,17 +86,107 @@ describe("playerReducer", () => {
   });
 });
 
-describe("failureFromMediaError", () => {
-  it("maps MediaError codes to safe states", () => {
-    expect(failureFromMediaError(1)).toBeNull();
-    expect(failureFromMediaError(2)).toBe("network");
-    expect(failureFromMediaError(3)).toBe("unsupported");
-    expect(failureFromMediaError(4)).toBe("unsupported");
-    expect(failureFromMediaError(undefined)).toBe("playback_error");
+describe("classifyMediaError", () => {
+  it("never treats an error before metadata as a browser problem: it is diagnosed", () => {
+    // Chrome and Firefox report 4 for a refused connection, any HTTP error status and undecodable bytes alike (E3.4).
+    for (const code of [2, 3, 4, undefined]) expect(classifyMediaError(code, false)).toBe("diagnose");
+  });
+
+  it("reads errors after metadata from the code alone", () => {
+    expect(classifyMediaError(2, true)).toBe("network");
+    expect(classifyMediaError(3, true)).toBe("playback_error");
+    expect(classifyMediaError(4, true)).toBe("playback_error");
+    expect(classifyMediaError(undefined, true)).toBe("playback_error");
+  });
+
+  it("ignores an aborted load", () => {
+    expect(classifyMediaError(1, false)).toBeNull();
+    expect(classifyMediaError(1, true)).toBeNull();
   });
 
   it("has a plain message for every failure, with no internals", () => {
     for (const message of Object.values(PLAYER_FAILURE_MESSAGES)) expect(message).not.toMatch(/telegram|mtproto|gateway|token|database|sql|\d{3}/i);
+  });
+
+  it("blames the browser in exactly one message", () => {
+    expect(Object.entries(PLAYER_FAILURE_MESSAGES).filter(([, message]) => /browser/i.test(message)).map(([failure]) => failure)).toEqual(["unsupported"]);
+  });
+});
+
+describe("diagnoseMediaFailure", () => {
+  const STREAM = CAP.streamUrl;
+  const HEALTH = "https://media.velora.example/healthz";
+  const refused = () => Promise.reject(new TypeError("Failed to fetch"));
+  /** A fake fetch: `stream` answers the stream URL, `health` the gateway's /healthz. */
+  const gateway = (stream: () => Promise<Response>, health: () => Promise<Response>) =>
+    vi.fn(async (input: string) => (input === HEALTH ? health() : stream())) as unknown as typeof fetch;
+  const status = (code: number) => () => Promise.resolve(new Response(code === 206 ? "ab" : "{}", { status: code }));
+  const opaque = () => Promise.resolve(new Response(null, { status: 200 }));
+
+  it("reports an unreachable gateway as temporarily unavailable, not as unsupported (the E3.4 defect)", async () => {
+    expect(await diagnoseMediaFailure(STREAM, gateway(refused, refused))).toBe("temporarily_unavailable");
+  });
+
+  it.each([
+    [503, "temporarily_unavailable"],
+    [502, "temporarily_unavailable"],
+    [500, "temporarily_unavailable"],
+    [429, "temporarily_unavailable"],
+    [404, "unavailable"],
+    [401, "capability_rejected"],
+    [403, "playback_error"],
+    [416, "playback_error"],
+    [400, "playback_error"],
+  ])("reads gateway status %i as %s", async (code, diagnosis) => {
+    expect(await diagnoseMediaFailure(STREAM, gateway(status(code), opaque))).toBe(diagnosis);
+  });
+
+  it("reports unsupported only when the gateway is serving the file's bytes", async () => {
+    expect(await diagnoseMediaFailure(STREAM, gateway(status(206), refused))).toBe("unsupported");
+  });
+
+  it("falls back to a neutral error when the gateway is up but its answer is unreadable (origin not allowed)", async () => {
+    expect(await diagnoseMediaFailure(STREAM, gateway(refused, opaque))).toBe("playback_error");
+  });
+
+  it("treats a gateway that never answers as unavailable, within the timeout", async () => {
+    const hang = (_input: string, init?: RequestInit) =>
+      new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(init.signal?.reason)));
+    const started = Date.now();
+    expect(await diagnoseMediaFailure(STREAM, vi.fn(hang) as unknown as typeof fetch, undefined, 50)).toBe("temporarily_unavailable");
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("makes at most two bounded requests, straight to the gateway, with no credentials or referrer", async () => {
+    const fetchImpl = gateway(refused, refused);
+    await diagnoseMediaFailure(STREAM, fetchImpl);
+    const calls = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls as [string, RequestInit][];
+    expect(calls.map(([url]) => url)).toEqual([STREAM, HEALTH]);
+    expect(calls[0][1]).toMatchObject({ headers: { Range: "bytes=0-1" }, credentials: "omit", referrerPolicy: "no-referrer", cache: "no-store" });
+    // The liveness check carries no capability and needs no CORS.
+    expect(calls[1][1]).toMatchObject({ mode: "no-cors", credentials: "omit", referrerPolicy: "no-referrer" });
+    expect(calls[1][0]).not.toContain("token");
+    for (const [, init] of calls) expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("asks nothing more once the stream URL answers", async () => {
+    const fetchImpl = gateway(status(503), opaque);
+    await diagnoseMediaFailure(STREAM, fetchImpl);
+    expect((fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+  });
+
+  it("returns nothing when the player is closed meanwhile", async () => {
+    const controller = new AbortController();
+    const fetchImpl = vi.fn(async () => {
+      controller.abort();
+      throw new DOMException("aborted", "AbortError");
+    }) as unknown as typeof fetch;
+    expect(await diagnoseMediaFailure(STREAM, fetchImpl, controller.signal)).toBeNull();
+    expect((fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+  });
+
+  it("maps every diagnosis a viewer can see to a message", () => {
+    for (const failure of ["temporarily_unavailable", "unavailable", "unsupported", "playback_error"] as const) expect(PLAYER_FAILURE_MESSAGES[failure]).toBeTruthy();
   });
 });
 

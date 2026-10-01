@@ -8,14 +8,16 @@ import {
   INITIAL_PLAYER_STATE,
   MIN_RENEWAL_INTERVAL_MS,
   PLAYER_FAILURE_MESSAGES,
+  classifyMediaError,
   defaultVersion,
   detachMediaSource,
-  failureFromMediaError,
+  diagnoseMediaFailure,
   needsRenewal,
   playerReducer,
   renewalDelayMs,
   requestStreamCapability,
   type PlayableVersion,
+  type PlayerFailure,
 } from "@/lib/playback/player";
 
 interface MoviePlayerProps {
@@ -48,6 +50,8 @@ export function MoviePlayer({ versions, signInHref }: MoviePlayerProps) {
   const renewing = useRef(false);
   const recovered = useRef(false);
   const lastRenewal = useRef(0);
+  /** Whether the attached source has loaded its metadata (the file is known to be playable). */
+  const metadataLoaded = useRef(false);
 
   const stop = useCallback(() => {
     request.current?.abort();
@@ -99,6 +103,7 @@ export function MoviePlayer({ versions, signInHref }: MoviePlayerProps) {
     if (!video || !capability || attachedUrl.current === capability.streamUrl) return;
     const first = attachedUrl.current === null;
     attachedUrl.current = capability.streamUrl;
+    metadataLoaded.current = false;
     if (first) {
       video.src = capability.streamUrl;
       video.play().catch(() => {
@@ -135,17 +140,40 @@ export function MoviePlayer({ versions, signInHref }: MoviePlayerProps) {
     if (state.capability && needsRenewal(state.capability, Date.now())) void renew();
   };
 
-  const onError = () => {
-    const failure = failureFromMediaError(videoRef.current?.error?.code);
-    if (!failure || !state.capability) return;
-    // A network failure may be an expired capability: renew once and resume.
-    if (failure === "network" && !recovered.current && Date.now() - lastRenewal.current >= MIN_RENEWAL_INTERVAL_MS) {
-      recovered.current = true;
-      void renew();
-      return;
-    }
+  const fail = (failure: PlayerFailure) => {
     stop();
     dispatch({ type: "media_failed", failure });
+  };
+
+  /** Renews once per Play (and never within the renewal interval); false when that chance is used up. */
+  const recoverOnce = () => {
+    if (recovered.current || Date.now() - lastRenewal.current < MIN_RENEWAL_INTERVAL_MS) return false;
+    recovered.current = true;
+    void renew();
+    return true;
+  };
+
+  const onError = () => {
+    const kind = classifyMediaError(videoRef.current?.error?.code, metadataLoaded.current);
+    const capability = state.capability;
+    if (!kind || !capability) return;
+    // A network failure mid-film may be an expired capability: renew once and resume.
+    if (kind === "network") {
+      if (!recoverOnce()) fail("network");
+      return;
+    }
+    if (kind === "playback_error") return fail("playback_error");
+    // Failed before any metadata: find out why rather than blame the browser.
+    request.current?.abort();
+    const controller = new AbortController();
+    request.current = controller;
+    void diagnoseMediaFailure(capability.streamUrl, fetch, controller.signal).then((diagnosis) => {
+      if (diagnosis === null || controller.signal.aborted) return;
+      request.current = null;
+      if (diagnosis !== "capability_rejected") return fail(diagnosis);
+      // A capability the gateway no longer accepts: one renewal, then report the service as unavailable.
+      if (!recoverOnce()) fail("temporarily_unavailable");
+    });
   };
 
   if (versionId === null) return null;
@@ -190,6 +218,9 @@ export function MoviePlayer({ versions, signInHref }: MoviePlayerProps) {
               playsInline
               preload="metadata"
               className="aspect-video w-full rounded-default bg-surface"
+              onLoadedMetadata={() => {
+                metadataLoaded.current = true;
+              }}
               onLoadedData={() => dispatch({ type: "media_ready" })}
               onPlaying={() => {
                 recovered.current = false;

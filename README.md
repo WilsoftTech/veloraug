@@ -38,6 +38,20 @@ npm run dev
 - Supabase: set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`. The catalogue lives there, so browsing needs them. For local development, point them at a local stack (`npx supabase@2.117.0 start`) and load the development-only fixtures with `npx supabase@2.117.0 db reset --local --sql-paths ./seeds/dev-catalogue.sql`. There is no sample catalogue: an empty catalogue shows empty states.
 - TMDB: optional and server-only (`TMDB_ACCESS_TOKEN` or `TMDB_API_KEY`). It only describes legacy My List rows saved by TMDB id before B5.
 
+### Playback (local)
+
+Movies stream from the media gateway (`services/media-gateway`), a separate service that `npm run dev` does not start. With Docker Desktop running, use two terminals:
+
+```bash
+npm run gateway:dev   # starts the gateway container and waits until it is ready
+npm run dev
+```
+
+- Both read `.env.local`, so they share `MEDIA_GATEWAY_TOKEN_SECRET`. `MEDIA_GATEWAY_PUBLIC_ORIGIN` is the gateway's loopback origin (for example `http://127.0.0.1:8787`), and `MEDIA_GATEWAY_SESSION_FILE` names the existing reader session. The command never logs in to Telegram.
+- `npm run gateway:dev -- --stop` stops it; `-- --build` rebuilds the image after gateway code changes.
+- Without the gateway, Play shows "Playback is temporarily unavailable", and `npm run dev` prints a warning at startup.
+- Open the app at `http://localhost:3000`. On another host name such as `127.0.0.1`, Next.js development refuses its dev connection and the page never becomes interactive, so Play does nothing.
+
 ## Layout
 
 | Path | Purpose |
@@ -57,6 +71,7 @@ npm run dev
 | --- | --- |
 | `npm run dev` / `npm run build` | Develop / production build |
 | `npm run lint` / `npm run typecheck` | Static checks |
+| `npm run gateway:dev` | Runs the media gateway locally for playback (Docker); see "Playback (local)" |
 | `npm test` | Vitest unit tests (`lib/**/*.test.ts`), including the TMDB boundary check |
 | `npm run test:catalogue` | Resets the **local** database with the development fixtures, then runs the catalogue integration tests (`tests/integration/`) |
 | `npm run test:db` | Rebuilds the **local** Supabase database from `supabase/migrations/`, then runs the pgTAP suite. Needs Docker and a running local stack (`npx supabase@2.117.0 start`). It never touches hosted |
