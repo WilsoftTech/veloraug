@@ -1518,3 +1518,79 @@ Blocked from upload:                    5   (3 over the 2000 MiB ceiling, 2 HEVC
     - the two HEVC files.
   - **Separate per title:** evaluation, review, rights and publication.
 - Safari/iOS real-device verification remains a pre-launch gate.
+
+## E3.7 — Controlled batch movie ingestion: Call of Heroes canary (2026-10-07)
+
+**Result: `E3.7 CONTROLLED BATCH MOVIE NORMALIZATION + TELEGRAM INGESTION: BLOCKED — TELEGRAM UPLOAD TRANSPORT STALL`.** Starting HEAD `a885b73` (E3.6), pushed to `veloraug/phase-a-foundation` before any Telegram write.
+
+E3.7 was planned as seven titles, one at a time, with Call of Heroes as the canary. The canary's one authorized upload never reached the channel: the local Bot API stopped sending to Telegram at about 61% of the file. The existing marker recovery then proved the document absent and closed the attempt. Nothing was re-sent. The other six titles were not started.
+
+- **Telegram movie documents created:** 0. **Duplicate uploads:** 0. **Catalogue and publication writes:** 0. **Rights changes:** 0.
+
+### 1. Preflight (all passed before the send)
+
+- **Library rescan** of `G:\Movies` into the real journal (`~/.velora-ingest/journal`; no `--match`, Telegram or database). The result equalled E3.6: 14 files; 12 `remux`, 2 `video_transcode_required`, 0 `manual_review`, 0 `canonical`, 0 `audio_normalization`. The 3 over-ceiling files were still rejected. On The Hunt's and Fuze's fingerprints equal the recorded ones.
+- **FFmpeg.** `VELORA_FFPROBE_PATH` and `VELORA_FFMPEG_PATH` are now set in `.env.local` (Git-ignored), which closes the E3.6 open item. Both run as 9.0.2-essentials, source `env`.
+- **Bot API.** The existing container was started with the media override. It was healthy, published on `127.0.0.1:8081` only, with `G:\Movies` mounted read-only and the named state volume.
+- **Identity** (read-only). Local `getMe` returned the exact Movies bot id and username. `getChat` reached the channel and the recovery group. The bot is a channel administrator that can post, and a member of the recovery group. The configured channel equals the server's registered channel. Series was refused locally before any request.
+- **Server.** `resume --server` (read-only status) knew only Fuze (message 25) and On The Hunt's MKV (message 23). The rendition was new (`upload_allowed`), with no attempt and no uncertain record.
+- **Authorization** was unset before the send and set for the one command only.
+
+### 2. Normalization (Class 2, stream copy)
+
+| | Value |
+| --- | --- |
+| Source | `CALL OF HEROES.VJ ICEP.mp4`, `sf1-2a913ae1af15…`, 1,917,414,964 B; MP4 with moov after mdat; streams: #0 H.264 High L4.1 1920×816, #1 MP3 44.1 kHz stereo, #2 MJPEG 500×500 `attached_pic` |
+| Dry run | cover identified as artwork and left out; film video #0 and the one audio #1 selected by meaning; `-c copy`, encoding none; 155 GiB free, 2.07 GiB needed |
+| `--execute` | 133.4 s; 172,374 video and 274,947 audio packets identical; source unchanged |
+| Rendition | `sf1-2957a6d8604b…5872`, **1,917,405,700 B** (under the 2,097,152,000 B ceiling), SHA-256 `7131620845cc…084c` |
+| Shape | `ftyp > moov > free > mdat` (fast-start); exactly H.264 High + MP3; no artwork; duration 7182.29 s, equal to the source |
+| `show` | CANONICAL rendition, stream copy verified, upload allowed by media policy, not on Telegram, publication separate |
+
+The plan line read `upload_then_review (match_error)`, because the scan ran without `--match`. Evaluation is a separate later step, so this does not block ingestion.
+
+### 3. The upload
+
+- **One** `upload --fingerprint sf1-2957a6d8… --execute`, at 19:51:57Z. The server fixed the recovery floor at **28** (the checkpoint).
+- At 516 s the client got **`uncertain` / `network_error`**: the Bot API's hard-coded 500 s HTTP idle timeout (E3.3). The journal kept `uploading`, and the server recorded `uncertain`. It was **not retried**.
+- **The new finding.** The Bot API kept sending to Telegram after the client disconnected, but slowly: about 0.4–0.6 MB/s, measured on the container's `eth0` transmit counter. At 20:32Z it **stopped for good at 1,161,895,483 B, about 61%** of the file. For more than two hours after that, the counter grew only by keep-alive traffic. In C2B.2D and E3.3, the same detached upload of about 1 GB completed, at a much higher rate. The server logs at default verbosity give no reason.
+- Recovery waited for the plateau, so that a marker could never be posted ahead of a document still being sent.
+
+### 4. Recovery (existing C2B.1A/B marker protocol, no new code)
+
+| Run | Time (UTC) | Result |
+| --- | --- | --- |
+| 1 | 20:42:59 | one marker; the interval after floor 28 was inspected completely, with no match → `wait` (`within_upload_grace_period`, under 3 h since the attempt started). The row stayed `uncertain` |
+| 2 | 22:56:39, after the grace period | one marker, **message 39**; ids **29–38** inspected completely, each `missing` or non-media, and none carried the `velora-src` token → `not_found_confirmed` → **`abandon`** |
+
+- **Final state of ingestion event 4:** `upload_failed`, failure `verified_absent`, attempt count **1**, floor 28, no media linked, status `received`. The local journal holds attempt 1 as `abandoned` / `verified_absent`.
+- **Checkpoint:** 28 → **39**, advanced by the protocol after the resolution.
+- `resume --server` now has 0 entries to settle.
+- **Not attributed.** Ids 29–38 include run 1's text marker. The protocol's output does not say what the other ids were. They were not documents carrying this file's token, which is all that recovery needs; the operator may want to look at the channel.
+
+### 5. Local state
+
+- **Source:** fingerprint unchanged after recovery.
+- **Rendition:** retained on purpose for the transport investigation; `cleanup` was not run.
+- **Library drive.** Shortly after the second recovery, the `G:` drive disconnected from Windows (the system no longer lists the volume). No Velora command deletes files on that path except `cleanup`, which did not run, so the rendition is expected to be on the drive. Before any further use, verify it against SHA-256 `7131620845cc…084c` and re-mount the Bot API's media override.
+
+### 6. External state
+
+| | Count |
+| --- | --- |
+| **Telegram Movies writes** | 1 `sendDocument` (stalled; no message created), 2 recovery text markers (the second is message 39), plus the protocol's probes for ids 29–38 (each a forward into the recovery group, with a best-effort delete of the copy) |
+| **Telegram Movies reads** | `getMe`, `getChat`, `getChatMember`; no MTProto read (nothing to verify) |
+| **Telegram Series** | reads 0, writes 0 |
+| **Hosted database writes** | ingestion worker RPCs only: the upload start, the `uncertain` outcome, the `abandoned` resolution, and the checkpoint advance (recovery run 1's `wait` writes nothing). No migration, no catalogue, rights, subscription or analytics write |
+| **Hosted database reads** | `ingest_upload_status` RPCs, plus three read-only owner snapshots (`BEGIN READ ONLY … ROLLBACK`) |
+| **Unchanged** | On The Hunt (version 1 → media 3, message 27), Fuze (message 25), the other six candidates, the three over-ceiling titles, the two HEVC titles, Series |
+
+### 7. Next: E3.7A, the Telegram upload transport investigation
+
+Further uploads, the Call of Heroes retry included, wait for E3.7A. The resolved attempt makes a new start possible, but it needs its own authorization. With the same uplink and the same 500 s idle timeout, the same stall is likely. Questions for E3.7A:
+
+- **Throughput.** Measure the uplink's sustained throughput to Telegram from this machine at the time of upload.
+- **The stall.** Why did a detached `sendDocument` stop at 61%? Candidates are a TDLib upload-part failure or timeout and an idle or abandoned request on the Bot API side. Use `--verbosity` logs on a non-production probe.
+- **The client timeout.** Whether the Bot API's idle timeout or the client's long-running request can be kept alive, so the upload outcome is acknowledged rather than recovered.
+
+Until then, the rendition stays retained, and the six remaining titles stay paused.

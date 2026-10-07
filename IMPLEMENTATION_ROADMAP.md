@@ -196,6 +196,16 @@ The first Velora UG task is reconciliation, not feature construction.
   - **External state.** Telegram writes 0, Series 0, hosted writes 0; the library is unchanged.
   - **Next:** E3.7, controlled batch normalization and Telegram ingestion of the 7 new titles, one at a time (not started).
   - Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.6".
+- E3.7 controlled batch movie ingestion, Call of Heroes canary (2026-10-07): **BLOCKED — TELEGRAM UPLOAD TRANSPORT STALL.**
+  - **Before any Telegram write.** E3.6 was pushed (`a885b73`). The library rescan equalled E3.6. Bot API, Movies bot identity, channel and server preflight all passed.
+  - **Normalization.** Class 2 stream copy, cover art left out. 172,374 video and 274,947 audio packets identical. Rendition `sf1-2957a6d8…`: 1,917,405,700 B, fast-start, H.264 + MP3 only.
+  - **Upload.** Exactly **1** `sendDocument`. It was `uncertain` at 516 s (the Bot API's 500 s idle timeout) and was not retried. The detached Bot API upload then ran at about 0.5 MB/s and **stalled for good at about 61%** (1.16 GB). This is new: E3.3's detached upload had completed.
+  - **Recovery.** The existing marker protocol inspected ids 29–38 completely with no match: `wait` inside the 3 h grace period, then `abandon` after it.
+  - **Event 4** is `upload_failed` / `verified_absent`, attempt 1, no media. The checkpoint went from 28 to 39 (marker 39).
+  - **External state.** Telegram movie documents 0, duplicates 0. Catalogue, rights and Series writes 0. On The Hunt and Fuze unchanged; the other six titles not started.
+  - **Local.** The rendition was retained, and `cleanup` was not run. The `G:` library drive then disconnected, so verify the rendition (SHA-256 `7131620845cc…`) on reconnect.
+  - **Next:** E3.7A, the Telegram upload transport investigation. It covers throughput, the stall's cause, and the client idle timeout. Then a separately authorized Call of Heroes attempt.
+  - Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.7".
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules
