@@ -233,7 +233,12 @@ The first Velora UG task is reconciliation, not feature construction.
   - Existing owner functions approved TMDB 413198 and published `call-of-heroes-2016`, ready/rights-cleared with VJ Ice P. Movies page now shows two titles. Real Chrome verified authenticated video/audio playback, pause, seek, close, signed-out denial and mobile layout; temporary proof users removed.
   - Added explicit reviewed-year input to the existing CLI for missing filename years. Full suite: 758 passed, 27 skipped; typecheck/lint/diff checks passed. Original source, rendition and staging copy retained. This is one successful controlled upload, not proof of universal transport reliability.
   - Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.7D"; ignored primary evidence `.velora-ingest/e3.7c/`.
-- Database regression suite: `npm run test:db` (local only).
+- E3.8 channel discovery and review-first catalogue (2026-10-10): **PARTIAL — OFFLINE PROTOTYPE, PRODUCTION DISABLED.**
+  - Durable document inbox/replay worker, catalogue-first matching, existing VJ/TMDB reuse, independent readiness/rights gates, revision-bound admin review and bounded reconciliation implemented.
+  - Existing owner publication/current catalogue visibility proved for an approved synthetic uploader-linked review in a disposable database. New direct channel media remains blocked pending the owner-service extension; no invented fingerprints.
+  - No Telegram/hosted Supabase calls, production migrations, real movie changes or listener activation. No new dependency.
+  - Inventory, evidence, limitations and rollout prerequisites: `docs/E3_8_CHANNEL_DISCOVERY.md`. Next: E3.8A isolated channel-origin SQL and bounded verification contract; deployment is not authorized.
+- Database regression suite: `npm run test:db` (local only; E3.8 uses disposable fixtures rather than resetting developer state).
 
 ## 2. Product and data rules
 

@@ -12,6 +12,7 @@
     "test:catalogue": "npx supabase@2.117.0 db reset --local --sql-paths ./seeds/dev-catalogue.sql && vitest run --config vitest.integration.config.mts",
     "gateway:dev": "node --env-file-if-exists=.env.local scripts/media-gateway-dev.mjs",
     "ingest": "node --env-file-if-exists=.env.local --import ./scripts/ingest/register.mjs scripts/ingest/cli.mts",
+    "discovery:replay": "node --import ./scripts/ingest/register.mjs scripts/discovery/replay.mts",
     "test:db": "npx supabase@2.117.0 db reset --local --no-seed && npx supabase@2.117.0 test db --local"
   },
   "dependencies": {

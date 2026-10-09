@@ -57,7 +57,10 @@ function importsOf(file: string): string[] {
 
 const files = SOURCE_DIRS.flatMap((dir) => sourceFiles(join(ROOT, dir)));
 const graph = new Map(files.map((file) => [rel(file), importsOf(file)]));
-const routes = [...graph.keys()].filter((file) => file.startsWith("app/") && ROUTE_FILES.test(file));
+// Only these two guarded offline admin pages may reach ingestion snapshot validation.
+// New routes under the same folder remain covered unless separately reviewed.
+const OFFLINE_ADMIN_ROUTES = new Set(["app/admin/discovery/page.tsx", "app/admin/discovery/[id]/page.tsx"]);
+const routes = [...graph.keys()].filter((file) => file.startsWith("app/") && !OFFLINE_ADMIN_ROUTES.has(file) && ROUTE_FILES.test(file));
 
 /** Every TMDB module reachable from a route, and the edge that entered it. */
 function tmdbReach(skipAllowedEdge: boolean) {
@@ -84,7 +87,7 @@ describe("TMDB boundary (B5)", () => {
     }
   });
 
-  it("no route reaches TMDB code except through the legacy My List edge", () => {
+  it("no public route reaches TMDB code except through the legacy My List edge", () => {
     expect(Object.fromEntries(tmdbReach(true))).toEqual({});
   });
 
@@ -103,9 +106,9 @@ describe("TMDB boundary (B5)", () => {
     }
   });
 
-  it("the ingestion TMDB module is used only by the uploader CLI's publication script (never app code)", () => {
+  it("the ingestion TMDB module has only the uploader and offline discovery importers", () => {
     const importers = [...graph].filter(([, targets]) => targets.includes("lib/tmdb/ingestion-search.ts")).map(([file]) => file);
-    expect(importers).toEqual(["lib/uploader/publication.ts"]);
+    expect(importers.sort()).toEqual(["lib/discovery/fixtures.ts", "lib/discovery/model.ts", "lib/discovery/pipeline.ts", "lib/uploader/publication.ts"]);
   });
 
   it("the TMDB API host appears only in the TMDB transport", () => {

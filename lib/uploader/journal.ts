@@ -27,6 +27,13 @@ export const JOURNAL_VERSION = 1;
 export const JOURNAL_DIR_ENV = "VELORA_INGEST_JOURNAL_DIR";
 export const IN_REPO_JOURNAL_DIR = ".velora-ingest";
 
+/** Shared local-journal primitive; callers validate their own domain before writing. */
+export async function writeAtomicJournalJson(target: string, value: unknown): Promise<void> {
+  const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", flush: true });
+  await rename(temp, target);
+}
+
 export interface UploadAttempt {
   number: number;
   startedAt: string;
@@ -284,10 +291,7 @@ export async function openJournal(dir: string): Promise<Journal> {
     async put(entry) {
       const parsed = entrySchema.parse(entry);
       const target = path(entry.fingerprint);
-      const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
-      // flush: the bytes are on disk before the rename makes them visible.
-      await writeFile(temp, `${JSON.stringify(parsed, null, 2)}\n`, { encoding: "utf8", flush: true });
-      await rename(temp, target);
+      await writeAtomicJournalJson(target, parsed);
     },
     async list() {
       const names = (await readdir(dir)).filter((name) => FILE.test(name)).sort();

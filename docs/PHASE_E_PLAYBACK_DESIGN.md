@@ -1838,3 +1838,9 @@ The final proof passed: signed-out stream-token request 401; signed-in request 2
 Evidence: `.velora-ingest/e3.7c/upload.log`, `recovery.log`, `evaluation.log`, `publication.sql`, `publication-result.json`, `playback-results.json`, `movies-desktop.png`, `movies-mobile.png`, and `playback.png`. These operational artifacts are ignored by Git. No private capability, bot token, database credential or reader session is printed in the result summary.
 
 Checks: full unit suite **37 files, 758 tests passed, 27 skipped**; reviewed-year CLI suite **17 tests passed**; typecheck and relevant lint passed. Production build was not required for this local development/browser verification. No migration, dependency installation, content cleanup, commit or push. Original source, recovery rendition and verified staging copy are retained. This demonstrates one successful staged movie transfer with recovered acknowledgement and playable publication; the Bot API acknowledgement timeout itself remains unchanged.
+
+## E3.8 — Offline channel discovery and review (2026-10-10)
+
+**PARTIAL; production disabled.** The durable discovery inbox, replay worker, revision-bound admin UI, independent rights/readiness gates and bounded reconciliation are implemented offline. An approved synthetic uploader-linked review passed through the current owner functions in a disposable database and appeared through unchanged catalogue queries. New direct channel media remains blocked pending the smallest owner-service extension; captions never fabricate fingerprints.
+
+Inventory, contracts, validation, remaining channel-origin SQL/verification work and rollout prerequisites: [E3_8_CHANNEL_DISCOVERY.md](E3_8_CHANNEL_DISCOVERY.md). No Telegram/hosted Supabase calls, real publication, production migration or listener activation occurred. Call of Heroes, On The Hunt and Fuze were not modified. Stop before production rollout.

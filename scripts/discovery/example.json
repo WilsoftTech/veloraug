@@ -1,0 +1,12 @@
+{
+  "mode": "synthetic-offline",
+  "channelId": -1009990001112,
+  "updates": [{ "update_id": 1, "channel_post": {
+    "message_id": 10, "date": 1791504000,
+    "chat": { "id": -1009990001112, "type": "channel" },
+    "document": { "file_id": "synthetic-unused", "file_unique_id": "synthetic-document", "file_name": "Example.Movie.2024.VJ.Test.mp4", "mime_type": "video/mp4", "file_size": 1024 }
+  }}],
+  "vjs": [{ "id": 9001, "name": "Test", "slug": "test", "isActive": true }],
+  "movies": [{ "tmdb_id": 900001, "title": "Example Movie", "original_title": null, "overview": "Synthetic review fixture.", "release_date": "2024-01-01", "runtime_minutes": 90, "poster_path": null, "backdrop_path": null, "vote_average": null, "vote_count": null, "genres": [] }],
+  "catalogue": [], "media": []
+}
