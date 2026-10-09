@@ -40,6 +40,22 @@ describe("ingest CLI on plain Node", () => {
     expect(run.stdout).toContain("entries: 0");
   });
 
+  it("staging requires explicit selection and configuration without using provider credentials", () => {
+    const result = cli("stage", "--fingerprint", `sf1-${"a".repeat(64)}`);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("stage requires --staging-root");
+    expect(result.stderr).not.toMatch(/Telegram configuration|worker store|SyntaxError/);
+  });
+
+  it("refuses malformed reviewed years before provider configuration or network access", () => {
+    for (const year of ["2016-extra", "16", "2200"]) {
+      const result = cli("evaluate", "--year", year);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("--year must be a reviewed four-digit release year");
+      expect(result.stderr).not.toMatch(/worker store|TMDB|SyntaxError/);
+    }
+  });
+
   it("refuses a real upload or resume in C2A.1, before reading any configuration", () => {
     for (const command of ["upload", "resume"]) {
       const run = cli(command, "--execute");
@@ -193,7 +209,8 @@ describe("upload --fingerprint on plain Node (C2B.2C.2)", () => {
         expect(result.stderr).not.toContain(MOVIE_TOKEN);
       }
     }
-  });
+  // Fourteen fresh Node processes: this validates rejection/redaction, not startup latency.
+  }, 30_000);
 
   it("a same-size change to the selected file is caught by the dry run's revalidation; the journal is not updated", () => {
     const path = join(media, names[C]);

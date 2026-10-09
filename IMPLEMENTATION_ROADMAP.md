@@ -222,6 +222,17 @@ The first Velora UG task is reconciliation, not feature construction.
   - **Validation.** Full default-timeout suite: 736 passed, one pre-existing CLI timeout, 27 skipped. That CLI test passed alone unchanged. Typecheck/tracked lint passed; production build not run because it would use external font/catalogue access. No database mutation gates applicable.
   - **External state / next.** Task-issued Telegram and hosted database reads/writes 0. Review evidence and staging design, then separately authorize implementation or a synthetic transport experiment. Movie retry remains unauthorized.
   - Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.7B"; primary local evidence `.velora-ingest/e3.7b/REPORT.md`.
+- E3.7C local SSD staging implementation (2026-10-09): implemented with offline synthetic tests; operational staging and production upload reliability remain unproven.
+  - Reuses the journal, full SHA-256/sf1, size budget, path mapping and uploader. Origin paths, caption identity, attempts, recovery and publication state stay unchanged.
+  - Adds explicit `stage` and `cleanup-staging` CLI commands. Exclusive bounded copy, flush, no-overwrite promotion, checkpointed crash recovery, internal-volume/capacity checks, isolated read-only Docker probe, and upload-time revalidation.
+  - Cleanup requires matching Telegram identity/size and database acknowledgement. Unresolved attempts and incomplete copies remain retained. No production copy, Docker operation, Telegram/database call or movie retry was performed in this continuation.
+  - Record and operational prerequisites: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.7C".
+- E3.7D staged Call of Heroes upload, publication and browser playback (2026-10-09): **PASS for this movie.**
+  - User authorized the upload, confirmed streaming/publication rights, and reviewed the 2016 metadata identity. Internal staging passed full SHA-256/sf1 and isolated mount verification; Bot API state and the original read-only movie mount were preserved while adding a narrow read-only staging mount.
+  - Exactly one new upload attempt (cumulative attempt 2). The client lost acknowledgement at the known timeout boundary; outgoing data continued, then bounded recovery confirmed the exact source/size and recorded the server acknowledgement without a resend.
+  - Existing owner functions approved TMDB 413198 and published `call-of-heroes-2016`, ready/rights-cleared with VJ Ice P. Movies page now shows two titles. Real Chrome verified authenticated video/audio playback, pause, seek, close, signed-out denial and mobile layout; temporary proof users removed.
+  - Added explicit reviewed-year input to the existing CLI for missing filename years. Full suite: 758 passed, 27 skipped; typecheck/lint/diff checks passed. Original source, rendition and staging copy retained. This is one successful controlled upload, not proof of universal transport reliability.
+  - Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.7D"; ignored primary evidence `.velora-ingest/e3.7c/`.
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules

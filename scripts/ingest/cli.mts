@@ -7,11 +7,13 @@
 //   resume [--server] [--execute]
 //   checkpoint --kind movie|series --message-id <n> [--execute]
 //   status
-//   evaluate --fingerprint sf1-… --kind movie --vjs vjs.json [--execute]
+//   evaluate --fingerprint sf1-… --kind movie --vjs vjs.json [--year <reviewed-year>] [--execute]
 //   publication-sql --fingerprint sf1-… --tmdb-id <n> --out <file.sql> [--rights-cleared]
 //   normalize --fingerprint sf1-… [--vjs vjs.json] [--execute]   (E3.5, local only)
 //   show --fingerprint sf1-…                                     (E3.5, read-only)
 //   cleanup --fingerprint sf1-… [--execute]                      (E3.5, local only)
+//   stage --fingerprint sf1-… --staging-root <dir> --staging-server-root <dir> --sha256 <digest> [--execute]
+//   cleanup-staging --fingerprint sf1-… [--execute]               (local copy only)
 //
 // Media (E3.5): `scan` probes every file with ffprobe (VELORA_FFPROBE_PATH or
 // PATH) and classifies it (lib/ingestion/media.ts); only canonical bytes are
@@ -67,6 +69,7 @@ import { JOURNAL_DIR_ENV, mediaAllowsUpload, mediaVerdict, newJournalEntry, open
 import { digestPackets, freeBytes, probeMedia, remux, remuxSpaceNeeded, resolveMediaTools, type MediaTools } from "@/lib/uploader/media-tools";
 import { cleanupRendition, normalizeEntry, renditionTarget, type NormalizeDeps } from "@/lib/uploader/normalize";
 import { fingerprintFile, hashFile, walkMedia, type DiscoveredFile } from "@/lib/uploader/scan";
+import { cleanupStage, stageEntry, stagingIO, stagingPaths, verifyStagedEntry } from "@/lib/uploader/staging";
 import { createRpcIngestionStore, evaluationPayload, offlineStore, supabaseRpcTransport, type EvaluationEvidence, type IngestionStore } from "@/lib/uploader/store";
 import { isRealTelegramUploadAuthorized, isUploadPlanned, planResume, REAL_UPLOADS_ENV, resumeEntry, selectUploadEntries, uploadEntry, verifySourceFingerprint, type UploaderDeps, type UploadSelectionError } from "@/lib/uploader/upload";
 import type { CatalogueKind } from "@/types/catalogue";
@@ -91,6 +94,10 @@ const options = {
   "tmdb-id": { type: "string" },
   out: { type: "string" },
   "rights-cleared": { type: "boolean", default: false },
+  "staging-root": { type: "string" },
+  "staging-server-root": { type: "string" },
+  sha256: { type: "string" },
+  year: { type: "string" },
 } as const;
 
 let parsed: ReturnType<typeof parseArgs<{ allowPositionals: true; options: typeof options }>>;
@@ -336,6 +343,7 @@ function uploaderDeps(store: Journal, config: LocalBotApiConfig, server: Ingesti
       requestTimeoutMs: REQUEST_TIMEOUT_MS,
     }),
     fingerprintSource: fingerprintFile,
+    stagedSource: (entry) => verifyStagedEntry(entry, config.pathMap, stagingIO()),
     async channelHighWater(kind) {
       const entries = await store.list();
       return Math.max(0, ...entries.filter((entry) => entry.kind === kind && entry.telegram).map((entry) => entry.telegram!.messageId));
@@ -432,6 +440,17 @@ async function describeSelected(entry: JournalEntry, total: number, text: string
   if (entry.intendedChannelId === null) reasons.push("channel_not_planned");
 
   const config = telegramConfig();
+  let absolutePath = entry.absolutePath;
+  if (entry.staging && entry.staging.phase !== "removed") {
+    const staged = await verifyStagedEntry(entry, config?.pathMap ?? null, {
+      ...stagingIO(),
+      // Dry runs verify bytes/mapping only, never launch Docker or certify a live mount.
+      verifyMount: async () => true,
+    });
+    if (staged.ok) absolutePath = staged.absolutePath;
+    else reasons.push(staged.code);
+    console.log(`staging      ${staged.ok ? "bytes and path map verified; isolated mount check required at execution" : `refused: ${staged.code}`}`);
+  }
   if (config === null) {
     console.log("destination  unknown: Telegram configuration absent or invalid");
     reasons.push("telegram_config_invalid");
@@ -450,7 +469,7 @@ async function describeSelected(entry: JournalEntry, total: number, text: string
       requestTimeoutMs: REQUEST_TIMEOUT_MS,
     });
     const preflight = entry.intendedChannelId === null ? null : await client.preflight({
-      transport: entry.kind, kind: entry.kind, intendedChannelId: entry.intendedChannelId, absolutePath: entry.absolutePath,
+      transport: entry.kind, kind: entry.kind, intendedChannelId: entry.intendedChannelId, absolutePath,
       sizeBytes: entry.sizeBytes, fingerprint: entry.fingerprint, caption: text,
     });
     // Ids stay out of the output: only whether the channel is the configured one for this kind.
@@ -461,7 +480,7 @@ async function describeSelected(entry: JournalEntry, total: number, text: string
     if (preflight !== null && !preflight.ok) reasons.push(preflight.code);
   }
   // The same check uploadEntry runs before any start: current bytes, one sf1 algorithm, exact equality.
-  const source = await verifySourceFingerprint(entry, fingerprintFile);
+  const source = await verifySourceFingerprint({ ...entry, absolutePath }, fingerprintFile);
   console.log(`source       ${source.ok ? "current bytes fingerprint to the selected value (exact match)" : `refused: ${source.code}`}`);
   if (!source.ok) reasons.push(source.code);
   console.log(`caption      ${text.split("\n").join(" | ")}`);
@@ -542,6 +561,7 @@ function oneFingerprint() {
 }
 
 async function evaluate() {
+  if (values.year !== undefined && !/^(18|19|20|21)[0-9]{2}$/.test(values.year)) fail("--year must be a reviewed four-digit release year (1800–2199)");
   const kind = kindOption();
   if (kind !== "movie") fail("evaluate supports --kind movie only in this checkpoint");
   const fingerprint = oneFingerprint();
@@ -559,15 +579,18 @@ async function evaluate() {
 
   const parse = parseFilename(current.record.fileName);
   if (parse.title === null) fail("no title could be parsed from the recorded file name");
+  const year = values.year === undefined ? parse.year : Number(values.year);
+  // An explicit operator correction; the filename and upload identity remain untouched.
+  if (values.year !== undefined) console.log(JSON.stringify({ yearReview: { fileName: current.record.fileName, filenameYear: parse.year, reviewedYear: year } }));
   const evidence: EvaluationEvidence = {
     kind: decideKind(kind, parse),
     title: parse.title,
     vjText: parse.vjText,
     vj: resolveVj(parse.vjText, vjs),
-    year: parse.year,
+    year,
     season: parse.season,
     episode: parse.episode,
-    match: await matchTitle({ kind, title: parse.title, year: parse.year }, searchTmdbForIngestion),
+    match: await matchTitle({ kind, title: parse.title, year }, searchTmdbForIngestion),
   };
   if (evidence.match?.outcome === "error") fail(`TMDB search failed (${evidence.match.code}); nothing was recorded`);
   const payload = evaluationPayload(evidence);
@@ -814,7 +837,45 @@ async function cleanup() {
   }
 }
 
-const commands: Record<string, () => Promise<void>> = { scan, inspect, upload, resume, checkpoint, status, evaluate, "publication-sql": publicationSql, normalize, show, cleanup };
+async function stage() {
+  const fingerprint = oneFingerprint();
+  if (!values["staging-root"] || !isAbsolute(values["staging-root"]) || !values["staging-server-root"] || !values.sha256 || !/^[0-9a-f]{64}$/.test(values.sha256)) {
+    fail("stage requires --staging-root <absolute directory>, --staging-server-root <container directory>, and --sha256 <64 lowercase hex>");
+  }
+  const store = await journal();
+  const entry = await entryOrFail(store, fingerprint);
+  const options = { root: values["staging-root"], serverRoot: values["staging-server-root"], sha256: values.sha256 };
+  if (!values.execute) {
+    const target = stagingPaths(entry, options.root);
+    console.log(`would stage ${entry.fingerprint} (${entry.sizeBytes} bytes) to ${target.path}`);
+    console.log("dry run: no copy, integrity reads, Docker command, Telegram or database call. Use --execute for local staging and an isolated Docker mount check.");
+    return;
+  }
+  const release = await store.lock();
+  try {
+    const result = await stageEntry(await entryOrFail(store, fingerprint), options, store, stagingIO());
+    console.log(JSON.stringify(result));
+    if (result.result === "refused") process.exitCode = 1;
+  } finally { await release(); }
+}
+
+async function cleanupStaging() {
+  const fingerprint = oneFingerprint();
+  const store = await journal();
+  if (!values.execute) {
+    const entry = await entryOrFail(store, fingerprint);
+    console.log(`staging: ${entry.staging?.phase ?? "none"}. Dry run: nothing deleted; execution requires recorded upload success and database acknowledgement.`);
+    return;
+  }
+  const release = await store.lock();
+  try {
+    const result = await cleanupStage(await entryOrFail(store, fingerprint), store, new Date());
+    console.log(JSON.stringify(result));
+    if (result.result === "refused") process.exitCode = 1;
+  } finally { await release(); }
+}
+
+const commands: Record<string, () => Promise<void>> = { scan, inspect, upload, resume, checkpoint, status, evaluate, "publication-sql": publicationSql, normalize, show, cleanup, stage, "cleanup-staging": cleanupStaging };
 const run = command ? commands[command] : undefined;
 if (!run) fail(`usage: ingest <${Object.keys(commands).join("|")}> …`);
 await run();

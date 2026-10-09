@@ -273,6 +273,36 @@ function deps(store: IngestionStore, api: ReturnType<typeof telegram>, now = T0)
   return { journal, store, telegram: api, fingerprintSource: async () => sourceFingerprint, channelHighWater: async () => 40, now: () => now, sleep: async () => {} };
 }
 
+describe("staged upload selection", () => {
+  const staging = { root: "C:\\Staging", serverRoot: "/media/staging", fileName: "verified.mp4", sha256: "a".repeat(64), phase: "verified" as const, verifiedAt: T0.toISOString() };
+
+  it("uses verified staged bytes with the original fingerprint, caption and upload track", async () => {
+    const store = new FakeStore();
+    const api = telegram(async () => ({ status: "succeeded", record: media(41) }));
+    const staged = entry({ staging });
+    const d = deps(store, api);
+    const path = "C:\\Staging\\verified.mp4";
+    d.stagedSource = vi.fn(async () => ({ ok: true as const, absolutePath: path }));
+    d.fingerprintSource = vi.fn(async () => FP);
+    expect(await uploadEntry(staged, CAPTION, d)).toEqual({ result: "uploaded", acknowledged: true });
+    expect(api.sendDocument.mock.calls[0][0]).toMatchObject({ absolutePath: path, fingerprint: FP, caption: CAPTION });
+    expect(d.fingerprintSource).toHaveBeenCalledWith(path, SIZE);
+    expect((await journal.get(FP))?.absolutePath).toBe(staged.absolutePath);
+    expect((await journal.get(FP))?.state.uploadAttempts).toBe(1);
+  });
+
+  it("refuses unavailable or failed staged verification before any attempt, with no origin fallback", async () => {
+    for (const verifier of [undefined, vi.fn(async () => ({ ok: false as const, code: "stage_integrity_mismatch" }))]) {
+      const store = new FakeStore();
+      const api = telegram(async () => ({ status: "succeeded", record: media(41) }));
+      const d = { ...deps(store, api), stagedSource: verifier };
+      expect((await uploadEntry(entry({ staging }), CAPTION, d)).result).toBe("refused");
+      expect(api.sendDocument).not.toHaveBeenCalled();
+      expect(store.calls).not.toContain("markUploadStarted");
+    }
+  });
+});
+
 describe("crash and recovery", () => {
   it("before upload: no message exists, and an explicit upload records everything in order", async () => {
     const store = new FakeStore();

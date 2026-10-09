@@ -1,0 +1,11 @@
+# Verified internal SSD copies only. Keep the original movie mount and state volume.
+# Add this override to compose.yaml + compose.media.yaml after local staging.
+services:
+  telegram-bot-api:
+    volumes:
+      - type: bind
+        source: ../../.velora-ingest/staging
+        target: /media/staging
+        read_only: true
+        bind:
+          create_host_path: false

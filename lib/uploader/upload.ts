@@ -45,6 +45,8 @@ export interface UploaderDeps {
    * fingerprintFile). Tests inject a fake.
    */
   fingerprintSource(absolutePath: string, sizeBytes: number): Promise<SourceFingerprint>;
+  /** Only resolves a verified local copy; never changes journal/source identity. */
+  stagedSource?(entry: JournalEntry): Promise<{ ok: true; absolutePath: string } | { ok: false; code: string }>;
   /** Highest message id the journal knows in this kind's channel; 0 when none. */
   channelHighWater(kind: CatalogueKind): Promise<number>;
   now(): Date;
@@ -219,11 +221,18 @@ export async function uploadEntry(entry: JournalEntry, caption: string, deps: Up
   }
   if (decision.action !== "upload_allowed") return { result: "resume", action: decision };
 
+  let absolutePath = entry.absolutePath;
+  if (entry.staging && entry.staging.phase !== "removed") {
+    if (!deps.stagedSource) return { result: "refused", code: "staging_verifier_unavailable" };
+    const staged = await deps.stagedSource(entry);
+    if (!staged.ok) return { result: "refused", code: staged.code };
+    absolutePath = staged.absolutePath;
+  }
   const request = {
     transport: entry.kind,
     kind: entry.kind,
     intendedChannelId: entry.intendedChannelId,
-    absolutePath: entry.absolutePath,
+    absolutePath,
     sizeBytes: entry.sizeBytes,
     fingerprint: entry.fingerprint,
     caption,
@@ -231,7 +240,7 @@ export async function uploadEntry(entry: JournalEntry, caption: string, deps: Up
   const preflight = await deps.telegram.preflight(request);
   if (!preflight.ok) return { result: "refused", code: preflight.code };
   // Last check before anything irreversible: no journal attempt, server start or Telegram call yet.
-  const source = await verifySourceFingerprint(entry, deps.fingerprintSource);
+  const source = await verifySourceFingerprint({ ...entry, absolutePath }, deps.fingerprintSource);
   if (!source.ok) return { result: "refused", code: source.code };
 
   const startedAt = deps.now();

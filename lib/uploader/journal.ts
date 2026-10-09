@@ -67,6 +67,18 @@ export interface JournalEntry {
    * before E3.5 or not yet inspected: such an entry is never uploaded.
    */
   media: JournalMedia | null;
+  /** Local copy only; the origin path, sf1 and upload/recovery track never change. */
+  staging?: JournalStaging | null;
+}
+
+export interface JournalStaging {
+  root: string;
+  serverRoot: string;
+  /** Owned copy name, pinned even if a later library scan renames the origin. */
+  fileName: string;
+  sha256: string;
+  phase: "copying" | "verified" | "removed";
+  verifiedAt: string | null;
 }
 
 /**
@@ -194,6 +206,14 @@ const entrySchema = z.object({
   updatedAt: z.string(),
   // Entries written before E3.5 have none: they read as not inspected.
   media: mediaSchema.nullable().default(null),
+  staging: z.object({
+    root: z.string().min(1),
+    serverRoot: z.string().min(1),
+    fileName: z.string().min(1),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    phase: z.enum(["copying", "verified", "removed"]),
+    verifiedAt: z.string().nullable(),
+  }).nullable().optional(),
 });
 
 /** Resolves and checks the journal directory. `projectRoot` is the repository. */
