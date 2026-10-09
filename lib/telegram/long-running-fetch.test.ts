@@ -89,6 +89,37 @@ describe("longRunningFetch (sendDocument transport)", () => {
     expect(requests).toHaveLength(0);
   });
 
+  it("a server idle disconnect rejects the request while detached work can still finish", async () => {
+    let complete!: () => void;
+    const completed = new Promise<void>((resolve) => (complete = resolve));
+    let disconnected!: () => void;
+    const closed = new Promise<void>((resolve) => (disconnected = resolve));
+    const { url, requests } = await serve((_req, res) => {
+      // Model the Bot API's separate HTTP and upload lifetimes, not TDLib itself.
+      res.on("close", disconnected);
+      res.destroy();
+      void closed.then(complete);
+    });
+    await expect(post(url, AbortSignal.timeout(5_000))).rejects.toMatchObject({
+      name: "TypeError",
+      cause: { code: "ECONNRESET" },
+    });
+    await completed;
+    expect(requests).toHaveLength(1);
+  });
+
+  it("the deadline also destroys a response whose body has stalled", async () => {
+    let closed = false;
+    const { url, requests } = await serve((_req, res) => {
+      res.on("close", () => (closed = true));
+      res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "100" });
+      res.write('{"ok":tr');
+    });
+    await expect(post(url, AbortSignal.timeout(300))).rejects.toMatchObject({ name: "TimeoutError" });
+    await vi.waitFor(() => expect(closed).toBe(true));
+    expect(requests).toHaveLength(1);
+  });
+
   it("keeps fetch's error shape: a refused connection is TypeError with an ECONNREFUSED cause", async () => {
     const { port } = await serve(hold(0));
     const [server] = servers.splice(0);

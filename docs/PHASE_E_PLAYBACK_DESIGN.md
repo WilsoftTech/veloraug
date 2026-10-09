@@ -1594,3 +1594,98 @@ Further uploads, the Call of Heroes retry included, wait for E3.7A. The resolved
 - **The client timeout.** Whether the Bot API's idle timeout or the client's long-running request can be kept alive, so the upload outcome is acknowledged rather than recovered.
 
 Until then, the rendition stays retained, and the six remaining titles stay paused.
+
+## E3.7A — Telegram large-upload transport investigation (2026-10-09)
+
+**E3.7A: INVESTIGATION COMPLETE — PRODUCTION RELIABILITY UNPROVEN.**
+
+The HTTP acknowledgement failure is consistent with the pinned Bot API's 500-second idle boundary; the original socket closure was not traced. The later outbound plateau is not conclusively explained. Windows storage resets coincide with that plateau, and Disk 3 subsequently experienced I/O failures. These are concrete storage findings, not proof that TDLib was reading that disk when outbound traffic stopped. No production or synthetic Telegram upload was performed in E3.7A.
+
+### Repository and evidence scope
+
+- Starting branch `phase-a-foundation`, HEAD `f0785926377d51563d0a1dfb79161859e9bf38e6`; the remote `veloraug/phase-a-foundation` matched before edits. `main` was not modified.
+- Preserve the four expected unstaged files: `app/globals.css`, `components/logo.tsx`, `docs/Design prompt.md`, and `docs/PHASE_C_INGESTION_DESIGN.md`. The starting working tree also listed `lib/media-gateway/boundary.test.ts` and untracked `.claude/`; neither was edited or staged for this task.
+- Evidence: retained journal, the three existing `.velora-ingest/e3.7/hosted-after-*.json` snapshots, original local execution transcript `cc50857a-3536-48ff-ae06-be296a7bd5a6`, Windows System events, retained Docker host logs, and the exact Bot API/TDLib commits pinned in `infra/telegram-bot-api/Dockerfile`. No live ingestion RPC or owner query was run. Historical snapshots establish the prior state, not a fresh hosted-state assertion.
+- Local evidence was inspected selectively; credentials and token-bearing request paths were not copied into this report. No recovery files, source files, journal entries, configuration, or database objects were changed.
+
+### Storage and integrity
+
+`G:` and `G:\Movies` are accessible. Read-only Windows disk inventory identifies G: as NTFS on **Disk 3, Verbatim Vi550 S3, USB**, online and reporting healthy now. Windows reports logical drive type 3 (fixed disk); the physical transport is nevertheless USB, rather than a network mapping. This does not establish the enclosure, cable, or power fault responsible for earlier errors. The current Balanced power scheme enables USB selective suspend on both AC and DC; its historical state and causal role are unproven. No power settings were changed.
+
+| File | Verification on 2026-10-09 |
+| --- | --- |
+| Authoritative `G:\Movies\CALL OF HEROES.VJ ICEP.mp4` | 1,917,414,964 B; journal size and modification time match; recomputed sf1 equals `sf1-2a913ae1af153c39162ace13853ac0de35a7caba4e65b9af2113389b69974278` |
+| Retained `.velora-renditions\sf1-2a913ae1af153c39\CALL OF HEROES.VJ ICEP.mp4` | 1,917,405,700 B; journal size and modification time match; recomputed sf1 equals `sf1-2957a6d8604bccc90c34f4c7f9fe1fd2501f715c0e2cdd49e515ab3885635872` |
+| Rendition complete SHA-256 | `7131620845cc2d5563e27a4e085e8f91331e85d744105aae2ba14ebdff38084c`; exact match to the full digest in the original 19:51:05.900Z execution record |
+
+The source check uses the established sampled fingerprint, not a historical full-file digest. The rendition was read completely for SHA-256. Neither file was recreated, copied, normalized, deleted, or uploaded.
+
+Windows System log findings below use UTC explicitly (the machine displays Nairobi time):
+
+- 19:41:53–19:43:31 on October 7: Disk 3 retries (event 153) and UASPStor resets (event 129), already during normalization/preflight.
+- **20:32:33.389Z:** UASPStor event 129, reset of RaidPort12, immediately around the observed traffic plateau.
+- **20:33:53.978Z:** UASPStor event 129, reset of RaidPort14; **20:33:56.680Z:** NTFS event 98 identifies G: as healthy. The latter does not rule out a transient disconnect or failed open file handle.
+- **22:58:10.897Z:** Disk 3 I/O retry; **22:58:27Z:** UASPStor reset; **22:58:34Z:** 72 disk event 51 warnings on `\Device\Harddisk3\DR6`, shortly after final recovery. This supports the previously reported post-recovery drive failure.
+- RaidPort numbers change across events. The association of each reset with G:'s historical device instance has not been independently reconstructed; current Disk 3 identity and explicit Disk 3 errors are established. Do not equate every USB reset with a proven G: disconnect.
+
+### Reconstructed upload and recovery timeline
+
+| UTC on 2026-10-07 | Evidence and limits |
+| --- | --- |
+| 19:50:05.878 | Original container check: `Up 13 seconds (healthy)` with the read-only media override; this is historical, not a current mount test |
+| 19:51:57 | Original CLI upload command started; one `sendDocument` only |
+| 19:52:01.326 | Journal attempt 1 started, server recovery floor 28; exact Bot API outbound-start time was not instrumented |
+| 19:57:47.135 | Windows `rt640x64` event 1: Realtek PCIe GbE controller disconnected from network; active route/fallback interface and duration unknown |
+| 20:00:33 | CLI ended `uncertain / network_error`, about 516 s after command start; journal retained unresolved upload, no retry |
+| After disconnect to 20:32 | Prior observation: container transmit traffic continued at approximately 0.4–0.6 MB/s; HTTP failure did not immediately cancel server work |
+| 20:32:34.339 | Original `eth0` transmit reading: **1,161,886,159 B**; storage reset at 20:32:33.389Z |
+| 20:38:39.618 | Transmit reading: **1,161,894,131 B**; bulk traffic had stopped, but no exact last uploaded-part timestamp was captured |
+| 20:42:59–20:44:48 | First marker recovery: full interval inspection with no match; `wait / within_upload_grace_period` |
+| 20:58:23 | Container still healthy; transmit **1,161,928,855 B** |
+| 22:56:31 | Container still healthy; transmit **1,161,969,125 B**: only 82,966 B more than the 20:32 observation over approximately 144 minutes |
+| 22:56:39–22:57:24.295 | Second recovery: marker 39, complete inspection of ids 29–38, `abandon`; journal attempt 1 finished `abandoned / verified_absent` |
+| 22:57:45.931 | Original hosted snapshot: event 4 `upload_failed / verified_absent`, attempt 1, no media, checkpoint 39; confirmed by retained snapshot |
+| 22:58 onward | Disk 3 errors and reported G: disappearance; later than the initial plateau |
+
+**Counter correction:** the earlier E3.7 “1,161,895,483 B / 61%” figure was a container interface counter, not a measured Telegram file offset. It includes protocol overhead and other traffic, and lacks a captured pre-send baseline. The plateau is well supported; “exactly 61% of the media transferred” is not. A healthy TCP healthcheck proves the listener is reachable, not that upload progress or file reads are healthy.
+
+### Timeout, disconnect, Docker, and network boundaries
+
+- Node sends a small JSON request containing a mapped `file://` URI; it does not stream the MP4. Host stat and sf1 preflight do not guarantee continuing Docker/TDLib file access after acceptance.
+- `scripts/ingest/cli.mts` uses `longRunningFetch` with a **four-hour** absolute AbortSignal deadline. The adapter uses `node:http`/`node:https`, a fresh connection (`agent: false`), and no independent headers/socket idle timer. The approximately 516-second failure therefore was not expiration of the configured Node deadline. The result `network_error` agrees with a dropped socket, rather than the adapter's `timeout` classification.
+- The pinned official [Bot API HttpServer.h](https://github.com/tdlib/telegram-bot-api/blob/2efabc722e9493b9cac450233198d09e5cea0573/telegram-bot-api/HttpServer.h) passes a hard-coded 500-second idle timeout into TDLib's inbound HTTP connection. [HttpConnection.cpp](https://github.com/tdlib/telegram-bot-api/blob/2efabc722e9493b9cac450233198d09e5cea0573/telegram-bot-api/HttpConnection.cpp) dispatches the query to ClientManager and writes the response after the query finishes. This explains the acknowledgement boundary; the exact socket closure was not traced during E3.7.
+- On caller abort, the adapter rejects with the signal reason, removes its abort listener, and destroys the request socket. This deterministically cancels the client's wait. It does **not** prove cancellation of Telegram's separate work. Network errors, aborted/partial replies, and malformed success replies remain uncertain; there is no automatic retry.
+- E3.7's post-disconnect transmit growth demonstrates continued server-side network activity, consistent with detached upload work. It does not reveal TDLib's part state, local read offset, or final error. Default Bot API logs previously gave no cause; richer logs were not captured during the incident.
+- Both Docker named pipes (`docker_engine`, `dockerDesktopLinuxEngine`) are absent now, including outside the sandbox. No daemon/container was started, because restarting the retained Bot API state is an operational action that could resume work. Current container stats, OOM status, TDLib logs and live bind-mount reads are **unavailable**. Historical health checks show uptime through recovery, with no recorded restart, but do not exclude resource pressure. Retained host logs do not establish a specific mount failure or OOM at the plateau; relevant VM logs have rotated beyond the incident. A retained settings record lists 6 CPUs, 2048 MiB memory and 1024 MiB swap; these are configuration, not measured incident usage.
+- The existing override binds G: read-only with `create_host_path: false`; session state remains on the named Linux volume. Mount configuration is correct in the repository. Current Windows access and a historical successful mount cannot certify current Docker access.
+- Confirmed network event: Ethernet link disconnect at 19:57:47.135Z. Continued traffic afterward excludes an uninterrupted total outage from then onward. No route capture, packet trace, upload-part error, or reset counter identifies the cause of the later plateau. Windows Tcpip event 4231 (ephemeral port exhaustion) occurred at **00:13:16Z on October 8**, after recovery; it cannot be treated as the cause of the earlier stall. No throughput test or Telegram traffic was generated in E3.7A.
+
+### Findings and corrective choices
+
+**Confirmed:** a server-side HTTP idle boundary shorter than ordinary slow multi-GB uploads; uncertain acknowledgement handled without a blind resend; USB storage resets around the plateau and later Disk 3 I/O errors; an earlier Ethernet disconnect; intact retained rendition and matching source fingerprint.
+
+**Unresolved:** whether TDLib was still reading G: when bulk traffic stopped; whether a USB reset invalidated its open file; Docker sharing failure, TDLib part failure/retry exhaustion, network reconnection behavior, or resource pressure. Storage is the strongest newly corroborated hypothesis, not an established upload root cause. USB selective suspend being enabled does not establish that it caused a reset.
+
+| Option | Assessment / decision |
+| --- | --- |
+| Repair existing Local Bot API transport | Preferred. Preserve path-based uploads, identity checks, finite deadline and uncertain recovery. First obtain file-read, part-progress, socket and storage evidence; do not add HTTP heartbeats or retry requests that might duplicate a send |
+| Increase Node timeout | Rejected as a correction: already four hours, and unable to override the server's 500-second idle boundary or repair storage/network failures |
+| Patch Bot API idle timeout | Potentially addresses lost acknowledgements, not the later plateau. Requires an isolated build and validation against the pinned source; no speculative infrastructure patch made |
+| Internal local staging | Proposed operational control: approved dedicated directory on an internal disk, independent read-only mount and matching path map, enough free space, bounded explicit copy of the retained verified rendition, full SHA-256 and sf1 recheck before journal planning. Keep G: authoritative and retain recovery files. No 1.9 GB copy performed or new path automatically journaled |
+| Bot API outside Docker | Consider only if read-only comparisons implicate Docker sharing. A native path alone does not fix a USB disk reset; session/state migration and security boundaries need a reviewed plan |
+| Separate MTProto uploader | Deferred: no demonstrated need justifying new upload identity, session custody, chunk/limit handling and recovery integration. Never reuse or replace the production reader identity |
+
+Selected action: document the evidence and correct the counter/timeout interpretation; extend existing transport tests only. **No runtime transport, deadline, infrastructure, authorization, journal, publication, rights or playback architecture changes.** On The Hunt message 27, Fuze message 25, other candidates and Series were not operated on.
+
+### Safe verification and remaining experiments
+
+- New real loopback tests in the existing `long-running-fetch.test.ts`: a server disconnect produces `ECONNRESET` while separately scheduled server work can finish; a partial response body that stalls is closed at the caller deadline. The first models independent lifetimes; it does not claim to reproduce TDLib.
+- Existing suites cover slow headers, finite timeout, pre-aborted calls, dropped replies, ambiguous/malformed replies, missing source/fingerprint refusal, process-crash journal boundaries, lost acknowledgement, uncertain no-resend, grace-period wait, verified absence and recovery checkpointing. Transport/recovery subset: **5 files, 227 tests passed**.
+- Full suite initial run: 730 passed, one existing CLI multi-process test exceeded 5 seconds under concurrent validation load, 27 skipped. Rerun with `--maxWorkers=2 --testTimeout=20000`: **36 files passed, 731 tests passed, 27 skipped**. No test timeout defaults were changed.
+- Typecheck passed. Changed-test lint and `eslint . --ignore-pattern '.velora-ingest/**'` passed. Literal `npm run lint` remains blocked by three pre-existing `any` errors and one unused-variable warning in Git-ignored operational scripts; those files were preserved.
+- Production build passed with network access for the existing Google font; the first sandbox attempt failed fetching that font. No product code or dependencies changed. No UI change; responsive behavior was not altered or visually retested.
+- Live container restart, real stalled filesystem read, disappearance after TDLib opens the source, and the exact >500-second Bot API behavior were **not** reproduced. Loopback/model tests and journal tests do not prove these real failure modes or production reliability.
+- Secret scan passed: 10 actual private values from `.env.local` checked against all 3 E3.7A files and 27 production browser artifacts, **0 matches**; only counts were printed. `git diff --check` passed. All pre-existing changed files and `.claude/` files retain their starting SHA-256 values. No secret-bearing operational logs are committed.
+- Telegram reads **0**, writes **0**, including synthetic writes. Hosted investigation reads **0**, writes **0**; prior snapshots were read locally. The required production build executes the existing public anonymous catalogue reads for static routes; exact hosted request count was not instrumented. It makes no ingestion or publication writes. No database regression/reset command was run.
+
+**Smallest safe next experiment:** after an approved Docker startup plan that prevents retained Bot API state from starting automatically, use a disposable container with networking disabled and a read-only G: mount to read a small synthetic file repeatedly across the server's idle window. Capture timestamped short reads/errors and Windows disk events; compare with the same small file on an internal disk. Never unplug or reset G: deliberately while authoritative files are in use. This tests mount stability without Telegram or a movie copy. Follow with an isolated loopback HTTP/TDLib diagnostic environment for restart and source-read faults. If a real Telegram synthetic probe is later needed, obtain separate explicit write authorization, use the Movies uploader identity and a private diagnostic destination, capture redacted part/read/socket telemetry, and settle uncertainty before any retry. A movie retry needs its own authorization and verified operational staging plan.

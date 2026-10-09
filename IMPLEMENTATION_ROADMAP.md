@@ -206,6 +206,14 @@ The first Velora UG task is reconciliation, not feature construction.
   - **Local.** The rendition was retained, and `cleanup` was not run. The `G:` library drive then disconnected, so verify the rendition (SHA-256 `7131620845cc…`) on reconnect.
   - **Next:** E3.7A, the Telegram upload transport investigation. It covers throughput, the stall's cause, and the client idle timeout. Then a separately authorized Call of Heroes attempt.
   - Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.7".
+- E3.7A Telegram large-upload transport investigation (2026-10-09): **INVESTIGATION COMPLETE — PRODUCTION RELIABILITY UNPROVEN.**
+  - **Integrity.** G: is accessible again: Disk 3, USB-connected Verbatim SSD. Source sf1/size/mtime match. Retained rendition SHA-256 exactly matches `7131620845cc2d5563e27a4e085e8f91331e85d744105aae2ba14ebdff38084c`.
+  - **Evidence.** USB storage resets at 20:32:33Z and 20:33:53Z coincide with the outbound plateau; Disk 3 I/O errors followed recovery. An Ethernet disconnect occurred earlier, at 19:57:47Z. Whether TDLib was still reading G: at the plateau remains unknown; no confirmed upload root cause.
+  - **Timeout.** Node's deadline was four hours; the pinned Bot API has a 500-second HTTP idle boundary. Post-disconnect traffic continued. The approximate 61% figure was an interface counter, not an exact file offset. No speculative timeout increase or uploader replacement.
+  - **Validation.** Two added loopback boundary tests; transport/recovery 227 passed. Full suite rerun: 731 passed, 27 skipped. Typecheck, tracked-code lint and production build passed; literal lint has pre-existing errors in ignored operational scripts. Docker daemon unavailable, so live mount/restart and TDLib file-read faults remain untested.
+  - **External state.** Telegram reads/writes 0; hosted investigation reads/writes 0 (historical snapshots only). Build uses existing anonymous catalogue reads; exact count unmeasured. No ingestion/publication writes, movie copy, normalization or recovery operation.
+  - **Next.** Approved isolated Docker startup and network-disabled read-only synthetic mount probe, compare G: with internal storage. Any real Telegram synthetic write or movie retry needs separate authorization. Local staging of the retained rendition remains a proposal requiring an approved plan.
+  - Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.7A".
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules
