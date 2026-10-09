@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,7 +7,7 @@ import { decideResume, DEFAULT_RECONCILE_GRACE_MS } from "@/lib/ingestion/recove
 import { buildUploadCaption } from "@/lib/ingestion/telegram";
 import { createLocalBotApiClient, loadLocalBotApiConfig, type LocalBotApiClient } from "@/lib/telegram/local-bot-api";
 import { newJournalEntry, openJournal, resolveJournalDir, type Journal, type JournalEntry } from "@/lib/uploader/journal";
-import { fingerprintFile } from "@/lib/uploader/scan";
+import { fingerprintFile, hashFile } from "@/lib/uploader/scan";
 import { offlineStore, type IngestionStore } from "@/lib/uploader/store";
 import { canonicalInspection, COVER_ART, H264_HIGH_1080P, matroskaInspection, MP3_STEREO, sourceMedia } from "@/lib/uploader/test-media";
 import { MEDIA_POLICY_VERSION } from "@/lib/ingestion/media";
@@ -108,6 +108,22 @@ function entry(overrides: Partial<JournalEntry> = {}): JournalEntry {
   // Canonical media unless a test says otherwise: the E3.5 gate is tested on its own below.
   return { ...fresh, plan: { action: "upload", stopReasons: [] }, media: sourceMedia(canonicalInspection(SIZE)), ...overrides };
 }
+
+describe("synthetic file hashing", () => {
+  it("full hashing refuses a synthetic file that disappears before opening", async () => {
+    const path = join(dir, "synthetic.bin");
+    writeFileSync(path, Buffer.alloc(32, 7));
+    unlinkSync(path);
+    await expect(hashFile(path, 32)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("full hashing refuses a truncated synthetic file instead of accepting a partial digest", async () => {
+    const path = join(dir, "synthetic.bin");
+    writeFileSync(path, Buffer.alloc(32, 7));
+    truncateSync(path, 12);
+    await expect(hashFile(path, 32)).rejects.toThrow("Short read while hashing");
+  });
+});
 
 describe("local journal", () => {
   it("round-trips an entry and lists it", async () => {

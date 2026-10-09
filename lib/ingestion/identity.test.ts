@@ -67,6 +67,28 @@ function memoryFile(size: number, seed = 1) {
 }
 
 describe("source fingerprint", () => {
+  it.each([
+    Object.assign(new Error("simulated read failure"), { code: "EIO" }),
+    new DOMException("simulated cancellation", "AbortError"),
+    new DOMException("simulated deadline", "TimeoutError"),
+  ])("propagates an interrupted full-hash read without returning a digest or retrying: $name", async (failure) => {
+    const file = memoryFile(32);
+    let calls = 0;
+    await expect(fullContentHash(32, async (offset, length) => {
+      calls += 1;
+      if (offset === 8) throw failure;
+      return file.read(offset, length);
+    }, 8)).rejects.toBe(failure);
+    expect(calls).toBe(2);
+    expect(file.reads).toEqual([[0, 8]]);
+  });
+
+  it("rejects a short read after successful full-hash progress", async () => {
+    const file = memoryFile(12);
+    await expect(fullContentHash(32, file.read, 8)).rejects.toThrow("Short read while hashing");
+    expect(file.reads).toEqual([[0, 8], [8, 8]]);
+  });
+
   it("reads three samples of a large file, the whole of a small one", () => {
     expect(sampleRanges(100)).toEqual([{ offset: 0, length: 100 }]);
     const size = 2 * 1024 * 1024 * 1024 - 1;

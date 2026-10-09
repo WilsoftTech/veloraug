@@ -1689,3 +1689,95 @@ Selected action: document the evidence and correct the counter/timeout interpret
 - Telegram reads **0**, writes **0**, including synthetic writes. Hosted investigation reads **0**, writes **0**; prior snapshots were read locally. The required production build executes the existing public anonymous catalogue reads for static routes; exact hosted request count was not instrumented. It makes no ingestion or publication writes. No database regression/reset command was run.
 
 **Smallest safe next experiment:** after an approved Docker startup plan that prevents retained Bot API state from starting automatically, use a disposable container with networking disabled and a read-only G: mount to read a small synthetic file repeatedly across the server's idle window. Capture timestamped short reads/errors and Windows disk events; compare with the same small file on an internal disk. Never unplug or reset G: deliberately while authoritative files are in use. This tests mount stability without Telegram or a movie copy. Follow with an isolated loopback HTTP/TDLib diagnostic environment for restart and source-read faults. If a real Telegram synthetic probe is later needed, obtain separate explicit write authorization, use the Movies uploader identity and a private diagnostic destination, capture redacted part/read/socket telemetry, and settle uncertainty before any retry. A movie retry needs its own authorization and verified operational staging plan.
+
+## E3.7B — Isolated storage and Docker mount reliability (2026-10-09)
+
+**E3.7B: PASS — ISOLATED STORAGE DIAGNOSTICS COMPLETE.**
+
+**PRODUCTION TELEGRAM UPLOAD RELIABILITY: UNPROVEN.**
+
+The planned bounded native/mount comparisons and interrupted-read checks completed with integrity and isolation verified. This PASS applies to those diagnostics only. It does not establish the historical stall's cause, prove long-duration storage stability, or mean the Telegram upload problem is fixed.
+
+### Evidence, repository and isolation
+
+Primary evidence is the retained Git-ignored `.velora-ingest/e3.7b/REPORT.md`, with `isolation.jsonl`, `docker-comparison.jsonl`, `directory-mount.jsonl`, `interruption.jsonl` and `recovery.jsonl`. The supplied continuation was mapped against that evidence. Successful movie verification and five-read comparisons were not repeated. One extra small directory-bound read addressed a specific gap: earlier containers mounted individual synthetic files, whereas section 10 requires directory mounts. No operational scripts/logs or unnecessary absolute local paths are committed.
+
+Starting branch `phase-a-foundation`, HEAD `f100d0129a4aeff18e42f14eac2ab01744279b33`, matched `veloraug/phase-a-foundation`. All five pre-existing modified files and `.claude/` were preserved: globals, logo, Design prompt, Phase C document and media-gateway boundary test. Only the two existing test files and E3.7B documentation are task changes; `main` is untouched.
+
+Docker Desktop was **already running**. The production Bot API's observed start was **18:58:03.2474765Z**, before this investigation's inventory, and remained unchanged through the final check at 19:19:11Z. Its existing policy is `unless-stopped`, with a bridge network, read-only movie mount and named state volume. No command started, stopped, entered or changed it. Future Docker startup still needs a reviewed mitigation for that auto-start risk. No global claim about its independently running background Telegram traffic is made.
+
+All diagnostic containers used the existing local Node 24 image (`--pull never`), overridden Node entrypoint, network **none**, user `1000:1000`, read-only root filesystem, all capabilities dropped, `no-new-privileges`, restart `no`, disabled healthcheck, 128 MiB memory, 0.5 CPU and 32-PID limit. Only diagnostic scripts/synthetic files or directories were mounted read-only. No movie folder, production state volume, host Docker socket, Telegram credential or Supabase credential was mounted/passed. Image environment contained only PATH and Node/Yarn versions. Inspection verified no IP/gateway; the namespace had only loopback and no external IPv4 route or IPv6 interface. No Telegram executable or connectivity probe ran. All disposable containers were removed after evidence capture.
+
+### Storage and artifact checks
+
+- USB: NTFS G:, Disk 3, **Verbatim Vi550 S3 SSD**, online/healthy status; 164,584,824,832 B free. Device chain: UAS mass storage → USB 3.0 hub → Intel USB 3.1 controller → PCI Express root complex, all reporting OK.
+- Internal: NTFS C:, Disk 1, **NT-512 SATA SSD**, online/healthy; 78,352,027,648 B free (72.97 GiB).
+- Detailed storage reliability counters were unavailable through CIM, even outside the sandbox. These status flags are not a SMART diagnosis or hardware guarantee.
+- Balanced USB selective suspend was enabled for AC/DC; unchanged. A UASPStor reset was recorded earlier that day at **04:29:07.326Z**, RaidPort2; its association with G: was not established. NTFS reported G: healthy at **18:24:59.641Z**. No new matching Windows disk/USB/storage warnings or errors were observed from **19:00:00 through 19:19:11Z**. No device was disconnected/reset and no repair or power setting change was made.
+- Authoritative source: 1,917,414,964 B, size/mtime and recomputed `sf1-2a913ae1af153c39162ace13853ac0de35a7caba4e65b9af2113389b69974278` match the journal.
+- Retained rendition: 1,917,405,700 B, size/mtime and `sf1-2957a6d8604bccc90c34f4c7f9fe1fd2501f715c0e2cdd49e515ab3885635872` match. Complete SHA-256 again verified in the initial E3.7B run: **`7131620845cc2d5563e27a4e085e8f91331e85d744105aae2ba14ebdff38084c`**. Existing `fingerprintFile`, `hashFile` and `withReadRange` were reused directly, without ingestion commands. No further large-file verification read was needed in the continuation.
+
+### Native and Docker comparisons
+
+One identical **1 MiB** deterministic synthetic file was created exclusively in each dedicated diagnostic location: internal workspace and a separate USB diagnostic directory outside movie folders. Both SHA-256 values equal `631b84027d6b9e52b539c4e8373622d23032dfadc64d60af87339c9037e4f769`. USB writes were limited to that 1 MiB file; no movie copy or larger stress fixture was made. Both fixtures are retained.
+
+| Path | Full sequential reads | Median open/read/hash/close | Effective aggregate MiB/s | Ten 4 KiB positional reads: latency range |
+| --- | --- | --- | --- | --- |
+| Native / internal | 5 × 1 MiB, all hashes match | 3.280 ms | 261.37 | 0.204–0.593 ms |
+| Native / USB | 5 × 1 MiB, all hashes match | 3.889 ms | 209.64 | 0.505–0.736 ms |
+| Docker / internal | 5 × 1 MiB, all hashes match | 16.630 ms | 49.68 | 1.019–6.045 ms |
+| Docker / USB | 5 × 1 MiB, all hashes match | 11.440 ms | 80.07 | 0.796–9.473 ms |
+
+Every read completed; **zero errors/mismatches**, no observed disappearance. Effective throughput is bytes divided by retained application timings, including open/close, hashing and scheduling. Small cached reads and the container CPU limit make these unsuitable for ranking physical disk speeds or claiming sustained upload throughput.
+
+The additional **directory** mount test at 19:19:11Z read each file once: internal 5.920 ms / 168.91 MiB/s, USB 6.339 ms / 157.74 MiB/s, both hashes match. `realpath` resolved the expected file under each mount. An attempted read/write open was denied with **EROFS** on both (no data write attempted); no production folder was mounted. Container exit 0, no OOM. This confirms directory access and enforced read-only mounts in that test window, not immunity to intermittent sharing failures.
+
+### Interrupted-read results
+
+| Fault | Method and result |
+| --- | --- |
+| Cancellation | In-memory `ReadRange` throws AbortError after a successful chunk; existing full-hash function propagates it, returns no digest and makes no retry |
+| Mid-stream I/O failure | Injected EIO at the second chunk; same fail-closed/no-retry result |
+| Short read | Injected shortened second chunk; full hash rejects rather than accepting a prefix |
+| Timeout | Injected TimeoutError at the second chunk, propagated unchanged; simulation only, not an OS read deadline |
+| File disappearance | Disposable native internal fixture removed before opening; `hashFile` rejects ENOENT |
+| Truncation | Disposable native fixture shortened; full hash refuses a short read |
+| Container termination / restart | Internal-only isolated reader paused with its handle open after 64 KiB at 19:16:39Z, killed with SIGKILL (exit 137, OOM false), same container restarted with network none; new full read from zero recovered the expected 1 MiB hash at 19:16:54.328Z |
+
+Six focused assertions were added to the existing `identity.test.ts` and `uploader.test.ts`; existing memory/journal fixtures and hashing implementations were reused. No second ingestion pipeline or new dependency. Existing uncertain-upload/crash/recovery tests exercised no blind resend and journal/server reconciliation. The real hash helper does not expose cancellation or timeout controls: propagation tests do **not** prove it can interrupt a blocked OS read. Restart evidence proves restart-and-reverify, not persisted-offset resume. Physical USB faults and prolonged idle handles were not induced.
+
+### Assessment and transport implications
+
+**Confirmed:** historical USB/storage reset and Disk 3 error evidence from E3.7A; current native and isolated Docker reads completed with identical hashes; directory mounts were read-only; synthetic faults failed closed; source and rendition checks passed. No storage or mount failure was reproduced today.
+
+**Probable:** intermittent unreliability of the historical storage path, supported by independent retries, resets, paging errors and reported drive disappearance. This does not identify an upload-part failure.
+
+**Unproven:** storage as the cause of the Telegram plateau; Docker-specific sharing instability; Windows filesystem damage; USB power-management, cable/port/enclosure defect; whether any historical reset affected TDLib's active handle. Successful current diagnostics cannot certify the drive's historical health or distinguish these from network/TDLib failures.
+
+The client sends a path, not media bytes. A stalled/failed bind-mount read could starve TDLib's part uploader after HTTP acceptance; an intact HTTP connection would not repair it. Conversely, the server's HTTP idle close can lose acknowledgement while TDLib continues independently. E3.7A's four-hour Node deadline, 500-second server idle boundary and post-disconnect traffic remain distinct from source-read health. A future explicitly authorized synthetic transport experiment needs redacted read-offset/error, uploaded-part, socket and network timestamps to connect those mechanisms. **No speculative production transport change.**
+
+### Internal SSD staging feasibility — design only
+
+Capacity is sufficient for one 1.786 GiB rendition at the observed 72.97 GiB free. Reuse `remuxSpaceNeeded`'s existing conservative size-margin calculation as a future staging capacity floor: **2,224,189,270 B**, plus a proposed **2 GiB remaining-volume reserve**, requiring **4,371,672,918 B** free before one copy. Recheck capacity just before copying and refuse insufficient space; this is a proposed operational margin, not a reservation against competing writers.
+
+1. Choose an approved internal staging root and narrow read-only Docker mount. Reuse existing safe-root/path-map checks; current single-prefix mapping requires explicit per-operation configuration for staged paths, never a drive-root map. Keep authoritative source/rendition paths intact.
+2. Extend the existing local journal with optional staging metadata: origin, destination, size, sf1, complete digest and copy/verified phase. Keep the same source fingerprint, caption token, attempts, recovery floor and server identity. Do not create a second source record, ingestion pipeline or hosted media row. Future integration needs schema/adapter tests; do not merely replace `absolutePath` and leave origin/rendition references inconsistent.
+3. Copy bounded chunks into an exclusive destination `.partial`, flush, verify complete SHA-256 and sf1, and check origin identity/metadata before and after. Promote atomically on the destination filesystem to a verified immutable target. Define locking/no-overwrite promotion explicitly; any pre-existing target must be independently verified, never blindly replaced.
+4. Use existing atomic journal `put` for checkpoints. After a crash, a partial is unuploadable; a verified orphan is rehashed and associated with its source before adoption. No copy restart is a new upload attempt. No relocation or upload retry is inferred from staging success while an attempt is uncertain.
+5. Existing real-write authorization, bot/channel identity, media/size/fingerprint checks and authoritative server exactly-once rules remain unchanged. A local stage failure is a preflight failure, never `verified_absent`.
+6. Cleanup only the specifically recorded staging copy after confirmed Telegram adoption and server acknowledgement. Reuse the existing cleanup safety predicates while keeping stage deletion separate from origin/rendition deletion. Uncertain attempts retain their stage; the existing Call of Heroes recovery rendition remains preserved.
+
+No production staging code, movie copy or cleanup was implemented. The design reduces dependence on USB during future uploads; it cannot repair HTTP acknowledgement or network/TDLib problems.
+
+### Validation, external activity and next checkpoint
+
+- `npm.cmd test -- --maxWorkers=1`: **35 files passed, 1 failed; 736 tests passed, 1 failed, 27 skipped (764 total)**. The failure is the pre-existing CLI selection test's unchanged 5000 ms deadline, also observed in E3.7A. All six new fault assertions passed.
+- `npm.cmd test -- lib/uploader/cli.test.ts -t 'refuses bad selections'`: **1 passed, 14 deselected/skipped**, using the unchanged timeout (4.97 s test time). The original full-suite command did not pass; no timeout defaults/overrides were changed.
+- `npm.cmd test -- lib/ingestion/identity.test.ts lib/uploader/uploader.test.ts -t 'propagates an interrupted full-hash|rejects a short read after|full hashing refuses'`: **2 files passed, all 6 new fault tests passed, 91 deselected/skipped**, after final test grouping review.
+- `npm.cmd run typecheck`: passed. `npx.cmd eslint . --ignore-pattern '.velora-ingest/**'`: tracked-code lint passed. Ignored operational scripts with known E3.7A lint failures were preserved.
+- Production build **not run**: existing Google font fetching and static public-catalogue reads require external access. No offline substitute or network-capable build was attempted; E3.7A's successful build remains historical only. No product code changed.
+- Catalogue/database mutation gates not applicable to test/document-only changes; fake ingestion-store/recovery unit tests ran. No database reset, schema/query change or hosted mutation test.
+- Secret scan passed: 10 actual private values checked against all 4 E3.7B tracked files and 10 local evidence/script files, **0 matches**. Final task diff review and `git diff --check` passed. Starting SHA-256 values of all pre-existing changed files and `.claude/` files match; unrelated files remain unstaged.
+- **Task-issued Telegram reads/writes 0; hosted database reads/writes 0.** No production upload, ingestion, normalization, cleanup, recovery, catalogue/publication/rights operation or Series processing. The independently running production container's traffic is outside these task-issued counts.
+
+**Next checkpoint:** review this evidence and the staging design. Separately authorize staging implementation or a controlled synthetic transport experiment with redacted TDLib read/part/socket telemetry. Keep the Call of Heroes retry and all real Telegram writes unauthorized until that review. No production upload reliability claim is supported by these offline results.

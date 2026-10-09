@@ -214,6 +214,14 @@ The first Velora UG task is reconciliation, not feature construction.
   - **External state.** Telegram reads/writes 0; hosted investigation reads/writes 0 (historical snapshots only). Build uses existing anonymous catalogue reads; exact count unmeasured. No ingestion/publication writes, movie copy, normalization or recovery operation.
   - **Next.** Approved isolated Docker startup and network-disabled read-only synthetic mount probe, compare G: with internal storage. Any real Telegram synthetic write or movie retry needs separate authorization. Local staging of the retained rendition remains a proposal requiring an approved plan.
   - Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.7A".
+- E3.7B isolated storage and Docker mount reliability (2026-10-09): **PASS — ISOLATED STORAGE DIAGNOSTICS COMPLETE. PRODUCTION TELEGRAM UPLOAD RELIABILITY: UNPROVEN.**
+  - **Safety/integrity.** Reused retained source/rendition verification and successful read evidence. Disposable containers used local images, network none, no credentials/state, read-only synthetic mounts. Production Bot API was already running before inventory; unchanged throughout. Source/rendition preserved; no new storage errors observed.
+  - **Comparisons.** Native and Docker internal/USB reads: matching 1 MiB hashes, zero errors. Added one bounded directory-mount check per location to close the earlier file-bind gap; both rejected write-open with EROFS. Cached timing/throughput measurements are not sustained disk benchmarks.
+  - **Faults.** Six new tests cover injected cancellation/EIO/timeout/short reads and native synthetic disappearance/truncation. Isolated internal-only container killed after 64 KiB, restarted, then recovered the full expected hash. No physical USB fault induced or historical cause proved.
+  - **Staging proposal.** Internal SSD had 72.97 GiB free; conservative one-file budget plus 2 GiB reserve is 4.372 GB. Existing journal/fingerprint/path-map/checkpoint infrastructure can support verified atomic staging with unchanged exactly-once identity; no staging implementation or movie copy.
+  - **Validation.** Full default-timeout suite: 736 passed, one pre-existing CLI timeout, 27 skipped. That CLI test passed alone unchanged. Typecheck/tracked lint passed; production build not run because it would use external font/catalogue access. No database mutation gates applicable.
+  - **External state / next.** Task-issued Telegram and hosted database reads/writes 0. Review evidence and staging design, then separately authorize implementation or a synthetic transport experiment. Movie retry remains unauthorized.
+  - Record: `docs/PHASE_E_PLAYBACK_DESIGN.md`, "E3.7B"; primary local evidence `.velora-ingest/e3.7b/REPORT.md`.
 - Database regression suite: `npm run test:db` (local only).
 
 ## 2. Product and data rules
