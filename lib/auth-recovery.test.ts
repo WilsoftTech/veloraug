@@ -30,9 +30,22 @@ describe("password recovery", () => {
   it("returns the same account-neutral response on provider failure and logs no secrets", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const data = form({ email: "person@example.com" }); const normal = await requestPasswordReset({}, data);
-    mocks.request.mockResolvedValue({ error: { code: "over_email_send_rate_limit", message: "private-token-value" } });
+    mocks.request.mockResolvedValue({ error: { code: "unexpected_failure", message: "private-token-value" } });
     expect(await requestPasswordReset({}, data)).toEqual(normal);
     expect(JSON.stringify(warn.mock.calls)).not.toContain("private-token-value"); warn.mockRestore();
+  });
+  it("reports blocked requests without claiming an email was sent or exposing account details", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    for (const code of ["over_email_send_rate_limit", "over_request_rate_limit"]) {
+      mocks.request.mockResolvedValue({ error: { code, message: "private-token-value" } });
+      const existing = await requestPasswordReset({}, form({ email: "person@example.com" }));
+      const other = await requestPasswordReset({}, form({ email: "other@example.com" }));
+      expect(existing).toEqual(other);
+      expect(existing.message).toContain("did not send a reset email");
+      expect(existing.notice).toBeUndefined();
+    }
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("private-token-value");
+    warn.mockRestore();
   });
   it("rejects invalid email before any auth operation", async () => {
     expect(await requestPasswordReset({}, form({ email: "invalid" }))).toHaveProperty("errors.email");

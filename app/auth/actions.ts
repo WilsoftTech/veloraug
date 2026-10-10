@@ -103,7 +103,11 @@ export async function requestPasswordReset(_state: AuthFormState, formData: Form
   const supabase = await createClient();
   const { error } = await supabase.auth.resetPasswordForEmail(parsed.data.email, { redirectTo: callback.toString() });
   if (error) console.warn("Password recovery request failed", error.code ?? error.status);
-  // Identical response for registered/unregistered accounts and provider errors.
+  // Rate limits describe request availability, never whether an account exists.
+  if (error?.code === "over_email_send_rate_limit" || error?.code === "over_request_rate_limit") {
+    return { message: "The email service is temporarily rate-limited. This request did not send a reset email. Wait before requesting one new link; repeated requests will not help." };
+  }
+  // Other outcomes remain identical for registered/unregistered accounts.
   return { notice: "If an account exists for that email, a password-reset link will be sent. Check your inbox and spam folder, and open the link in this browser." };
 }
 

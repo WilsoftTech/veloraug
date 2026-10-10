@@ -70,6 +70,7 @@ bounded to this origin and callback path). Preserve existing allow-list entries
 and obtain approval before changing hosted Auth settings. Production needs its
 own separately approved HTTPS redirect. Email sending remains disabled until
 configured; the request response does not reveal whether an account exists.
+Rate-limited requests show a clear failure instead of a check-your-inbox notice.
 
 No recovery email or real password update is part of automated tests. The new
 password is entered by the account owner, never in chat, operator scripts or Git.
