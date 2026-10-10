@@ -3,7 +3,7 @@
 import { redirect } from "next/navigation";
 import type { AuthError } from "@supabase/supabase-js";
 import { getAuthedClient } from "@/lib/auth";
-import { fieldErrors, profileSchema, signInSchema, signUpSchema, type FieldErrors } from "@/lib/schemas";
+import { fieldErrors, passwordRecoverySchema, resetPasswordSchema, profileSchema, signInSchema, signUpSchema, type FieldErrors } from "@/lib/schemas";
 import { createClient } from "@/lib/supabase/server";
 import { safeRedirectPath } from "@/lib/utils";
 
@@ -88,6 +88,39 @@ export async function signOut() {
   const { error } = await supabase.auth.signOut({ scope: "local" });
   if (error) console.error("Supabase sign-out failed", error.code ?? error.status, error.message);
   redirect("/");
+}
+
+export async function requestPasswordReset(_state: AuthFormState, formData: FormData): Promise<AuthFormState> {
+  const parsed = passwordRecoverySchema.safeParse({ email: text(formData, "email") });
+  if (!parsed.success) return { errors: fieldErrors(parsed.error) };
+  // Fail closed until the operator verifies Supabase's exact recovery redirect.
+  if (process.env.VELORA_PASSWORD_RECOVERY_ENABLED !== "true") return { message: "Password recovery is not configured yet. Please try again later." };
+  const site = new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000");
+  if (site.protocol !== "https:" && !(process.env.NODE_ENV !== "production" && site.protocol === "http:" && ["localhost", "127.0.0.1"].includes(site.hostname))) return { message: "Password recovery is not configured yet. Please try again later." };
+  const next = safeRedirectPath(text(formData, "next"));
+  const callback = new URL("/auth/callback", site);
+  callback.searchParams.set("next", `/reset-password?next=${encodeURIComponent(next)}`);
+  const supabase = await createClient();
+  const { error } = await supabase.auth.resetPasswordForEmail(parsed.data.email, { redirectTo: callback.toString() });
+  if (error) console.warn("Password recovery request failed", error.code ?? error.status);
+  // Identical response for registered/unregistered accounts and provider errors.
+  return { notice: "If an account exists for that email, a password-reset link will be sent. Check your inbox and spam folder, and open the link in this browser." };
+}
+
+export async function resetPassword(_state: AuthFormState, formData: FormData): Promise<AuthFormState> {
+  const parsed = resetPasswordSchema.safeParse({ password: text(formData, "password"), confirmPassword: text(formData, "confirmPassword") });
+  if (!parsed.success) return { errors: fieldErrors(parsed.error) };
+  const supabase = await createClient();
+  const { data, error: userError } = await supabase.auth.getUser();
+  if (userError || !data.user || data.user.is_anonymous) return { message: "Your reset link has expired. Request a new link and open it in the same browser." };
+  const { error } = await supabase.auth.updateUser({ password: parsed.data.password });
+  if (error) {
+    console.warn("Password update failed", error.code ?? error.status);
+    return { message: error.code === "weak_password" ? "Choose a stronger password." : "Couldn't update your password. Request a new link and try again." };
+  }
+  const { error: signOutError } = await supabase.auth.signOut({ scope: "local" });
+  if (signOutError) console.warn("Password reset sign-out failed", signOutError.code ?? signOutError.status);
+  redirect(`/sign-in?passwordReset=1&next=${encodeURIComponent(safeRedirectPath(text(formData, "next")))}`);
 }
 
 export async function updateProfile(_state: AuthFormState, formData: FormData): Promise<AuthFormState> {

@@ -52,6 +52,28 @@ npm run dev
 - Without the gateway, Play shows "Playback is temporarily unavailable", and `npm run dev` prints a warning at startup.
 - Open the app at `http://localhost:3000`. On another host name such as `127.0.0.1`, Next.js development refuses its dev connection and the page never becomes interactive, so Play does nothing.
 
+## Password recovery
+
+The sign-in screen links to `/forgot-password`. Recovery uses the existing
+Supabase SSR client and PKCE callback at `/auth/callback`; open the email link
+in the same browser that requested it. `/reset-password` requires a fresh
+nonanonymous Auth session and changes only that user's password. A successful
+update ends the local session and returns to sign-in. Existing app metadata,
+reviewer capabilities, rights and publication rules are unchanged.
+
+Set `NEXT_PUBLIC_SITE_URL` to the actual app origin, not another local app's port.
+Enable `VELORA_PASSWORD_RECOVERY_ENABLED=true` only after verifying the project,
+email delivery and allowed recovery redirect. For the current local app on
+`http://localhost:3001`, the proposed Supabase Auth allow-list addition is
+`http://localhost:3001/auth/callback\?next=**` (escaped literal query separator,
+bounded to this origin and callback path). Preserve existing allow-list entries
+and obtain approval before changing hosted Auth settings. Production needs its
+own separately approved HTTPS redirect. Email sending remains disabled until
+configured; the request response does not reveal whether an account exists.
+
+No recovery email or real password update is part of automated tests. The new
+password is entered by the account owner, never in chat, operator scripts or Git.
+
 ## Layout
 
 | Path | Purpose |

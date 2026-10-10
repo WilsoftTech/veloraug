@@ -14,13 +14,19 @@ export const signInSchema = z.object({
 });
 
 const displayName = z.string().trim().max(50, "Keep your name to 50 characters or fewer.");
+const newPassword = z.string().min(8, "Use at least 8 characters.").max(72, "Use 72 characters or fewer.");
+export const passwordRecoverySchema = z.object({ email });
+export const resetPasswordSchema = z.object({
+  password: newPassword,
+  confirmPassword: newPassword,
+}).refine((values) => values.password === values.confirmPassword, { message: "Passwords must match.", path: ["confirmPassword"] });
 
 export const profileSchema = z.object({ displayName });
 
 export const signUpSchema = z.object({
   displayName,
   email,
-  password: z.string().min(8, "Use at least 8 characters.").max(72, "Use 72 characters or fewer."),
+  password: newPassword,
 });
 
 /** Per-user cap on saved titles. Enforced by a database trigger; this mirrors it for the import payload. */

@@ -14,8 +14,17 @@ export async function GET(request: Request) {
   if (code) {
     const supabase = await createClient();
     const { error } = await supabase.auth.exchangeCodeForSession(code);
-    if (!error) return NextResponse.redirect(new URL(next, origin));
-    console.warn("Email confirmation code exchange failed.", error.code ?? error.status, error.message);
+    if (!error) {
+      const response = NextResponse.redirect(new URL(next, origin));
+      response.headers.set("referrer-policy", "no-referrer");
+      response.headers.set("cache-control", "private, no-store");
+      return response;
+    }
+    console.warn("Email confirmation code exchange failed.", error.code ?? error.status);
   }
-  return NextResponse.redirect(new URL("/sign-in?error=callback", origin));
+  const recovery = next.split("?")[0] === "/reset-password";
+  const response = NextResponse.redirect(new URL(recovery ? "/forgot-password?error=recovery" : "/sign-in?error=callback", origin));
+  response.headers.set("referrer-policy", "no-referrer");
+  response.headers.set("cache-control", "private, no-store");
+  return response;
 }

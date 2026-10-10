@@ -8,5 +8,5 @@ export const metadata: Metadata = { title: "Sign in", robots: { index: false } }
 export default async function SignInPage({ searchParams }: PageProps<"/sign-in">) {
   assertAccountsAvailable();
   const params = await searchParams;
-  return <AuthForm mode="sign-in" next={safeRedirectPath(firstParam(params.next))} callbackFailed={firstParam(params.error) === "callback"} />;
+  return <AuthForm mode="sign-in" next={safeRedirectPath(firstParam(params.next))} callbackFailed={firstParam(params.error) === "callback"} passwordReset={firstParam(params.passwordReset) === "1"} />;
 }
