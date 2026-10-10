@@ -1,11 +1,65 @@
 # E3.8B controlled production rollout preflight
 
 Date: 2026-10-10, Africa/Nairobi. **Gate A production migrations complete.
-Gate B/C authorized; activation requires the operational details below.**
+Discovery-only preparation continues; live activation awaits separate approval.
+Gate C is deferred and blocked pending new authorization.**
 Production identity/history, backup and migration checks are recorded below.
 Remote consumer ownership, real rights, reviewer enrollment and publication remain unverified.
 
 ## Authorization gates and stop conditions
+
+### Current scope — discovery-only preparation
+
+The operator subsequently deferred Gate C entirely and instructed continued
+Gate A/B preparation only. Do not request a publication candidate, publication
+reviewer IDs or rights documentation as prerequisites for this stage. No rights
+clearance, publication capability, approval or movie publication is authorized.
+The previous Gate C authorization is superseded; Gate C stays blocked until
+separately authorized again. Further hosted migrations and live listener activation
+also require separate approval. The already confirmed Gate A execution below is
+historical fact and was completed before this instruction.
+
+Prepared discovery-only workflow:
+
+1. On a separately approved persistent host, configure the existing worker with
+   `VELORA_DISCOVERY_INSPECTION=metadata`, restricted discovery database access
+   and certificate-verified TLS. Keep `VELORA_DISCOVERY_LIVE_AUTHORIZED=false`
+   during preparation; no reader session, MTProto media read or FFmpeg is needed
+   for metadata mode. The existing Bot API container continues running.
+2. Confirm live consumer ownership, define the pending-update/cursor policy and
+   prepare durable receipt/checkpoint configuration before requesting activation.
+   No offset is fabricated and no pending update is discarded during preparation.
+3. After separate activation approval, new document events are persisted, parsed
+   for title/year/VJ, matched catalogue-first and then against TMDB when needed,
+   and stored as review candidates with bounded suggestions. Identity is proposed,
+   never automatically confirmed. VJ matches use existing active VJs.
+4. The website's existing `VELORA_DISCOVERY_MODE=database` adapter serves candidates
+   at `/admin/discovery` using the signed-in account's own session. The existing
+   fresh admin check and database review capability remain mandatory; no new
+   account or capability is assigned by this preparation. Since Gate A left the
+   reviewer table empty, production dashboard access is not claimed ready for an
+   enrolled operator. Plan review-only access separately when dashboard validation
+   is scheduled; publication/rights privileges are unnecessary for candidate display.
+5. Metadata mode records no media verification evidence, rights or approval.
+   Missing readiness/rights continue to block publication. Bounded media inspection
+   remains a separate configuration requiring a dedicated reader session and
+   verified tools; it must not infer complete-file integrity.
+
+Metadata-mode candidates already in review are not automatically claimed again
+when a future worker switches to bounded mode. A later media-verification rollout
+must prepare an authorized revision-safe reinspection workflow; do not reset
+candidate status, rights or approval directly to force a retry. This is outside
+the current discovery-only stage.
+
+Discovery-only preparation validation: 865 unit tests passed (28 tool-dependent
+FFmpeg/probe tests skipped in this test environment); 35 isolated integration
+tests passed with the existing one GoTrue skip. The updated offline worker checks
+cover metadata mode without reader credentials, empty template values, bounded
+mode refusing missing reader configuration, and live startup refusing absent
+activation authorization. Existing matching tests preserve proposed identity and
+null evidence/rights/approval. Application/discovery typechecks, changed-code lint,
+private-value scan and diff audit passed. No database migration changed and no
+web UI code changed; this is not a new production browser or playback verification.
 
 ### Confirmed execution and live checks — 2026-10-10
 
@@ -55,10 +109,10 @@ Gate B read-only checks:
   No hosted cursor was fabricated. A restricted database credential and a separate
   reader session/configuration have not yet been provisioned.
 
-Gate C remains pending the identified first movie, approved existing reviewer
-accounts/capability assignments and documented distribution rights. General
-Gate C authorization does not resolve those facts. No account has been enrolled,
-no rights have been granted, and no movie has been approved or published.
+At this historical checkpoint Gate C lacked movie/account/rights details. It has
+since been explicitly deferred as recorded above; none is requested for discovery
+preparation. No account has been enrolled, no rights have been granted, and no
+movie has been approved or published.
 
 ### Gate A preparation authorization — 2026-10-10
 
@@ -219,7 +273,8 @@ Movies bot on self-hosted Bot API
 it reuses the discovery worker, database adapter, Bot API client, MTProto reader
 and FFmpeg tool adapter. It is never a Vercel Route Handler. It cannot publish.
 `VELORA_DISCOVERY_INSPECTION=disabled` records events without inspecting them;
-`bounded` enables the existing inspection pipeline. No historical enumeration
+`metadata` runs parsing and movie/VJ matching without media evidence or a reader
+session; `bounded` also enables media verification. No historical enumeration
 is wired into this live process.
 
 Deploy the website to Vercel, database to Supabase, and worker to a persistent
@@ -539,9 +594,11 @@ sudo systemctl enable --now velora-discovery
 curl --fail http://127.0.0.1:8790/readyz
 ```
 
-`VELORA_DISCOVERY_LIVE_AUTHORIZED` must remain absent/false until Gate B; normal
+`VELORA_DISCOVERY_LIVE_AUTHORIZED` must remain absent/false until separate Gate B
+activation approval; normal
 startup refuses it before any database or Telegram call. Detection-only is the
-default. After approved read-only validation, enable bounded inspection with
+default. For discovery-only metadata extraction use `metadata` after activation
+approval. After approved read-only validation, enable bounded inspection with
 verified tool paths and TMDB metadata credentials. Monitor one known naturally
 received post; do not upload a test message under a read-only authorization.
 
