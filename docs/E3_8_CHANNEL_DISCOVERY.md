@@ -2,6 +2,8 @@
 
 Date: 2026-10-10 (Africa/Nairobi). Starting branch: `phase-a-foundation`; HEAD: `c775904046a197a3b5214348c33c568123523441`. E3.7D was already committed/pushed at this HEAD; its real upload/publication is not repeated.
 
+> **Superseded in part by E3.8A** (end of this document): direct-channel documents now have trusted provenance and a shared, gated publication path. The E3.8 record below is kept as written.
+
 **Classification: PARTIAL.** Offline detection, durable review, admin UI and supported uploader publication integration are implemented. An approved synthetic uploader-linked review passed through the real existing owner functions in a disposable database and appeared through existing catalogue queries. Brand-new channel documents remain blocked at publication: the current owner boundary requires an evaluated uploader source fingerprint. No live listener is installed or deployed.
 
 ## Architecture inventory
@@ -131,3 +133,174 @@ Recommended next checkpoint: **E3.8A — isolated channel-origin SQL and bounded
 Ignored evidence: `.velora-ingest/e3.8/` logs, copied build, synthetic markup/screenshots and responsive results. Disposable containers/proxy are removed after verification; existing local Supabase/Bot API/gateway remain.
 
 **E3.8 OFFLINE IMPLEMENTATION: PARTIAL** — safe offline prototype and supported publication integration proven; new direct-channel publication, production persistence/transport, durable rights/readiness evidence and authenticated fixture integration remain unfinished. Do not deploy this as automatic channel publication.
+
+---
+
+# E3.8A — Direct-channel review and publication
+
+Date: 2026-10-10 (Africa/Nairobi). Branch `phase-a-foundation`; starting HEAD `f63daeae2db6b65ab093592a68210b983e2839cb` (equal to `veloraug/phase-a-foundation`).
+
+**Classification: PASS for isolated implementation; ready for controlled rollout.** A document posted directly to the Movies channel can now be detected, persisted, verified (bounded), reviewed, rights-cleared, approved and published, and then appear through the existing catalogue queries. This is proven end to end in a disposable database. Nothing ran against Telegram or hosted Supabase. **Migration 13 is local only, not deployed.**
+
+## What changed
+
+| Area | Implementation | Reused |
+| --- | --- | --- |
+| Persistence | Migration `20261010090000_direct_channel_publication.sql` | `private.telegram_media`, `private.ingestion_events` (new origin `channel`), `private.metadata_match_candidates` (now with the validated `snapshot`) |
+| Provenance | `tg1-` identity = SHA-256 of `[chat_id, message_id, "file_unique_id", file_size]` (the E3.8 `mediaKey`), computed by the database (`private.channel_media_identity`) and by `channelIdentity` in `lib/discovery/events.ts` | E3.8 detection and digests |
+| Shared publication | `private.catalogue_materialize_movie_version` is steps 1–3 of the C2B.2H publisher, factored out unchanged. `catalogue_publish_movie` (uploader) and `catalogue_publish_channel_movie` (channel) both end in it. | All 77 C2B.2H assertions pass unchanged |
+| Worker | `DiscoveryPersistence` port in `lib/discovery/worker.ts`. JSON inbox = `inboxPersistence` (E3.8 behaviour, unchanged); Supabase = `databasePersistence` in `lib/discovery/database.ts` | `runReplay`, `reconcile`, `inspectCandidate`, parser, VJ resolver, matcher |
+| Media readiness | `lib/discovery/media-verification.ts` (bounded verifier); `lib/media-gateway/range-reader.ts` (gateway MediaReader → aligned ranges); `headProbe` in `lib/uploader/media-tools.ts` | `readMp4Layout`, `inspectionFromProbe`, `classifyMedia` (policy v2), E1.1 range planner, gateway `MediaReader` |
+| Review UI | `/admin/discovery` gains `VELORA_DISCOVERY_MODE=database` (`ReviewQueue`/`ReviewDetail` `mode` prop; database gates; owner command panel; "Refresh public pages") | Same pages, components, Server Actions and fresh-session admin check |
+| Approval/publication commands | `lib/discovery/owner-commands.ts` prepares validated psql commands; `publicationState` reconciles uncertain results | C2B.2H owner-service pattern |
+| Bot API consumer | `lib/discovery/bot-api-provider.ts`: bounded `getUpdates` provider, **not wired or started** | Local Bot API transport (injected) |
+| Isolated gates | `scripts/isolated-db.mjs` (`npm run test:db:isolated`), `vitest.discovery.config.mts` (`npm run test:integration:isolated` with `VELORA_E38_ISOLATED_TESTS=true`) | E3.8 integration tests, now on the new harness |
+
+No dependency was added. An in-app Postgres client was tried and removed, because the E1.2 boundary test forbids Postgres packages in the application.
+
+## Direct-channel provenance
+
+- A channel row has `origin = 'channel'`. A CHECK forbids any uploader column on it (fingerprint, size, upload state, floor), so it can never claim uploader provenance.
+- One partial unique index (`ingestion_events_media_provenance_key`) lets a delivered document belong to the uploader or to a channel post, never both. A delivery of the uploader's own message is ignored, not turned into a candidate.
+- Captions, filenames, `velora-src`/`tmdb:` claims and `file_id` are never identity. `file_id` is stored only in the private media row (required there) and never appears in review views.
+- **Edits.** Edits apply in Telegram date order. An unpublished document that is edited or replaced gets a new revision, its approval is cleared, and its rights and evidence become stale (both are bound to the revision and to the `tg1` identity).
+- **Published and duplicate documents.**
+  - A published message is never reopened. Its media identity is frozen by `telegram_media_guard_identity`, an edit only flags `published_message_changed`, and the gateway already refuses a document whose `file_unique_id` no longer matches.
+  - A repost of the same document is `ignored`/`duplicate_media`. The same unique id with another size is `blocked`/`document_identity_conflict`.
+
+## Database schema and grants (migration 13)
+
+New private tables, all with RLS on, no policies, and every privilege revoked from `PUBLIC`, `anon`, `authenticated` and `service_role`:
+
+| Table | Holds |
+| --- | --- |
+| `channel_reviews` | revision, fenced worker lease, retry time, identity state, TMDB/VJ choice, relation, approval |
+| `media_evidence` | bounded verification of one identity; `scope` is fixed to `bounded`, and `verified` is a generated column |
+| `rights_clearances` | unique per (candidate, revision), bound to the identity |
+| `catalogue_reviewers` | separate `can_review`, `can_clear_rights` and `can_publish` capabilities; **ships empty** |
+| `channel_review_audit` | append-only (trigger) |
+| `discovery_deliveries` | `u:<update_id>` / `r:<event digest>` dedupe |
+| `discovery_cursors` | update offset, reconciliation cursor and single-consumer lease. **Absent until the owner initializes it**, independent of the uploader's `checkpoint_message_id` |
+
+Command tiers (all `search_path=''`, schema-qualified, no dynamic SQL):
+
+1. **Worker**, `service_role` only (SECURITY DEFINER): `discovery_acquire_consumer`, `discovery_receive`, `discovery_claim`, `discovery_complete`, `discovery_fail`, `discovery_catalogue_lookup`, `discovery_vjs`, `discovery_health`. They record deliveries, inspections and evidence. They never write the catalogue, rights or approvals.
+2. **Reviewer**, `authenticated` only, plus a capability check in `private.require_reviewer` against fresh database state (anonymous sign-ins and unlisted accounts are refused): `discovery_review_list`, `discovery_review_get`, `discovery_review_correct`, `discovery_review_clear_rights` (rights capability), `discovery_review_reject`, `discovery_review_retry`.
+3. **Approval and publication**: `catalogue_review.approve_channel_candidate` and `catalogue_review.publish_channel_candidate`.
+   - They live in a schema the Data API does not expose. EXECUTE belongs only to the new role `velora_review_service` (NOLOGIN, NOINHERIT, no memberships, connection limit 5; login and password are operator configuration) and to the owner.
+   - Each names the reviewer and requires that account's `review` or `publish` capability.
+   - This keeps the C2B.2H invariant: *no approval or publication function in the Data API schema* (suite 007, unchanged).
+4. **Owner**, no API role (SECURITY INVOKER): `catalogue_materialize_movie_version`, `catalogue_publish_movie`, `catalogue_publish_channel_movie`, `channel_review_blockers` and internals.
+
+The `velora_media_gateway` role and its published-only resolver are unchanged. Suite 003's reviewed inventory was updated to name the 7 new tables and the 16 new SECURITY DEFINER functions, and its scan now includes `catalogue_review`. No other existing assertion changed.
+
+## Review workflow, gates and rights
+
+`detected → inspecting → awaiting_metadata | awaiting_identity | awaiting_vj | awaiting_media | awaiting_rights | awaiting_review → approved → published`, plus `failed`, `blocked`, `duplicate` and `rejected`.
+
+`private.channel_review_blockers` is the single gate evaluator. It drives the reviewer's view, approval, publication and the health counts. Any of these blocks:
+
+| Gate | Blocks when |
+| --- | --- |
+| Candidate state | closed, inspection pending, or a duplicate |
+| Channel | not registered |
+| Media identity | incomplete |
+| Movie identity | not confirmed by a reviewer (a high-confidence match is only `proposed`), or no validated snapshot |
+| VJ | not active |
+| Media evidence | no current, verified evidence for the current identity |
+| Rights | no clearance for this revision and identity |
+| Conflicting evidence | unresolved warnings |
+| Catalogue relation | archived title, an existing version of the same title and VJ (replacement needs a separate workflow), or media already linked |
+
+Rights are never implied by Telegram, TMDB, approval or publication. Approval needs the review capability and publication the separate publish capability. A reviewer may hold any combination, so duties can be split. Stale revisions, unauthorized accounts, `service_role`, `anon` and a plain owner session (no reviewer identity) all fail closed.
+
+**How an administrator approves and publishes.** The detail page shows the gates.
+- When every gate passes, the page shows the **approval command**; once approved, it shows the **publication command**.
+- Each command is prepared for the signed-in admin's account and is run through psql as `velora_review_service` (or the owner).
+- The browser never has an approve or publish button, because the application has no route to the owner tier.
+- After publication, "Refresh public pages" calls the existing `revalidatePath` for Home, Movies, VJs, Search, the movie page and the VJ page. Without it, Home and VJs refresh within 5 minutes.
+
+## Atomicity, idempotency and uncertain outcomes
+
+- Publication is one transaction: lock the candidate, re-evaluate the gates, materialize (movie and genres, VJ version, media link, ready and cleared, published), then mark it published, attribute it and audit it.
+- A replay at the approved revision returns `already_published` with the same ids.
+- Concurrent publishers serialize on the candidate row and the movie row. A second title insert or version insert is refused (`catalogue_publication_conflict` / `catalogue_version_conflict`); nothing is merged.
+- Any failure rolls back everything (proven with a slug collision: no movie, no version, and the candidate stays approved).
+- **Uncertain result:** check the candidate's state (`publicationState`, or the detail page). If it is published, stop. If it is approved but not published, the same command may be run again; it is idempotent. Never re-run blindly.
+
+## Media verification
+
+The verifier reads, through the gateway's own `MediaReader`:
+
+- one 16-byte header per top-level box;
+- `ftyp..moov` (at most 16 MiB) for ffprobe;
+- the last 4 KiB.
+
+It never reads media data in between. The existing policy v2 must classify the file `canonical`: fast-start ISO MP4, H.264 within policy, AAC-LC or MP3, nothing else, and boxes that cover exactly the size Telegram reports. On a ~1 GB synthetic document this costs under 16 KiB of reads. Anything incomplete, unreadable, over budget, non-MP4, not fast-start, fragmented or unprobeable is recorded `unverified` and blocks publication. **Evidence never claims full-file integrity**: the database refuses any scope but `bounded`. Browser compatibility follows from the E3.3/E3.5 proven policy, not from a per-file browser test. Safari/iOS remains the pre-launch gate.
+
+## Detection ownership and reconciliation
+
+- One process must own Movies-bot updates. The database enforces this with a lease: `discovery_acquire_consumer` hands out a single token, a second consumer gets `discovery_consumer_busy`, and a record attempt without the current token gets `discovery_consumer_lease_lost`. Telegram's own 409 is a second line of defence (`bot-api-provider.ts` stops on it).
+- Never run a webhook and polling together. Never call `deleteWebhook` or `drop_pending_updates`.
+- Each batch and its offset commit together, before any acknowledgement. The reconciliation cursor is separate and never resets to the start of history.
+
+## Verification (2026-10-10)
+
+| Gate | Result |
+| --- | --- |
+| Unit suite (`npx vitest run`) | **845 passed, 27 skipped, 43 files.** The 811 existing tests are unchanged, plus 34 new: verifier, range adapter, database adapters, owner commands, Bot API provider, identity digest, database-mode markup. One full-suite run hit a timing failure in the untouched `lib/media-gateway/pump.test.ts`; it passed 3/3 alone and in the next full run. |
+| Isolated database (`npm run test:db:isolated`) | **9/9 suites, 621 assertions** (482 existing + 139 new in `009_direct_channel_publication.test.sql`) |
+| Mutation checks on suite 009 | Removing the rights gate → 6 failures; removing the publish-capability check → 3 failures |
+| `supabase db lint` (isolated DB, `--level warning`) | No schema errors, including `catalogue_review` |
+| Isolated integration (`npm run test:integration:isolated`) | **32 passed, 1 skipped**: catalogue 22 (+1 skipped Auth-service case, as in E3.8), E3.8 uploader-linked publication 1, E3.8A end to end 9 |
+| Typecheck and tracked-code lint | Pass |
+| Production build | Pass: webpack build of a copied workspace without `.env*`, against the isolated seeded PostgREST through a GET-only local proxy; 15 static pages. No review RPC, review schema or JWT secret string in any browser chunk. |
+
+The E3.8A end-to-end test uses real modules throughout: worker, persistence, verifier, reviewer client, owner commands via psql as `velora_review_service`, `lib/catalogue`, entitlement and capability issuing, and the gateway resolver. It proves:
+
+- **Detection:** duplicate delivery, the single consumer, restart without re-inspection, a proposed identity and VJ, and exact-identity bounded evidence. Rights start missing.
+- **Authorization:** refusal for `anon`, `service_role`, rights-only reviewers and accounts without a capability. Approval needs confirmation and rights; stale and unauthorized approvals fail, and the worker identity cannot run owner commands.
+- **Publication:** an uncertain publication is reconciled to `published`, and a re-run returns `already_published`. The title is visible on Movies, Search, the detail page, the VJ list and the VJ filter.
+- **Playback:** anonymous streaming is denied, signed-in streaming is allowed, and tampered, download-op and other-version tokens are denied. The resolver serves the exact message.
+- **Afterwards:** later edits, reposts and reconciliation leave every version byte-identical, and every pre-existing title is unchanged.
+
+**Not covered:** the Next.js Server Actions themselves (markup and client modules are tested). The live MTProto reader and ffprobe path need Telegram and the verified ffprobe build, so they are offline-tested only.
+
+## External state
+
+- Telegram reads/writes **0**.
+- Hosted Supabase reads/writes **0**; hosted migrations **0**.
+- Production movies, versions, media and rights rows are not touched. Call of Heroes, On The Hunt and Fuze are not accessed.
+- The developer's local Supabase stack is not reset or written: all database work ran in disposable `velora-e38a-*` containers on tmpfs with synthetic credentials.
+
+## Production rollout (requires separate authorization; not executed)
+
+1. **Review** migration 13 and this record (grants, `catalogue_review`, `velora_review_service`).
+2. **Back up** the hosted database (PITR point or `pg_dump` of `public`, `private`, `auth.users` ids). Confirm hosted has exactly 12 migrations and that `supabase db push --dry-run` proposes only `20261010090000`.
+3. **Apply** it with `supabase db push`. Verify function bodies against the local chain, the privilege fingerprints, and advisors (expect `rls_enabled_no_policy` INFO on the new private tables, as for `telegram_channels`). Re-run the read-only ACL checks of suite 009.
+4. **Credentials:**
+   - Keep the worker on `service_role` on the worker host only. Never in Vercel, never `NEXT_PUBLIC_`.
+   - For approvals, enable login for `velora_review_service` with a SCRAM password set outside SQL history (as for `velora_media_gateway`), stored on the operator machine.
+   - Grant named reviewers in `private.catalogue_reviewers` as the owner, splitting review, rights and publish where possible. Set their `app_metadata.role = 'admin'` for the UI gate.
+5. **Update ownership.** Confirm no webhook is set and no other `getUpdates` consumer exists, using the Movies bot's local Bot API `getWebhookInfo` (a read). The discovery worker is the only consumer; the uploader posts never conflict.
+6. **Listener host:** a persistent, supervised Node process next to the local Bot API (not Vercel). It needs the MTProto reader session (read-only reader bot), the verified ffprobe, and network access to Supabase and the local Bot API only.
+7. **Initialize** `insert into private.discovery_cursors (bot_type) values ('movie')` as the owner. The channel row already exists. The first poll starts from Telegram's pending queue; never use `drop_pending_updates`.
+8. **Activate read-only detection first:** run the worker with inspection on, review mode off.
+9. **Validate candidates:** `discovery_health`, the review queue counts, and one known test post.
+10. **Enable admin review:** set `VELORA_DISCOVERY_MODE=database` on the web deployment.
+11. **Check media readiness:** the evidence must be `canonical`, bounded, at the current identity.
+12. **Clear rights and approve** a test candidate whose rights are confirmed, using the reviewer accounts and the prepared approval command.
+13. **Publish** through the prepared publication command (owner service, psql, as `velora_review_service`).
+14. **Check public visibility:** Home, Movies, Search, VJ and detail pages ("Refresh public pages"), plus authenticated playback through the gateway.
+15. **Monitor and roll back.** Watch backlog, failures, `media_blocked`, `rights_blocked`, reconciliation lag and consumer-lease errors.
+    - Rollback stops the worker and revokes reviewer capabilities or the `velora_review_service` login.
+    - Grants change only through a new migration.
+    - Never delete audit or evidence. Never unpublish by editing rows outside a reviewed procedure. Never reverse an applied migration.
+
+**Remaining production prerequisites:**
+- operator wiring of the worker entrypoint (persistence + `botApiUpdateProvider` + `mediaReaderRange` + `headProbe`);
+- reviewer-account assignment;
+- the live Telegram verification above;
+- a GoTrue-backed run of the skipped watchlist case before launch.
+
+**E3.8A: PASS — DIRECT-CHANNEL REVIEW/PUBLICATION READY FOR CONTROLLED ROLLOUT** (isolated; migration 13 not deployed; listener not started).

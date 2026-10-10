@@ -13,7 +13,9 @@
     "gateway:dev": "node --env-file-if-exists=.env.local scripts/media-gateway-dev.mjs",
     "ingest": "node --env-file-if-exists=.env.local --import ./scripts/ingest/register.mjs scripts/ingest/cli.mts",
     "discovery:replay": "node --import ./scripts/ingest/register.mjs scripts/discovery/replay.mts",
-    "test:db": "npx supabase@2.117.0 db reset --local --no-seed && npx supabase@2.117.0 test db --local"
+    "test:db": "npx supabase@2.117.0 db reset --local --no-seed && npx supabase@2.117.0 test db --local",
+    "test:db:isolated": "node scripts/isolated-db.mjs test",
+    "test:integration:isolated": "vitest run --config vitest.discovery.config.mts -t \"^(?!.*saves catalogue movies and series by internal id)\""
   },
   "dependencies": {
     "@supabase/ssr": "0.12.7",

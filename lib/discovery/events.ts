@@ -12,8 +12,12 @@ const updateSchema = z.object({ update_id: z.number().int().nonnegative(), chann
 const messageSchema = telegramMediaMessageSchema.extend({ edit_date: z.number().int().positive().optional() });
 const safeCaption = (caption: string | undefined) => caption?.replace(/https?:\/\/\S+/gi, "[link omitted]").replace(/\b\d{6,12}:[A-Za-z0-9_-]{25,}\b/g, "[credential omitted]").replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[credential omitted]") ?? null;
 
-/** Only selected fields are retained; file_id and raw payloads never enter the inbox. */
-export function detectDocument(raw: unknown, channelId: number, reconciliation = false): { updateId: number; digest: string; event: DiscoveryEvent | null; withdrawnMessageKey?: string } {
+/**
+ * Only selected fields are retained; file_id and raw payloads never enter the inbox.
+ * `fileId` and `date` are returned beside the event for the database adapter, whose
+ * private telegram_media row requires them (never shown to reviewers or browsers).
+ */
+export function detectDocument(raw: unknown, channelId: number, reconciliation = false): { updateId: number; digest: string; event: DiscoveryEvent | null; withdrawnMessageKey?: string; withdrawnMessageId?: number; fileId?: string; date?: number } {
   const update = reconciliation ? updateSchema.partial({ update_id: true }).parse(raw) : updateSchema.parse(raw);
   // A history page has no Bot API update ID; zero is only an internal ignored-delivery digest salt.
   const updateId = update.update_id ?? 0;
@@ -25,15 +29,19 @@ export function detectDocument(raw: unknown, channelId: number, reconciliation =
   if (envelope.chat.id !== channelId) return { updateId, digest: digest([updateId, "other_channel"]), event: null };
   const message = messageSchema.parse(value);
   const doc = message.document;
-  if (!doc || message.video || message.caption?.includes(RECOVERY_MARKER_PREFIX)) return { updateId, digest: digest([updateId, "not_document"]), event: null, ...(edited ? { withdrawnMessageKey: digest([channelId, message.message_id]) } : {}) };
+  if (!doc || message.video || message.caption?.includes(RECOVERY_MARKER_PREFIX)) return { updateId, digest: digest([updateId, "not_document"]), event: null, ...(edited ? { withdrawnMessageKey: digest([channelId, message.message_id]), withdrawnMessageId: message.message_id } : {}) };
   const media = { uniqueId: doc.file_unique_id, size: doc.file_size ?? null, name: doc.file_name ?? null, mime: doc.mime_type ?? null, caption: safeCaption(message.caption) };
   const timestamp = message.edit_date ?? message.date;
   const payloadDigest = digest([message.chat.id, message.message_id, timestamp, media]);
   const messageKey = digest([message.chat.id, message.message_id]);
   const kind = reconciliation ? "reconciliation" : edited ? "edited_channel_post" : "channel_post";
   const event: DiscoveryEvent = { id: digest([messageKey, timestamp, payloadDigest]), messageKey, updateId: reconciliation ? null : updateId, channelId, messageId: message.message_id, kind, timestamp, digest: payloadDigest, media };
-  return { updateId, digest: payloadDigest, event };
+  return { updateId, digest: payloadDigest, event, fileId: doc.file_id, date: message.date };
 }
+
+/** The trusted identity of a channel document (tg1-): the same digest the database computes. */
+export const channelIdentity = (event: DiscoveryEvent): string | null =>
+  event.media.size && event.media.size > 0 && /^[A-Za-z0-9_-]{1,128}$/.test(event.media.uniqueId) ? `tg1-${mediaKey(event)}` : null;
 
 export function parseDocument(event: DiscoveryEvent) {
   const file = parseFilename(event.media.name ?? "");
@@ -58,7 +66,7 @@ export function initialInbox(channelId: number): Inbox {
   if (!Number.isSafeInteger(channelId) || channelId >= 0) throw new Error("invalid_movies_channel");
   return { version: 1, channelId, checkpoint: null, reconciliation: { cursor: null, checkedAt: null, incomplete: true }, deliveries: {}, events: {}, candidates: {} };
 }
-function newCandidate(event: DiscoveryEvent, now: string): ReviewCandidate {
+export function newCandidate(event: DiscoveryEvent, now: string): ReviewCandidate {
   return { id: event.messageKey, revision: 1, event, firstSeen: now, lastSeen: now, status: "detected", attempts: 0, lease: null, retryAt: 0, error: null,
     title: null, year: null, vjText: null, vjId: null, tmdbId: null, movieId: null, identity: "unknown", relation: "unknown", choices: [], snapshot: null, warnings: [], evidence: null,
     rights: null, approval: null, uploaderSource: null, duplicateOf: null, publication: null, audit: [{ at: now, actor: "discovery", action: "detected", revision: 1 }] };

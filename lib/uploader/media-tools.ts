@@ -1,6 +1,7 @@
 import "server-only";
 import { spawn } from "node:child_process";
-import { stat, statfs } from "node:fs/promises";
+import { mkdtemp, rm, stat, statfs, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, delimiter, isAbsolute, join } from "node:path";
 import { createPacketDigest, inspectionFromProbe, packetListArguments, readMp4Layout, remuxArguments, type MediaInspection, type PacketDigest, type PlaybackSelection } from "@/lib/ingestion/media";
 import { withReadRange } from "@/lib/uploader/scan";
@@ -149,15 +150,46 @@ export async function probeMedia(ffprobe: MediaTool, path: string, run: Runner =
   } catch {
     return { ok: false, code: "source_unreadable" };
   }
+  const probe = await probeJson(ffprobe, path, run);
+  if (!probe.ok) return probe;
+  try {
+    const layout = await withReadRange(path, (read) => readMp4Layout(sizeBytes, read));
+    return { ok: true, inspection: inspectionFromProbe(probe.json, sizeBytes, layout) };
+  } catch {
+    return { ok: false, code: "probe_output_invalid" };
+  }
+}
+
+/** The raw ffprobe JSON (format + streams) of one file: headers only. */
+async function probeJson(ffprobe: MediaTool, path: string, run: Runner): Promise<{ ok: true; json: unknown } | { ok: false; code: "probe_failed" | "probe_timeout" | "probe_output_invalid" }> {
   const result = await run(ffprobe.path, ["-hide_banner", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", "-i", path], { timeoutMs: 120_000, maxStdoutBytes: 4 * 1024 * 1024 });
   if (result.timedOut) return { ok: false, code: "probe_timeout" };
   if (result.code !== 0) return { ok: false, code: "probe_failed" };
   try {
-    const layout = await withReadRange(path, (read) => readMp4Layout(sizeBytes, read));
-    return { ok: true, inspection: inspectionFromProbe(JSON.parse(result.stdout), sizeBytes, layout) };
+    return { ok: true, json: JSON.parse(result.stdout) };
   } catch {
     return { ok: false, code: "probe_output_invalid" };
   }
+}
+
+/**
+ * ffprobe of a bounded head (ftyp..moov) of a remote document, for channel
+ * verification (lib/discovery/media-verification.ts). The bytes go to a private
+ * temporary file that is always removed; nothing else of the document is held.
+ */
+export function headProbe(ffprobe: MediaTool, run: Runner = runProcess): (head: Uint8Array) => Promise<unknown> {
+  return async (head) => {
+    const dir = await mkdtemp(join(tmpdir(), "velora-head-"));
+    try {
+      const path = join(dir, "head.mp4");
+      await writeFile(path, head, { mode: 0o600, flag: "wx" });
+      const probe = await probeJson(ffprobe, path, run);
+      if (!probe.ok) throw new Error(probe.code);
+      return probe.json;
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  };
 }
 
 /** Packet digests of the selected video and audio stream, read by stream copy (no decoding). */

@@ -5,6 +5,7 @@ import { resolveVj } from "@/lib/ingestion/vj";
 import { decideMatch } from "@/lib/ingestion/match";
 import { movieSnapshotSchema, type MovieSnapshot } from "@/lib/tmdb/ingestion-search";
 import type { KnownVj, MatchQuery, TmdbCandidate } from "@/types/ingestion";
+import type { ChannelMediaEvidence } from "@/lib/discovery/media-verification";
 
 export interface CatalogueMatch extends TmdbCandidate { movieId: number; vjIds: number[] }
 export interface InspectionPorts {
@@ -13,7 +14,8 @@ export interface InspectionPorts {
   vjs(): Promise<KnownVj[]>;
   search(query: MatchQuery): Promise<TmdbCandidate[]>;
   snapshot(tmdbId: number): Promise<MovieSnapshot | null>;
-  media(event: DiscoveryEvent): Promise<{ duplicateOf: string | null; source: ReviewCandidate["uploaderSource"]; evidence: MediaEvidence | null }>;
+  // `verification`: the bounded channel verification the database records (database adapter only).
+  media(event: DiscoveryEvent): Promise<{ duplicateOf: string | null; source: ReviewCandidate["uploaderSource"]; evidence: MediaEvidence | null; verification?: ChannelMediaEvidence | null }>;
 }
 export function blockers(candidate: ReviewCandidate): string[] {
   const blocked: string[] = [];
@@ -69,7 +71,8 @@ export async function inspectNext(store: InboxStore, ports: InspectionPorts, now
   return true;
 }
 
-async function inspectCandidate(candidate: ReviewCandidate, ports: InspectionPorts): Promise<ReviewCandidate> {
+/** One inspection of one candidate (pure apart from the ports). Shared by the JSON and database adapters. */
+export async function inspectCandidate(candidate: ReviewCandidate, ports: InspectionPorts): Promise<ReviewCandidate> {
   const parsed = parseDocument(candidate.event);
   const next = { ...candidate, title: parsed.title?.slice(0, 300) ?? null, year: parsed.year, vjText: parsed.vjText?.slice(0, 100) ?? null, warnings: parsed.warnings, error: null };
   if (parsed.kind !== "movie") return { ...next, status: "blocked", error: "series_out_of_scope", warnings: [...next.warnings, "series_out_of_scope"] };

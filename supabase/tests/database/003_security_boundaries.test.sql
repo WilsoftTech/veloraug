@@ -16,7 +16,7 @@ select plan(30);
 select is(
   (select count(*)::int from pg_class c join pg_namespace n on n.oid = c.relnamespace
    where n.nspname in ('public', 'private') and c.relkind = 'r'),
-  18, '18 application tables in public/private (C2A.1 adds private.telegram_channels)');
+  25, '25 application tables in public/private (C2A.1 adds private.telegram_channels; E3.8A adds 7 private review tables)');
 select is(
   (select array_agg(n.nspname || '.' || c.relname) from pg_class c
    join pg_namespace n on n.oid = c.relnamespace
@@ -117,10 +117,15 @@ select is(
 select is(
   (select array_agg(n.nspname || '.' || p.proname order by n.nspname, p.proname) from pg_proc p
    join pg_namespace n on n.oid = p.pronamespace
-   where n.nspname in ('public', 'private', 'catalogue_access') and p.prosecdef),
+   where n.nspname in ('public', 'private', 'catalogue_access', 'catalogue_review') and p.prosecdef),
   array['catalogue_access.episode_is_public', 'catalogue_access.movie_is_public',
         'catalogue_access.season_is_public', 'catalogue_access.series_is_public',
+        'catalogue_review.approve_channel_candidate', 'catalogue_review.publish_channel_candidate',
         'private.enforce_watchlist_limit', 'private.handle_new_user',
+        'public.discovery_acquire_consumer', 'public.discovery_catalogue_lookup', 'public.discovery_claim',
+        'public.discovery_complete', 'public.discovery_fail', 'public.discovery_health', 'public.discovery_receive',
+        'public.discovery_review_clear_rights', 'public.discovery_review_correct', 'public.discovery_review_get',
+        'public.discovery_review_list', 'public.discovery_review_reject', 'public.discovery_review_retry', 'public.discovery_vjs',
         'public.ingest_channel_checkpoint', 'public.ingest_record_evaluation', 'public.ingest_upload_fail', 'public.ingest_upload_record',
         'public.ingest_upload_start', 'public.ingest_upload_status',
         'public.record_search', 'public.trending_searches'],

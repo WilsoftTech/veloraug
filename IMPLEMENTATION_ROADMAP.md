@@ -238,7 +238,15 @@ The first Velora UG task is reconciliation, not feature construction.
   - Existing owner publication/current catalogue visibility proved for an approved synthetic uploader-linked review in a disposable database. New direct channel media remains blocked pending the owner-service extension; no invented fingerprints.
   - No Telegram/hosted Supabase calls, production migrations, real movie changes or listener activation. No new dependency.
   - Inventory, evidence, limitations and rollout prerequisites: `docs/E3_8_CHANNEL_DISCOVERY.md`. Next: E3.8A isolated channel-origin SQL and bounded verification contract; deployment is not authorized.
-- Database regression suite: `npm run test:db` (local only; E3.8 uses disposable fixtures rather than resetting developer state).
+- E3.8A direct-channel review and publication (2026-10-10): **PASS (isolated) — ready for controlled rollout.** Migration 13, `20261010090000_direct_channel_publication.sql`, is **local only, not deployed**; hosted still has 12.
+  - **Provenance.** Channel documents are `origin = 'channel'` ingestions with a trusted `tg1-` identity (SHA-256 of chat, message, `file_unique_id` and size). They never carry an uploader fingerprint, and one document has one provenance.
+  - **Gates.** Bounded media evidence (policy v2, gateway reader, never full-file integrity), revision- and identity-bound rights, and reviewer capabilities (review, rights and publish are separate; the table ships empty).
+  - **Approval and publication** are `catalogue_review.*`, outside the Data API, executable only by the new restricted `velora_review_service` (NOLOGIN until the operator configures it). They run through psql from commands the admin page prepares, and end in the shared materializer factored out of the C2B.2H publisher (all 77 C2B.2H assertions unchanged).
+  - **Persistence.** The worker persists through a database adapter, with a single-consumer lease and fenced inspection leases.
+  - **Results.** Unit 845 passed / 27 skipped; isolated SQL 9 suites, 621 assertions; isolated integration 32 passed / 1 skipped, including the end-to-end direct-channel publication; build, typecheck and lint pass.
+  - **External state.** Telegram 0, hosted 0, no listener started.
+  - Record and rollout procedure: `docs/E3_8_CHANNEL_DISCOVERY.md`, "E3.8A".
+- Database regression suite: `npm run test:db` (local Supabase; resets it). Without touching developer state: `npm run test:db:isolated` (disposable container, every migration and suite) and, with `VELORA_E38_ISOLATED_TESTS=true`, `npm run test:integration:isolated`.
 
 ## 2. Product and data rules
 

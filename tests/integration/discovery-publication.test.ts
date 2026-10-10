@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,14 +8,11 @@ import { detectDocument, mediaKey, receive } from "@/lib/discovery/events";
 import { inspectNext } from "@/lib/discovery/pipeline";
 import { decideReview, publishReviewed } from "@/lib/discovery/review";
 import { getMovie, getVj, listFeatured, listMovies, listVjs, searchCatalogue } from "@/lib/catalogue";
+import { ISOLATED_REST, isolatedSql } from "./isolated-env";
 
-function sql(statement: string): string {
-  // Fixed test-only container/database, proven isolated; never use DATABASE_URL or service-role keys.
-  const networks = JSON.parse(execFileSync("docker", ["inspect", "velora-e38-offline", "--format", "{{json .Internal}}"], { encoding: "utf8" }));
-  if (networks !== true || process.env.VELORA_E38_ISOLATED_TESTS !== "true") throw new Error("test_database_isolation_required");
-  return execFileSync("docker", ["exec", "-i", "velora-e38-db", "psql", "-X", "-U", "postgres", "-d", "e38_offline", "-v", "ON_ERROR_STOP=1", "-At"], { input: statement, encoding: "utf8" });
-}
-describe.skipIf(process.env.VELORA_E38_ISOLATED_TESTS !== "true" || process.env.NEXT_PUBLIC_SUPABASE_URL !== "http://127.0.0.1:54329")("discovery publication through existing owner SQL and catalogue queries", () => {
+// Disposable isolated database (scripts/isolated-db.mjs); never DATABASE_URL or service-role keys.
+const sql = (statement: string): string => `${isolatedSql(statement)}\n`;
+describe.skipIf(process.env.VELORA_E38_ISOLATED_TESTS !== "true" || process.env.NEXT_PUBLIC_SUPABASE_URL !== ISOLATED_REST)("discovery publication through existing owner SQL and catalogue queries", () => {
   it("approved uploader-linked fixture becomes visible; drafts and existing titles remain unchanged", async () => {
     const directory = await mkdtemp(join(tmpdir(), "velora-e38-db-"));
     // Repeatable after an interrupted TEST run. Fixed synthetic identities, isolated database only.
@@ -25,7 +21,8 @@ describe.skipIf(process.env.VELORA_E38_ISOLATED_TESTS !== "true" || process.env.
       delete from private.metadata_match_candidates where ingestion_event_id in (select id from private.ingestion_events where source_fingerprint='sf1-${"e".repeat(64)}');
       delete from private.ingestion_events where source_fingerprint='sf1-${"e".repeat(64)}';
       delete from private.telegram_media where chat_id=-1009990001112;
-      delete from private.telegram_channels where chat_id=-1009990001112;
+      delete from private.discovery_cursors where bot_type='movie';
+      delete from private.telegram_channels where bot_type='movie';
       delete from public.vjs where slug='vj-e38-fixture';`);
     const before = sql("select coalesce(jsonb_agg(to_jsonb(m) order by m.id), '[]') from public.movies m;").trim();
     try {

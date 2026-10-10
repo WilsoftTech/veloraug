@@ -16,6 +16,11 @@ export type DiscoveryEvent = z.infer<typeof eventSchema>;
 export const evidenceSchema = z.strictObject({
   mediaKey: key, container: z.boolean(), gateway: z.boolean(), browser: z.boolean(),
   accessible: z.boolean(), checkedAt: instant, reference: z.string().min(1).max(200),
+  // Bounded verification detail (E3.8A). Absent in E3.8 fixtures; never a full-file integrity claim.
+  identity: z.string().regex(/^tg1-[a-f0-9]{64}$/).optional(),
+  mediaClass: z.string().max(40).optional(), reasons: z.array(z.string().max(100)).max(50).optional(),
+  video: z.string().max(40).nullable().optional(), audio: z.string().max(40).nullable().optional(),
+  bytesRead: z.number().int().nonnegative().optional(),
 });
 export type MediaEvidence = z.infer<typeof evidenceSchema>;
 const auditSchema = z.strictObject({ at: instant, actor: z.string().min(1).max(128), action: z.string().max(100), revision: z.number().int().positive() });
@@ -36,6 +41,8 @@ export const candidateSchema = z.strictObject({
   uploaderSource: z.strictObject({ fingerprint: z.string().regex(/^sf1-[0-9a-f]{64}$/), mediaKey: key, evaluatedTmdbId: z.number().int().positive(), evaluatedVjId: z.number().int().positive() }).nullable(),
   duplicateOf: key.nullable(), publication: z.strictObject({ movieSlug: z.string().max(300), versionId: z.number().int().positive() }).nullable(),
   audit: z.array(auditSchema).max(500),
+  // Database-backed review only: the gates the database itself reports (authoritative there).
+  gates: z.array(z.string().max(100)).max(50).optional(),
 });
 export type ReviewCandidate = z.infer<typeof candidateSchema>;
 export const inboxSchema = z.strictObject({

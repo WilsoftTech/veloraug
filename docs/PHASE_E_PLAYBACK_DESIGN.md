@@ -1844,3 +1844,12 @@ Checks: full unit suite **37 files, 758 tests passed, 27 skipped**; reviewed-yea
 **PARTIAL; production disabled.** The durable discovery inbox, replay worker, revision-bound admin UI, independent rights/readiness gates and bounded reconciliation are implemented offline. An approved synthetic uploader-linked review passed through the current owner functions in a disposable database and appeared through unchanged catalogue queries. New direct channel media remains blocked pending the smallest owner-service extension; captions never fabricate fingerprints.
 
 Inventory, contracts, validation, remaining channel-origin SQL/verification work and rollout prerequisites: [E3_8_CHANNEL_DISCOVERY.md](E3_8_CHANNEL_DISCOVERY.md). No Telegram/hosted Supabase calls, real publication, production migration or listener activation occurred. Call of Heroes, On The Hunt and Fuze were not modified. Stop before production rollout.
+
+## E3.8A — Direct-channel review and publication (2026-10-10)
+
+**PASS (isolated); ready for controlled rollout. Migration 13 is local only.**
+- Movies posted directly to the Telegram Movies channel get a trusted `tg1-` document identity and bounded media evidence. This applies the same E3.5 policy v2 through the gateway's `MediaReader` and never claims full-file integrity.
+- Review uses explicit revision-bound rights, a reviewer capability check, and publication through the shared owner materializer that uploader publication also uses.
+- Playback is unchanged: published-only gateway resolver, E2 entitlement, 10-minute stream capability. The isolated end-to-end test proves anonymous denial, signed-in allowance and resolver identity for a channel-published version.
+
+Record, grants, results and the rollout procedure: [E3_8_CHANNEL_DISCOVERY.md](E3_8_CHANNEL_DISCOVERY.md), "E3.8A". No Telegram or hosted Supabase calls; Call of Heroes, On The Hunt and Fuze untouched.
