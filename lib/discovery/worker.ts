@@ -112,3 +112,36 @@ export async function runReplay(store: InboxStore | DiscoveryPersistence, provid
   if (failures) throw new Error("worker_persistence_or_processing_failure");
   return metrics;
 }
+
+/**
+ * A bounded, operator-approved history range as reconciliation pages (E3.8B).
+ * `fetch` returns the documents of exactly the message ids asked for, in the
+ * Bot API channel_post shape, and how many of them it could not read. Ids that
+ * are simply absent are never treated as deletions: reconciliation is complete
+ * only when every id in the range was asked for and none was inaccessible.
+ * The cursor is the next message id, so an interrupted run resumes where it
+ * stopped. At most 5,000 ids per range and 100 per page.
+ */
+export function boundedHistoryProvider(range: { fromMessageId: number; toMessageId: number }, fetch: (messageIds: readonly number[], signal: AbortSignal) => Promise<{ posts: unknown[]; inaccessible: number }>): ReconciliationProvider {
+  const { fromMessageId: from, toMessageId: to } = range;
+  if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 1 || to < from || to - from >= 5000) throw new Error("history_range_invalid");
+  return {
+    async page(cursor, limit, signal) {
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("history_limit_invalid");
+      let start = from;
+      if (cursor !== null) {
+        const match = /^m:([0-9]{1,15})$/.exec(cursor);
+        // A cursor from another range (or another kind of reconciliation) is never reinterpreted.
+        if (!match || Number(match[1]) < from || Number(match[1]) > to + 1) throw new Error("history_cursor_foreign");
+        start = Number(match[1]);
+      }
+      if (start > to) return { updates: [], next: null, complete: true, inaccessible: 0 };
+      const end = Math.min(to, start + limit - 1);
+      const ids = Array.from({ length: end - start + 1 }, (_, index) => start + index);
+      const result = await fetch(ids, signal);
+      if (result.posts.length > ids.length || !Number.isInteger(result.inaccessible) || result.inaccessible < 0) throw new Error("history_fetch_invalid");
+      const complete = end === to;
+      return { updates: result.posts.map((post) => ({ channel_post: post })), next: complete ? null : `m:${end + 1}`, complete, inaccessible: result.inaccessible };
+    },
+  };
+}

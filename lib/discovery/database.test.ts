@@ -179,17 +179,28 @@ describe("owner commands (psql only)", () => {
 });
 
 describe("Bot API update provider (not started; fakes only)", () => {
-  it("polls channel posts after the committed checkpoint and never drops pending updates", async () => {
-    const call = vi.fn(async () => ({ ok: true, result: [{ update_id: 7 }, { update_id: 8, channel_post: {} }] }));
-    const updates = await botApiUpdateProvider(call).batch(7, 100, new AbortController().signal);
+  it("polls after the committed checkpoint only", async () => {
+    const poll = vi.fn(async () => ({ status: "ok" as const, updates: [{ update_id: 7 }, { update_id: 8, channel_post: {} }] }));
+    const updates = await botApiUpdateProvider(poll).batch(7, 100, new AbortController().signal);
     expect(updates).toEqual([{ update_id: 8, channel_post: {} }]);
-    expect(call).toHaveBeenCalledWith("getUpdates", { offset: 8, limit: 100, timeout: 25, allowed_updates: ["channel_post", "edited_channel_post"] }, expect.any(AbortSignal));
-    expect(JSON.stringify(call.mock.calls)).not.toMatch(/drop_pending_updates|deleteWebhook/);
+    expect(poll).toHaveBeenCalledWith({ offset: 8, limit: 100, timeoutSeconds: 25 }, expect.any(AbortSignal));
   });
-  it("stops on a competing consumer or a malformed reply", async () => {
-    const conflict = botApiUpdateProvider(async () => { throw Object.assign(new Error("Conflict: terminated by other getUpdates request"), { status: 409 }); });
-    await expect(conflict.batch(null, 100, new AbortController().signal)).rejects.toThrow("telegram_update_consumer_conflict");
-    await expect(botApiUpdateProvider(async () => ({ ok: false })).batch(null, 100, new AbortController().signal)).rejects.toThrow("telegram_poll_invalid");
-    expect(() => botApiUpdateProvider(async () => ({}), { timeoutSeconds: 120 })).toThrow("poll_timeout_invalid");
+  it("refuses to poll without an explicit cursor offset (never the whole pending queue)", async () => {
+    const poll = vi.fn(async () => ({ status: "ok" as const, updates: [] }));
+    await expect(botApiUpdateProvider(poll).batch(null, 100, new AbortController().signal)).rejects.toMatchObject({ code: "discovery_cursor_offset_required", fatal: true });
+    expect(poll).not.toHaveBeenCalled();
+  });
+  it("a competing consumer or a refused bot is fatal; transient failures and rate limits are retryable", async () => {
+    const signal = new AbortController().signal;
+    await expect(botApiUpdateProvider(async () => ({ status: "conflict" })).batch(1, 100, signal)).rejects.toMatchObject({ code: "telegram_update_consumer_conflict", fatal: true });
+    await expect(botApiUpdateProvider(async () => ({ status: "blocked", code: "bot_identity_mismatch" })).batch(1, 100, signal)).rejects.toMatchObject({ code: "bot_identity_mismatch", fatal: true });
+    await expect(botApiUpdateProvider(async () => ({ status: "transient", code: "bot_api_unreachable" })).batch(1, 100, signal)).rejects.toMatchObject({ code: "bot_api_unreachable", fatal: false });
+    await expect(botApiUpdateProvider(async () => ({ status: "rate_limited", retryAfterSeconds: 7 })).batch(1, 100, signal)).rejects.toMatchObject({ code: "telegram_rate_limited", fatal: false, retryAfterSeconds: 7 });
+    expect(() => botApiUpdateProvider(async () => ({ status: "ok", updates: [] }), { timeoutSeconds: 120 })).toThrow("poll_timeout_invalid");
+  });
+  it("returns nothing when shut down during the poll", async () => {
+    const controller = new AbortController();
+    const provider = botApiUpdateProvider(async () => { controller.abort(); return { status: "transient", code: "get_updates_timeout" }; });
+    expect(await provider.batch(1, 100, controller.signal)).toEqual([]);
   });
 });

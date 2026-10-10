@@ -1,5 +1,7 @@
 import { MEDIA_POLICY_VERSION, audioStreams, classifyMedia, inspectionFromProbe, playableVideo, readMp4Layout, type MediaClass } from "@/lib/ingestion/media";
 import type { ReadRange } from "@/lib/ingestion/fingerprint";
+import { channelIdentity } from "@/lib/discovery/events";
+import type { InspectionPorts } from "@/lib/discovery/pipeline";
 
 /**
  * Bounded verification of a document posted directly to the Movies channel
@@ -9,7 +11,8 @@ import type { ReadRange } from "@/lib/ingestion/fingerprint";
  *
  * - one 16-byte header per top-level MP4 box (readMp4Layout), which also proves
  *   the boxes cover exactly the size Telegram reports;
- * - ftyp..moov (the movie index), at most `maxHeadBytes`, handed to ffprobe;
+ * - ftyp..moov plus at most 64 KiB of initial media samples, together capped
+ *   at `maxHeadBytes`, handed to ffprobe (index alone omits codec profiles);
  * - the last bytes of the file, to prove the document is readable to its end.
  *
  * It never reads the media data in between, so it never claims full-file
@@ -45,7 +48,7 @@ export interface ChannelMediaEvidence {
 export interface VerificationPorts {
   /** Bounded reads of this exact document. */
   read: ReadRange;
-  /** ffprobe JSON (`-show_format -show_streams`) of the head bytes; headers only. */
+  /** ffprobe JSON (`-show_format -show_streams`) of bounded index/sample bytes. */
   probe(head: Uint8Array): Promise<unknown>;
   /** True when `read` is the gateway's MediaReader: what verifies is what the gateway serves. */
   gatewayCompatible: boolean;
@@ -98,17 +101,19 @@ export async function verifyChannelMedia(
   const headEnd = headerOffsets[moov + 1] ?? document.sizeBytes;
   if (headEnd > budget.maxHeadBytes) return unverified(["moov_over_budget"], { container: "mp4" });
 
-  // 2. The head (ftyp..moov) and the tail: both must be readable in full.
+  // 2. Include a small sample after the index: real ffprobe needs packets to
+  // identify H.264 pixel format/profile and AAC profile. Unknown stays blocked.
+  const probeEnd = Math.min(document.sizeBytes, budget.maxHeadBytes, headEnd + 64 * 1024);
   let head: Uint8Array;
   let tail: Uint8Array;
   const tailLength = Math.min(budget.tailBytes, document.sizeBytes);
   try {
-    head = await counted(0, headEnd);
+    head = await counted(0, probeEnd);
     tail = await counted(document.sizeBytes - tailLength, tailLength);
   } catch {
     return unverified(["media_unreadable"], { container: "mp4" });
   }
-  const accessible = head.byteLength === headEnd && tail.byteLength === tailLength;
+  const accessible = head.byteLength === probeEnd && tail.byteLength === tailLength;
   if (!accessible) return unverified(["media_unreadable"], { container: "mp4" });
 
   // 3. The existing policy on the probed index. The probe saw only the head, so
@@ -135,5 +140,30 @@ export async function verifyChannelMedia(
     accessible, gateway_compatible: ports.gatewayCompatible,
     playback_ready: verdict.class === "canonical" && accessible && ports.gatewayCompatible,
     bytes_read: bytesRead,
+  };
+}
+
+/** The exact document a verification reads: its private Telegram location and declared size. Never logged. */
+export interface ChannelDocument { chatId: number; messageId: number; fileUniqueId: string; sizeBytes: number; mimeType: string | null }
+
+/**
+ * The inspection `media` port for the discovery worker: bounded verification of
+ * the claimed document through `open` (in production, lib/media-gateway/range-reader.ts
+ * over the gateway's MediaReader) and `probe` (ffprobe on the head).
+ *
+ * It never throws for the document's sake: an unreachable reader, a missing or
+ * replaced document and a failed probe are all recorded as unverified evidence
+ * for that identity. The candidate then waits at the media gate, and a later
+ * re-inspection supersedes the record. Duplicates and provenance are decided by
+ * the database, never here.
+ */
+export function channelMediaPort(open: (document: ChannelDocument) => ReadRange, probe: VerificationPorts["probe"], options: { gatewayCompatible?: boolean; budget?: { maxHeadBytes: number; tailBytes: number } } = {}): InspectionPorts["media"] {
+  return async (event) => {
+    const identity = channelIdentity(event);
+    const sizeBytes = event.media.size;
+    if (!identity || !sizeBytes) return { duplicateOf: null, source: null, evidence: null, verification: null };
+    const read = open({ chatId: event.channelId, messageId: event.messageId, fileUniqueId: event.media.uniqueId, sizeBytes, mimeType: event.media.mime });
+    const verification = await verifyChannelMedia({ identity, sizeBytes }, { read, probe, gatewayCompatible: options.gatewayCompatible ?? true }, options.budget ?? DEFAULT_VERIFICATION_BUDGET);
+    return { duplicateOf: null, source: null, evidence: null, verification };
   };
 }

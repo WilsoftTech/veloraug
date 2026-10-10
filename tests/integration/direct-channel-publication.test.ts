@@ -117,7 +117,7 @@ describe.skipIf(process.env.VELORA_E38_ISOLATED_TESTS !== "true" || process.env.
     expect(detail.candidate).toMatchObject({ status: "awaiting_identity", identity: "proposed", tmdbId: TMDB, title: "Direct Channel Film", year: 2025, vjText: "Direct", relation: "new_movie" });
     expect(detail.candidate.vjId).toBe(Number(isolatedSql(`select id from public.vjs where slug = 'vj-direct'`)));
     expect(detail.candidate.evidence).toMatchObject({ identity: channelIdentity(event), mediaClass: "canonical", video: "h264", audio: "aac", browser: true, gateway: true, accessible: true });
-    expect(detail.candidate.evidence!.bytesRead).toBeLessThan(16 * 1024);
+    expect(detail.candidate.evidence!.bytesRead).toBeLessThan(80 * 1024);
     expect(detail.candidate.gates).toEqual(["identity_unconfirmed", "rights_clearance_required"]);
     expect(JSON.stringify(detail)).not.toContain("synthetic-bot-file");
   });

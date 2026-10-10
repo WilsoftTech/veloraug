@@ -8,17 +8,16 @@ const ports = (file: ReturnType<typeof virtualMp4>, probe: (head: Uint8Array) =>
   ({ read: file.read, probe: vi.fn(probe), gatewayCompatible: true });
 
 describe("bounded channel media verification (E3.8A)", () => {
-  it("verifies a canonical fast-start MP4 from its index and tail only", async () => {
+  it("verifies a canonical fast-start MP4 from a bounded index, sample and tail", async () => {
     const file = virtualMp4();
     const port = ports(file);
     const evidence = await verifyChannelMedia({ identity, sizeBytes: file.size }, port);
     expect(evidence).toEqual({ identity, method: VERIFICATION_METHOD, policy_version: MEDIA_POLICY_VERSION, media_class: "canonical", reasons: [],
       container: "mp4", video_codec: "h264", audio_codec: "aac", accessible: true, gateway_compatible: true, playback_ready: true, bytes_read: evidence.bytes_read });
-    // A ~1 GB document costs a few kilobytes: headers, the index and the last 4 KiB.
-    expect(evidence.bytes_read).toBeLessThan(16 * 1024);
+    // A ~1 GB document costs under 80 KiB: index, 64 KiB sample, headers and tail.
+    expect(evidence.bytes_read).toBeLessThan(80 * 1024);
     expect(file.reads.every((read) => read.offset < file.head.length || read.offset >= file.size - 4096)).toBe(true);
-    // ffprobe sees exactly ftyp..moov, never media data.
-    expect((port.probe.mock.calls[0][0] as Uint8Array).length).toBe(24 + 2048);
+    expect((port.probe.mock.calls[0][0] as Uint8Array).length).toBe(24 + 2048 + 64 * 1024);
   });
 
   it("never records more than a bounded, playback-policy claim", async () => {

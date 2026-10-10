@@ -761,3 +761,52 @@ describe("real adapter over longRunningFetch against a loopback Bot API (C2B.2F)
     expect(await api.sendDocument(request())).toEqual({ status: "failed", code: "bot_api_unreachable", retryable: true, retryAfterSeconds: null });
   });
 });
+
+describe("Movies bot update ownership and polling (E3.8B; read-only)", () => {
+  const bodyOf = (init: RequestInit) => JSON.parse(String(init.body));
+
+  it("reports only whether a webhook is set and the pending count (never the URL)", async () => {
+    const { api, fetch } = client(async () => json({ ok: true, result: { url: "https://hooks.example.invalid/secret-path", has_custom_certificate: false, pending_update_count: 3 } }));
+    const ownership = await api.updateOwnership();
+    expect(ownership).toEqual({ status: "ok", webhookSet: true, pendingUpdateCount: 3 });
+    expect(JSON.stringify(ownership)).not.toContain("secret-path");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(String(fetch.mock.calls[0][0])).toMatch(new RegExp(`/bot${MOVIE_TOKEN}/getWebhookInfo$`));
+  });
+
+  it("polls channel posts and edits from an explicit offset; never drops pending updates or touches a webhook", async () => {
+    const { api, fetch } = client(async () => json({ ok: true, result: [{ update_id: 8, channel_post: { message_id: 1 } }] }));
+    expect(await api.pollChannelUpdates({ offset: 8, limit: 100, timeoutSeconds: 25 }, new AbortController().signal)).toEqual({ status: "ok", updates: [{ update_id: 8, channel_post: { message_id: 1 } }] });
+    expect(String(fetch.mock.calls[0][0])).toMatch(/\/getUpdates$/);
+    expect(bodyOf(fetch.mock.calls[0][1])).toEqual({ offset: 8, limit: 100, timeout: 25, allowed_updates: ["channel_post", "edited_channel_post"] });
+    // A peek (offset null) sends no offset at all, so it confirms nothing.
+    await api.pollChannelUpdates({ offset: null, limit: 100, timeoutSeconds: 0 }, new AbortController().signal);
+    expect(bodyOf(fetch.mock.calls[1][1])).toEqual({ limit: 100, timeout: 0, allowed_updates: ["channel_post", "edited_channel_post"] });
+    expect(JSON.stringify(fetch.mock.calls)).not.toMatch(/drop_pending_updates|deleteWebhook|setWebhook/);
+  });
+
+  it("maps a competing consumer to `conflict` and refuses invalid parameters before the network", async () => {
+    const { api } = client(async () => json({ ok: false, error_code: 409, description: "Conflict: terminated by other getUpdates request" }, 409));
+    expect(await api.pollChannelUpdates({ offset: 1, limit: 100, timeoutSeconds: 0 }, new AbortController().signal)).toEqual({ status: "conflict" });
+    const offline = client(noNetwork);
+    expect(await offline.api.pollChannelUpdates({ offset: 1, limit: 101, timeoutSeconds: 0 }, new AbortController().signal)).toEqual({ status: "blocked", code: "poll_parameters_invalid" });
+    expect(await offline.api.pollChannelUpdates({ offset: -1, limit: 10, timeoutSeconds: 0 }, new AbortController().signal)).toEqual({ status: "blocked", code: "poll_parameters_invalid" });
+    expect(offline.identity).not.toHaveBeenCalled();
+  });
+
+  it("refuses a bot that is not on the local server, and a mismatched identity, without polling", async () => {
+    const cloud = client(noNetwork, regularFile, config({ ...ENV, TELEGRAM_BOT_API_LOCAL_BOTS: "series" }));
+    expect(await cloud.api.pollChannelUpdates({ offset: 1, limit: 10, timeoutSeconds: 0 }, new AbortController().signal)).toEqual({ status: "blocked", code: "bot_not_on_local_server" });
+    expect(await cloud.api.updateOwnership()).toEqual({ status: "blocked", code: "bot_not_on_local_server" });
+    const wrong = client(noNetwork, regularFile, config(), async () => json({ ok: true, result: { is_bot: true, id: 999, username: "someone_else_bot" } }));
+    expect(await wrong.api.pollChannelUpdates({ offset: 1, limit: 10, timeoutSeconds: 0 }, new AbortController().signal)).toEqual({ status: "blocked", code: "bot_identity_mismatch" });
+    expect(wrong.fetch).not.toHaveBeenCalled();
+  });
+
+  it("an unreachable server and a malformed reply never look like an empty batch", async () => {
+    const down = client(async () => { throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } }); });
+    expect(await down.api.pollChannelUpdates({ offset: 1, limit: 10, timeoutSeconds: 0 }, new AbortController().signal)).toEqual({ status: "transient", code: "bot_api_unreachable" });
+    const odd = client(async () => json({ ok: true, result: { not: "a list" } }));
+    expect(await odd.api.pollChannelUpdates({ offset: 1, limit: 10, timeoutSeconds: 0 }, new AbortController().signal)).toEqual({ status: "blocked", code: "get_updates_unexpected_reply" });
+  });
+});

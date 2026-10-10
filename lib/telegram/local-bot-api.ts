@@ -326,7 +326,7 @@ function connectCode(error: unknown): string | null {
   return typeof cause?.code === "string" ? cause.code : null;
 }
 
-async function call(config: LocalBotApiConfig, deps: TransportDeps, token: string, method: string, body: object, timeoutMs: number, via: "request" | "media" = "request"): Promise<Reply> {
+async function call(config: LocalBotApiConfig, deps: TransportDeps, token: string, method: string, body: object, timeoutMs: number, via: "request" | "media" = "request", cancel?: AbortSignal): Promise<Reply> {
   const send = via === "media" ? deps.mediaFetch : deps.fetch;
   let response: Response;
   try {
@@ -334,7 +334,7 @@ async function call(config: LocalBotApiConfig, deps: TransportDeps, token: strin
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: cancel ? AbortSignal.any([AbortSignal.timeout(timeoutMs), cancel]) : AbortSignal.timeout(timeoutMs),
     });
   } catch (error) {
     // Only a code crosses this line: fetch errors are never echoed, so no URL
@@ -444,7 +444,26 @@ export interface LocalBotApiClient {
   postRecoveryMarker(kind: CatalogueKind, text: string): Promise<MarkerPostResult>;
   /** A channel probe for reconcileUpload(). */
   probeChannelMessage(kind: CatalogueKind, messageId: number): Promise<ChannelProbeResult>;
+  /**
+   * Read-only (getWebhookInfo), Movies bot: whether a webhook owns the bot's
+   * updates, and how many are pending. Discovery (E3.8B) checks this before it
+   * polls; it never sets or deletes a webhook.
+   */
+  updateOwnership(): Promise<UpdateOwnership>;
+  /**
+   * Read-only long poll (getUpdates), Movies bot: channel posts and their edits
+   * only. `offset` null reads pending updates without confirming any; a number
+   * confirms everything below it, so pass the durable checkpoint + 1 only. It
+   * never asks Telegram to drop pending updates. A 409 means another consumer
+   * (a second poller, or a webhook) owns the updates.
+   */
+  pollChannelUpdates(params: { offset: number | null; limit: number; timeoutSeconds: number }, cancel: AbortSignal): Promise<ChannelUpdates>;
 }
+
+export type UpdateOwnership = { status: "ok"; webhookSet: boolean; pendingUpdateCount: number } | RecoveryCallFailure;
+export type ChannelUpdates = { status: "ok"; updates: unknown[] } | { status: "conflict" } | RecoveryCallFailure;
+const webhookInfo = z.object({ url: z.string(), pending_update_count: z.number().int().nonnegative() });
+const updateList = z.array(z.object({ update_id: z.number().int().nonnegative() }).passthrough()).max(100);
 
 export function createLocalBotApiClient(config: LocalBotApiConfig, deps: TransportDeps): LocalBotApiClient {
   const verified = new Set<CatalogueKind>();
@@ -496,6 +515,33 @@ export function createLocalBotApiClient(config: LocalBotApiConfig, deps: Transpo
       if (reply.kind === "uncertain") return { status: "uncertain", code: reply.code };
       if (reply.kind === "error") return refusal(reply);
       return mapSentMessage(reply.result, request, preflight.target);
+    },
+
+    async updateOwnership() {
+      const unverified = await verifyLocalBot("movie");
+      if (unverified) return unverified;
+      const reply = await call(config, deps, config.bots.movie.token, "getWebhookInfo", {}, deps.requestTimeoutMs);
+      if (reply.kind !== "ok") return recoveryFailure(reply, "webhook_info");
+      const info = webhookInfo.safeParse(reply.result);
+      if (!info.success) return { status: "blocked", code: "webhook_info_unexpected_reply" };
+      // Only whether one is set leaves this module: a webhook URL can embed a secret path.
+      return { status: "ok", webhookSet: info.data.url !== "", pendingUpdateCount: info.data.pending_update_count };
+    },
+
+    async pollChannelUpdates(params, cancel) {
+      const { offset, limit, timeoutSeconds } = params;
+      if ((offset !== null && (!Number.isSafeInteger(offset) || offset < 0)) || !Number.isInteger(limit) || limit < 1 || limit > 100
+        || !Number.isInteger(timeoutSeconds) || timeoutSeconds < 0 || timeoutSeconds > 50) return { status: "blocked", code: "poll_parameters_invalid" };
+      const unverified = await verifyLocalBot("movie");
+      if (unverified) return unverified;
+      const reply = await call(config, deps, config.bots.movie.token, "getUpdates", {
+        ...(offset === null ? {} : { offset }), limit, timeout: timeoutSeconds, allowed_updates: ["channel_post", "edited_channel_post"],
+      }, (timeoutSeconds + 15) * 1000, "request", cancel);
+      if (reply.kind === "error" && reply.code === 409) return { status: "conflict" };
+      if (reply.kind !== "ok") return recoveryFailure(reply, "get_updates");
+      const updates = updateList.safeParse(reply.result);
+      if (!updates.success) return { status: "blocked", code: "get_updates_unexpected_reply" };
+      return { status: "ok", updates: updates.data };
     },
 
     /**

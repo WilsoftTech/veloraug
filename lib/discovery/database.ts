@@ -75,7 +75,19 @@ const health = z.object({
   candidates: z.number(), pending: z.number(), awaiting_review: z.number(), approved: z.number(), published: z.number(),
   blocked: z.number(), duplicates: z.number(), failed: z.number(), media_blocked: z.number(), rights_blocked: z.number(),
   reconciliation_incomplete: z.boolean(), reconciliation_checked_at: z.string().nullable(),
+  // E3.8B (migration 14): lag and liveness. Absent on a database that has only migration 13.
+  oldest_pending_at: z.string().nullable().optional(), cursor_initialized: z.boolean().optional(),
+  consumer_heartbeat_at: z.string().nullable().optional(), consumer_active: z.boolean().optional(), last_delivery_at: z.string().nullable().optional(),
 });
+
+/** Counts and ages only: what a monitor needs, with no channel, message, title or account identifier. */
+export interface DiscoveryHealth {
+  candidates: number; pending: number; awaitingReview: number; approved: number; published: number; blocked: number; duplicates: number; failed: number;
+  mediaBlocked: number; rightsBlocked: number; cursorInitialized: boolean; consumerActive: boolean;
+  /** Seconds since the last recorded delivery, the consumer's last lease renewal, the oldest uninspected candidate, the last reconciliation. Null: never. */
+  lastDeliveryAgeSeconds: number | null; heartbeatAgeSeconds: number | null; oldestPendingAgeSeconds: number | null; reconciliationAgeSeconds: number | null;
+  reconciliationIncomplete: boolean;
+}
 const CODE_TOKEN = /^[a-z0-9_]{1,100}$/;
 
 /** One Bot API update (or enumerated history entry) as the delivery discovery_receive records. */
@@ -124,7 +136,7 @@ const toTmdb = (snapshot: ReviewCandidate["choices"][number]) => ({ tmdbId: snap
  * recorded only while it is held (a second worker fails with
  * discovery_consumer_busy instead of consuming the same updates).
  */
-export function databasePersistence(rpc: DiscoveryRpc, options: { channelId: number; consumer?: string; leaseSeconds?: number; inspectionLeaseSeconds?: number }): DiscoveryPersistence & { consumer: string } {
+export function databasePersistence(rpc: DiscoveryRpc, options: { channelId: number; consumer?: string; leaseSeconds?: number; inspectionLeaseSeconds?: number }): DiscoveryPersistence & { consumer: string; release(): Promise<void>; health(now: Date): Promise<DiscoveryHealth> } {
   const consumer = options.consumer ?? randomUUID();
   const leaseSeconds = options.leaseSeconds ?? 120;
   const inspectionLease = options.inspectionLeaseSeconds ?? 120;
@@ -135,8 +147,20 @@ export function databasePersistence(rpc: DiscoveryRpc, options: { channelId: num
     const deliveries = updates.map((raw) => toDelivery(raw, options.channelId, reconciliation !== null));
     return counts.parse(await call(rpc, "discovery_receive", { p_token: consumer, p_chat_id: options.channelId, p_deliveries: deliveries, p_reconciliation: reconciliation }));
   };
+  const age = (value: string | null | undefined, now: Date) => (value ? Math.max(0, Math.floor((now.getTime() - Date.parse(value)) / 1000)) : null);
   return {
     consumer,
+    /** Gives the consumer lease back (graceful shutdown). Another consumer's lease is never touched. */
+    async release() { await call(rpc, "discovery_release_consumer", { p_token: consumer }); },
+    async health(now) {
+      const h = health.parse(await call(rpc, "discovery_health", {}));
+      return { candidates: h.candidates, pending: h.pending, awaitingReview: h.awaiting_review, approved: h.approved, published: h.published, blocked: h.blocked,
+        duplicates: h.duplicates, failed: h.failed, mediaBlocked: h.media_blocked, rightsBlocked: h.rights_blocked,
+        cursorInitialized: h.cursor_initialized ?? false, consumerActive: h.consumer_active ?? false,
+        lastDeliveryAgeSeconds: age(h.last_delivery_at, now), heartbeatAgeSeconds: age(h.consumer_heartbeat_at, now),
+        oldestPendingAgeSeconds: age(h.oldest_pending_at, now), reconciliationAgeSeconds: age(h.reconciliation_checked_at, now),
+        reconciliationIncomplete: h.reconciliation_incomplete };
+    },
     async checkpoint() { return (await cursor()).update_offset; },
     async receive(updates) { return record(updates, null); },
     async reconciliation() {
@@ -293,6 +317,8 @@ export function createReviewClient(rpc: DiscoveryRpc) {
     async clearRights(key: string, revision: number, reference: string) {
       return toCandidate(await call(rpc, "discovery_review_clear_rights", { p_key: key, p_revision: revision, p_reference: reference }));
     },
+    /** Withdraws the clearance of an unpublished candidate (rights capability): a new revision, so an approval that relied on it cannot publish. */
+    async revokeRights(key: string, revision: number) { return toCandidate(await call(rpc, "discovery_review_revoke_rights", { p_key: key, p_revision: revision })); },
     async reject(key: string, revision: number) { return toCandidate(await call(rpc, "discovery_review_reject", { p_key: key, p_revision: revision })); },
     async retry(key: string, revision: number) { return toCandidate(await call(rpc, "discovery_review_retry", { p_key: key, p_revision: revision })); },
   };

@@ -1,0 +1,534 @@
+# E3.8B controlled production rollout preflight
+
+Date: 2026-10-10, Africa/Nairobi. **Offline preflight only. Production is not activated.**
+No production backup, live consumer ownership, hosted schema state, real rights,
+reviewer enrollment or publication is claimed verified here.
+
+## Authorization gates and stop conditions
+
+Each gate needs a new, explicit authorization naming the production project,
+operator, scope and maintenance window. Authorization never transfers between gates.
+
+| Gate | Required explicit approval | Excluded |
+| --- | --- | --- |
+| A: database preparation | Verify/create the production backup; rehearse its restoration to an approved isolated target; apply migration 13. This release also needs explicit approval of migrations 14 and 15 before its new worker can be used. | Telegram reads, reviewer enrollment, rights decisions and publication |
+| B: live read-only detection | Confirm bot/channel identity and live update ownership; provision the restricted worker credential and its dedicated reader-session file; initialize one approved cursor; configure and start one worker; read newly delivered Movies events. Bounded media reads need the inspection scope named explicitly. | Telegram uploads/forwards/deletes, webhook modifications, rights, approval and publication |
+| C: one controlled publication | Enroll identified reviewer accounts; record the identified movie's real rights decision; approve and publish its exact candidate/revision; refresh and verify public pages and authorized playback. | Other movies or bulk/automatic publication |
+
+Stop on an unexpected project, migration-history mismatch, unverified backup,
+lock timeout, unexpected grants/definer owner, duplicate provenance, nonempty
+reviewer table before authorized enrollment, unknown Telegram consumer, any
+webhook, 409 conflict, uninitialized cursor, identity/channel mismatch,
+missing/stale media evidence, unconfirmed rights, revoked capability, changed
+revision, uncertain publication, unreachable gateway, or leaked credentials.
+Stop the worker without deleting its cursor, deliveries, evidence or audits.
+Never grant capabilities or substitute an owner/service credential to fix a refusal.
+
+## Baseline and architecture
+
+Starting branch `phase-a-foundation`, HEAD `0e44382ee55df4d80f0fc37df7be1b3ad7bf5e03`.
+Remote `veloraug` is `https://github.com/WilsoftTech/veloraug.git`.
+The E3.8A checkpoint reports 845 unit tests, 621 database assertions and 32
+integration tests. Those are historical results. At preflight entry the working
+tree already contained related E3.8B work and unrelated design/document changes.
+Do not overwrite or stage unrelated work.
+
+```text
+Movies bot on self-hosted Bot API
+  -> one getUpdates consumer, fenced by durable PostgreSQL lease
+  -> discovery deliveries + update cursor committed together
+  -> existing ingestion event / Telegram document / channel review
+  -> catalogue-first identity + TMDB suggestion + existing VJ resolution
+  -> gateway-compatible MTProto bounded verification
+  -> own-session reviewer corrections + independent rights clearance
+  -> restricted psql approval and publication, explicit actor + revision
+  -> shared owner materializer -> public catalogue -> website
+```
+
+`services/media-gateway/discovery.mts` is a separate persistent Node 24 process;
+it reuses the discovery worker, database adapter, Bot API client, MTProto reader
+and FFmpeg tool adapter. It is never a Vercel Route Handler. It cannot publish.
+`VELORA_DISCOVERY_INSPECTION=disabled` records events without inspecting them;
+`bounded` enables the existing inspection pipeline. No historical enumeration
+is wired into this live process.
+
+Deploy the website to Vercel, database to Supabase, and worker to a persistent
+Linux host using `infra/discovery/velora-discovery.service`. Keep Bot API behind
+a private authenticated HTTPS origin or loopback. The existing gateway remains
+a separately authorized playback service with its original published-only
+resolver, entitlement checks and signed ten-minute stream capabilities.
+Next.js receives no direct PostgreSQL client or worker/review-service secret.
+
+## Environment inventory (names only)
+
+Worker: `VELORA_DISCOVERY_LIVE_AUTHORIZED`, `VELORA_DISCOVERY_DATABASE_URL`,
+`VELORA_DISCOVERY_INSPECTION`, `VELORA_DISCOVERY_HEALTH_PORT`,
+`VELORA_DISCOVERY_SESSION_FILE`, `TELEGRAM_BOT_API_URL`,
+`TELEGRAM_MOVIES_BOT_TOKEN`, `TELEGRAM_MOVIES_BOT_ID`,
+`TELEGRAM_MOVIES_BOT_USERNAME`, `TELEGRAM_MOVIES_CHANNEL_ID`,
+`TELEGRAM_MEDIA_API_ID`, `TELEGRAM_MEDIA_API_HASH`, `TELEGRAM_MEDIA_BOT_ID`,
+`TELEGRAM_MEDIA_BOT_USERNAME`, `TMDB_ACCESS_TOKEN` (or `TMDB_API_KEY`),
+`VELORA_FFPROBE_PATH`, `VELORA_FFMPEG_PATH`.
+
+Website: existing `NEXT_PUBLIC_SUPABASE_URL`,
+`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `NEXT_PUBLIC_SITE_URL`,
+`VELORA_DISCOVERY_MODE`, existing playback server variables
+`MEDIA_GATEWAY_TOKEN_SECRET`, `MEDIA_GATEWAY_PUBLIC_ORIGIN`.
+
+Operator-only: `PGSERVICEFILE`, `PGPASSFILE`, `PGCONNECT_TIMEOUT`,
+`PGOPTIONS`; the pinned CLI uses its separately managed credentials when needed.
+Do not put worker, reviewer-service, bot, session or owner credentials in Vercel,
+frontend props, SQL files, shell history, logs or Git.
+
+## Database ordering, locks and migration rehearsal
+
+There are twelve earlier migrations, followed by:
+
+1. `20261010090000_direct_channel_publication.sql` (13): direct-channel records,
+   revision-bound gates, consumer lease, shared materializer and restricted review role.
+2. `20261010150000_channel_review_operations.sql` (14): restricted read-only
+   inspection, rights withdrawal, lease release and health metrics.
+3. `20261010175410_discovery_worker_least_privilege.sql` (15): disabled dedicated
+   worker role, exactly nine RPC grants, no table access or RLS bypass.
+
+Do not edit applied migration history. Migration 13 is intentionally a
+single-apply migration: replay refuses existing objects. A transaction-wrapped
+replay was tested and rolled back. SQL-level idempotency is provided by the
+delivery/provenance uniqueness and publication functions, not by repeating DDL.
+Existing uploader publication still uses `private.catalogue_publish_movie`,
+which calls the same owner materializer as channel publication. Existing curated
+title fields and linked versions remain untouched by a new publication.
+
+Migration 13 replaces constraints and adds indexes/triggers on ingestion/media
+tables. `ALTER TABLE` requires strong locks; unique-index creation and constraint
+validation scan existing rows. This is **not a guaranteed zero-downtime migration**.
+Pause ingestion writers during the approved window. Measure row counts and index
+build/validation time against a restored production-sized backup before scheduling.
+Audit duplicate uploader `telegram_media_id` provenance first; the unique index
+will refuse inconsistent existing data. Do not repair duplicates automatically.
+Use `lock_timeout=5s` and an approved statement deadline; rollback on timeout,
+investigate blockers, and reschedule instead of repeatedly competing for locks.
+
+All new private tables have RLS enabled and no API table grants. Worker/reviewer
+RPCs have an empty pinned search path, schema-qualified relations, explicit
+EXECUTE grants, and owner-controlled SQL. The owner materializer is INVOKER.
+The definer wrappers intentionally execute as the migration owner; verify it
+is the approved `postgres` owner, never an application login. Restricted roles
+must not own those functions or schemas. No caller-controlled dynamic SQL.
+pgTAP covers existing publication, RLS, grants, uniqueness, revisions, evidence,
+capability revocation, rights revocation, rollback, leases and stale completion.
+
+Offline replay commands, from `C:\Users\willi\veloraug`:
+
+```powershell
+node scripts/discovery/rehearse-backup.mjs
+node scripts/isolated-db.mjs test --rest
+$env:VELORA_E38_ISOLATED_TESTS='true'
+$env:VELORA_KEEP_ISOLATED='true'
+npm.cmd run test:integration:isolated
+node scripts/discovery/build-isolated.mjs
+node scripts/isolated-db.mjs down
+```
+
+These create only `velora-e38a-*` disposable Docker resources at loopback ports
+54439/54440; the build briefly uses a read-only proxy at 54441. They never use
+`supabase db reset`, the developer's existing local stack, or hosted credentials.
+Do not run two isolated rehearsals concurrently: they share these disposable names.
+
+### Prepared hosted command — Gate A only, not executed
+
+Prepare owner/review libpq service profiles outside Git. Verify the approved
+project reference, pooler hostname, database and role against the Dashboard and
+change ticket. Use TLS certificate verification and a session pooler/direct
+connection for operator transactions, not transaction-pooler session state.
+Put passwords in an owner-only `PGPASSFILE`, not connection arguments.
+
+```powershell
+# Gate A read-only checks, after verifying the service profile target.
+psql -X 'service=velora-prod-owner' -v ON_ERROR_STOP=1 -c 'select current_database(), current_user, session_user;'
+psql -X 'service=velora-prod-owner' -v ON_ERROR_STOP=1 -c 'select version from supabase_migrations.schema_migrations order by version;'
+```
+
+Stop unless hosted history is exactly the twelve expected earlier versions.
+The following is the explicit SQL apply path, avoiding credentialed CLI argv.
+Run each file with its version-history INSERT in **the same transaction**;
+the history table must already exist and support the repository's `version,name`
+columns. Verify that shape first; do not improvise if the hosted CLI schema differs.
+Example for migration 13 (approved migration 14/15 follow the identical pattern):
+
+```sql
+-- Save outside Git as the reviewed Gate A driver; invoke with psql -X
+-- 'service=velora-prod-owner' -v ON_ERROR_STOP=1 --single-transaction -f <driver>.
+set local lock_timeout = '5s';
+set local statement_timeout = '120s';
+-- Absolute repository path on the OPERATOR host; no password in this file.
+\i C:/Users/willi/veloraug/supabase/migrations/20261010090000_direct_channel_publication.sql
+insert into supabase_migrations.schema_migrations(version,name)
+values ('20261010090000','direct_channel_publication');
+```
+
+CLI alternative: pinned `supabase@2.117.0 db push --linked --dry-run --skip-vault`
+then `db push --linked --skip-vault`, **only** with an independently verified
+linked project, secret-safe configured credentials, and an approved exact list
+of all pending migrations. Never add `--include-all`, `--include-seed`, or
+`--include-roles` to bypass discrepancies. Do not execute either path in preflight.
+After apply, read back history, object owners, RLS, grants, catalogue snapshots,
+empty reviewers/cursor and disabled login roles. Archive redacted results.
+
+## Backup and recovery — no production backup exists by this evidence
+
+Gate A requires an operator with authorized backup/restore access and an owner
+database login capable of dumping all required schema/data under RLS. Confirm
+hosted backup/PITR availability, timestamp and retention in the Dashboard; do not
+assume the project plan supplies a usable backup. Supabase custom-role passwords
+must be reprovisioned after provider restore, and database backups exclude
+Storage object bytes. See [Supabase backups](https://supabase.com/docs/guides/platform/backups).
+
+The destination must be an approved encrypted backup store **outside the checkout**
+(for example an operator-controlled `D:\VeloraBackups\<change-id>` staging folder,
+then the organization's encrypted off-site store). Use restrictive ACLs, access
+auditing, retention and secure transfer. Never store dumps or role passwords in Git.
+Stop writers and record a consistent cutover point. `pg_dump` gives a database
+snapshot, but Telegram state, app configuration and secrets are external and need
+separate protected inventories. Preserve the Bot API state volume and original
+reader session; they are not restored by a SQL dump.
+
+```powershell
+# Gate A only. Backups contain private data; this was NOT run on production.
+pg_dump --dbname='service=velora-prod-owner' --format=custom --file='D:\VeloraBackups\<change-id>\database.dump'
+pg_restore --list 'D:\VeloraBackups\<change-id>\database.dump' > 'D:\VeloraBackups\<change-id>\manifest.txt'
+Get-FileHash -Algorithm SHA256 -LiteralPath 'D:\VeloraBackups\<change-id>\database.dump'
+```
+
+Record PostgreSQL/client versions, role attributes/memberships and grants,
+extensions, schema owners, policies, constraints, migrations, table counts and
+catalogue/version/media snapshot digests alongside the archive. Do not dump
+password verifiers into routine logs. A hash proves unchanged bytes, not restore
+success. Restore to a **fresh isolated compatible instance/project**, reproduce
+required custom roles as NOLOGIN, then restore with reviewed ownership/ACL handling
+and `--exit-on-error`. Hosted managed schemas/extensions require the current
+provider restore procedure; the local full-cluster dump is not certification that
+unmodified `pg_restore` works against a hosted project.
+
+The synthetic rehearsal discovered two important constraints: `pg_cron` requires
+the configured `postgres` database, and in-place `--clean` of an older archive
+cannot remove foreign keys added after backup. Fresh-target recovery passed with
+exact pre-migration catalogue/media equality and absence of migration-13 tables.
+The measured synthetic restore was about 5.4 seconds; it is **not a production RTO**.
+Budget provisioning, archive transfer, extension/role restoration, validation,
+credentials, cutover and backlog reconciliation. Approve RPO/RTO only after a
+production-sized rehearsal under Gate A. Recovery may lose writes after the backup;
+reconcile them from authoritative journals and retained Telegram evidence.
+Never treat reversing migration SQL as production data recovery.
+
+## Restricted credentials and reviewer enrollment
+
+`velora_review_service` is NOLOGIN, NOSUPERUSER, NOBYPASSRLS, NOCREATEROLE,
+NOCREATEDB, NOREPLICATION and NOINHERIT by default. It has four EXECUTE grants
+in `catalogue_review`: inspect, capabilities, approve, publish. It cannot edit
+movies, ingestion journals, reviewers or rights, or call unrelated privileged
+functions. Approval/publication recheck the named user's live database capability
+and all gates. The operator login is a trusted service boundary: do not expose
+an endpoint that accepts arbitrary reviewer UUIDs. Browser approval requires a
+separately reviewed backend design.
+
+`velora_discovery_worker` is a separate NOLOGIN/non-bypass role with nine discovery
+EXECUTE grants only. Use its direct PostgreSQL credential with the existing
+service's `postgres` dependency; no new dependency and no `service_role` JWT.
+Migration-13 service-role callers remain compatible; production discovery must
+use the dedicated role. Review and discovery credentials are never interchangeable.
+
+After the relevant gate, the owner provisions each role separately:
+
+```sql
+-- In an interactive psql owner session with history disabled; password is prompted.
+\password velora_discovery_worker
+alter role velora_discovery_worker login;
+-- Review credential belongs to Gate C's trusted publication operator.
+\password velora_review_service
+alter role velora_review_service login;
+```
+
+Use independent random passwords from the approved secret manager. Verify actual
+session/current identity, attributes, memberships, table grants and function grants
+before using them. Rotate without widening grants. Emergency disable with owner
+`ALTER ROLE ... NOLOGIN` and terminate existing role sessions separately under
+incident authorization; NOLOGIN alone does not stop established connections.
+
+Reviewer table is empty after all migrations and remains empty until Gate C.
+Enroll only independently verified nonanonymous `auth.users` UUIDs. The UI also
+requires fresh server-controlled `app_metadata.role='admin'`; user metadata cannot
+authorize access. Update that through approved Supabase Auth administration, not
+frontend claims. Assign capability rows explicitly, for example:
+
+```sql
+-- Gate C only. Replace each placeholder with an approved EXISTING account UUID.
+insert into private.catalogue_reviewers(user_id,can_review,can_clear_rights,can_publish)
+values ('<review-uuid>',true,false,false),
+       ('<rights-uuid>',false,true,false),
+       ('<publish-uuid>',false,false,true);
+```
+
+Three accounts preserve operational separation of review, rights and publication.
+The current SQL model has separate capabilities but does not enforce distinct
+persons; do not claim a database-enforced two-person policy. Document any approved
+combined duties rather than silently assigning all flags. Test fresh UI sessions
+and capabilities independently; no reviewer password goes into frontend config.
+
+## Telegram consumer ownership and cursor policy
+
+Code inventory: local Bot API configuration is under `infra/telegram-bot-api`;
+upload CLI under `scripts/ingest`; its recovery methods can forward/mark/delete,
+so they are **not** read-only ownership checks. Discovery uses
+`botApiUpdateProvider`/`pollChannelUpdates`. No repository `setWebhook` or
+`deleteWebhook` activation exists. The gateway MTProto reader starts with updates
+disabled and never consumes Bot API `getUpdates`. Source establishes the intended
+owner, **not the current live owner**.
+
+Gate B operator must inventory host services, scheduled tasks, containers,
+external bot dashboards and any remote poller/webhook. Confirm the bot is already
+on its intended local Bot API server; do not migrate/logout it as a side effect.
+Use the client's read-only `checkIdentity('movie')` and `updateOwnership()` to
+verify `getMe` and `getWebhookInfo`; log only success/webhook presence/pending count,
+never token paths or webhook URLs. Stop on a webhook or unknown process. Do not
+call `checkRecoveryAccess`, forwarding probes or recovery writes. Acquire the
+database lease before the first poll. A 409 stops the worker (exit 78); never
+delete a webhook or fight another poller. One live consumer must be an operational
+invariant beyond the database lease because unrelated pollers do not honor it.
+
+The durable `update_offset` is the last committed **Bot API update ID**, not a
+channel message ID. Startup refuses a missing row or null offset. The cursor
+must not be fabricated from `telegram_channels.checkpoint_message_id`, which is
+the uploader's recovery floor. Do not change that floor during discovery rollout.
+
+For newly received events only, agree a cutover with the previous update owner
+and obtain its authoritative final committed update ID. Stop the old consumer,
+retain its durable receipt proof, initialize discovery to that exact ID, then
+start the worker. If there is no authoritative baseline, **stop**: obtain separate
+approval for inspecting a bounded pending queue or a queue-discard policy.
+Never quietly use `getUpdates(offset=-1)`, `drop_pending_updates` or an invented
+large offset to discard unreviewed deliveries. A newly observed post cannot
+justify skipping earlier queue entries without explicit approval of that range.
+
+```sql
+-- Gate B owner operation, after verifying the registered Movies channel.
+-- No ON CONFLICT reset: an existing cursor must be resumed, not overwritten.
+insert into private.discovery_cursors(bot_type,update_offset)
+values ('movie', <authoritative-last-committed-update-id>);
+```
+
+Normal restart resumes this offset; checkpoint and batch persistence precede
+Telegram acknowledgement (the next higher-offset poll). A crash before commit
+replays the batch; uniqueness makes duplicate delivery harmless. Lease expiry
+allows takeover and stale inspection leases cannot overwrite newer results.
+Optional historical import uses the existing `boundedHistoryProvider` only after
+approval names the channel, message-ID range and reader: max 5,000 IDs, 100 per
+page, bounded pages per reconciliation. It is not enabled in the live entrypoint.
+Its reconciliation cursor is separate from the update offset. Missing IDs never
+mean deletion; inaccessible pages remain incomplete and require operator review
+and an approved retry range. Preserve receipts before changing any history cursor.
+
+## Persistent host and media verification
+
+Before Gate B, install the reviewed checkout at `/opt/velora`, Node 24.13+,
+root lockfile dependencies and `services/media-gateway` lockfile dependencies.
+No new package is required. Validate both TypeScript projects. Use a dedicated
+unprivileged OS user and private `/var/lib/velora-discovery` session file.
+Provision an independently managed read-only reader session; never let the
+worker and live gateway write the same session file. First login remains disabled
+in the worker. Do not copy/open the active session during preflight.
+
+The service template uses restart-on-failure, bounded restart rate, memory/task
+limits, read-only system paths, private temporary storage, and 90-second SIGTERM
+grace. Exit 78 is configuration/ownership failure and requires intervention.
+Transient failures retry with exponential backoff; database disconnect leaves
+uncommitted updates unacknowledged. Graceful shutdown aborts polling/reads, closes
+connections and releases the lease; failed release recovers through expiry.
+Inspection errors have bounded attempt/retry policy in the existing database.
+Health is loopback-only on `/healthz` and `/readyz`; forward it only through an
+authorized monitoring path. A waiting lease/cursor state is reported distinctly;
+do not interpret it as evidence that this process owns the live Telegram stream.
+
+```sh
+# Offline shape check: no database, Telegram or session access, no env-file loading.
+node --experimental-transform-types --import ./scripts/ingest/register.mjs services/media-gateway/discovery.mts --check
+# Gate B only, after protected /etc/velora/discovery.env is provisioned and approved:
+systemd-analyze verify infra/discovery/velora-discovery.service
+sudo install -m 0644 infra/discovery/velora-discovery.service /etc/systemd/system/velora-discovery.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now velora-discovery
+curl --fail http://127.0.0.1:8790/readyz
+```
+
+`VELORA_DISCOVERY_LIVE_AUTHORIZED` must remain absent/false until Gate B; normal
+startup refuses it before any database or Telegram call. Detection-only is the
+default. After approved read-only validation, enable bounded inspection with
+verified tool paths and TMDB metadata credentials. Monitor one known naturally
+received post; do not upload a test message under a read-only authorization.
+
+The verification adapter checks registered channel, message, file_unique_id,
+declared size and trusted `tg1` document identity. The reused MTProto reader
+asserts bot identity/channel access and resolves the exact document; one reader
+cache slot bounds backlog memory. Reads cover MP4 box headers, `ftyp`/`moov`, a
+capped 64 KiB initial sample, and tail, under the 16 MiB head budget. Real ffprobe
+needs sample packets to infer H.264/AAC profiles; index-only inspection was fixed
+after a real local fixture exposed missing profiles. Layout, fast-start, codecs,
+pixel format, stream selection and audio follow policy v2. Unsupported/unknown
+properties, reader failure, replacement and truncated media fail closed.
+Evidence is identity-bound; edited/replaced documents invalidate prior evidence,
+rights and approval. Bounded verification does **not** prove complete-file
+integrity, full decodability or end-to-end playback. Gate C still verifies actual
+authorized playback through the existing gateway, without changing its resolver.
+
+Local executable identity: ffprobe/ffmpeg reported
+`9.0.2-essentials_build-www.gyan.dev`. SHA-256:
+ffprobe `f0d36ecbbdd3bcfac3efa078c96c7271c2e68b3810595552ac3b7f17e9a65c52`;
+ffmpeg `3256173f3f8bffd7df12227c68adf68025edb1832273a9530688a7bb1ed8edec`.
+These identify the tested local binaries; they are not a publisher-signature claim
+or a substitute for separately verifying Linux host tools.
+
+## Review, exact commands, publication and cache coordination
+
+Gate C operator enables website `VELORA_DISCOVERY_MODE=database` after authorized
+enrollment. Existing `/admin/discovery` queue/detail show gates, identity warnings,
+corrections, VJ, media readiness, rights, audits and the exact eligible psql command.
+UI decisions use the reviewer's own Supabase session. Database authorization is
+authoritative. No browser publication action or PostgreSQL client was added.
+
+Create libpq `velora-prod-review` with the approved production host and restricted
+login. Independently verify its environment before opening the session. The
+read-only script prepares candidate, rights, readiness, capability and publication
+inspection without exposing Bot API file IDs:
+
+```powershell
+psql -X 'service=velora-prod-review' -v ON_ERROR_STOP=1 -v candidate='<64-hex-key>' -v reviewer='<approved-user-uuid>' -f scripts/discovery/review-operator.sql
+```
+
+Within that verified restricted psql session, set the exact selected parameters:
+
+```sql
+\set candidate '<64-hex-key>'
+\set revision '<exact-reviewed-positive-integer>'
+\set approver '<review-capability-user-uuid>'
+\set publisher '<publish-capability-user-uuid>'
+select catalogue_review.reviewer_capabilities(:'approver'::uuid);
+select catalogue_review.reviewer_capabilities(:'publisher'::uuid);
+select catalogue_review.inspect_channel_candidate(:'candidate')->'rights';
+select catalogue_review.inspect_channel_candidate(:'candidate')->'evidence';
+-- Gate C explicit approval after gates, reference and revision review:
+select catalogue_review.approve_channel_candidate(:'candidate', :'revision'::integer, :'approver'::uuid);
+-- Separate controlled publication decision for this exact approved revision:
+select catalogue_review.publish_channel_candidate(:'candidate', :'revision'::integer, :'publisher'::uuid);
+-- ALWAYS reconcile here if the publication response is lost:
+select catalogue_review.inspect_channel_candidate(:'candidate');
+select catalogue_review.inspect_channel_candidate(:'candidate')->'publication';
+```
+
+These function calls were exercised against the isolated database. Use the UI's
+validated command builders for actual values. Approval checks live reviewer
+capability, identity, VJ, current evidence, rights, warnings, duplicates and
+catalogue relationship; publication repeats gates and locks rows in one transaction.
+An exact repeat returns `already_published`. A stale revision fails closed.
+After a disconnect never blindly republish: inspect authoritative publication and
+approval revision; committed means do not retry, still-approved/not-published
+means an operator may retry the same revision, inconsistent state means stop.
+
+Verify catalogue through ordinary website queries for the returned movie slug
+and VJ slug, Movies/Search/detail/VJ pages and anonymous denial/signed-in gateway
+playback. The restricted role cannot query arbitrary catalogue tables; this is
+intentional. Do not use its credential in the browser to work around that.
+
+Publication SQL does not call Next.js. **Required coordinated step:** an authorized
+admin opens the published candidate and presses **Refresh public pages**. The
+existing guarded Server Action rereads authoritative publication, then invalidates
+`/`, `/movies`, `/search`, `/vjs`, the exact movie and VJ paths. It cannot invalidate
+an unpublished candidate. Repeating refresh is safe and retries a cache failure
+without retrying publication. Tests cover all paths, unauthenticated denial,
+unpublished refusal, failed refresh and successful repetition. Home/VJ index also
+have five-minute ISR; catalogue/search/detail/VJ detail are dynamic in the tested
+build. Verify visible content after refresh; record a failed refresh as a separate
+incident. No unauthenticated revalidation endpoint exists or was added.
+
+## Failure drills and observability
+
+| Failure | Evidence/recovery | Operator action |
+| --- | --- | --- |
+| Crash before persistence | Worker commits before acknowledgement; replay/restart tests preserve cursor | Supervisor restarts, inspect lag |
+| Database disconnect | Synthetic service fault backs off with ceiling; no poll after failed checkpoint | Restore connectivity; never reset cursor |
+| Lease conflict/expiry | Isolated second consumer refused; takeover after expiry/release; stale completion refused | Investigate persistent conflicts/external owner |
+| Duplicate/out-of-order edits | SQL/unit replay dedupes; newer revisions fence stale inspection | Review conflicts, no inferred deletion |
+| Media replacement | Old evidence/rights/approval invalidated; published link is not silently replaced | Separate reviewed replacement workflow |
+| Missing/inaccessible history | Bounded reconciliation marks incomplete, no deletion | Approve a bounded retry after access repair |
+| Publication response loss | Integration discards returned result and reconciles committed authoritative state | Read state before any manual retry |
+| Transaction failure | SQL slug-collision drill leaves no partial catalogue records | Correct conflict under review, reapprove if revision changes |
+| Cache invalidation failure | Server Action test blocks refresh, repeat succeeds | Retry refresh only; verify all affected paths |
+| Revoked rights/capability | Revision/live-capability checks block old approval | Rights withdrawal/account revocation needs authorized owner/reviewer |
+| Gateway/reader unavailable | Synthetic unreadable media yields unverified evidence; existing gateway faults/authorization tests deny bytes | Restore reader/gateway; never widen resolver or mint bypass tokens |
+
+These are application-level synthetic failure drills over actual modules and
+disposable SQL. No live outage, physical network cut, live gateway interruption,
+or production process crash was induced. Connection loss is represented by a
+lost response and authoritative reconciliation, not a production socket kill.
+
+Use structured service JSON in journald plus loopback health and
+`public.discovery_health()` via the restricted worker. Monitor last completed
+cycle/progress, consecutive failures, last delivery age, oldest pending age,
+checkpoint/lease heartbeat, pending/blocked/review counts, media/rights blocks,
+verification failures, publication audit outcomes, lease conflicts and database
+failures. Alert on stale cycles (>180 seconds), persistent retries, increasing
+pending age, missing heartbeat, `fatal` or incomplete reconciliation. Idle channels
+can have old last-delivery times without being unhealthy; combine metrics.
+The persistent entrypoint's health describes loop state; database health exposes
+counts/ages separately. Do not mistake a healthy loop for playback readiness.
+
+Keep logs fixed codes/counts only. Never log raw exceptions, captions, private
+media, bot URLs/tokens, database URLs, session contents or signed playback URLs.
+Use existing platform/journald monitoring; no new monitoring platform is required.
+
+Rollback first stops worker activation and disables/terminates affected service
+sessions under incident authority. Keep journals, cursor, evidence and audits.
+If the schema is sound, restore the prior application release with discovery
+disabled; do not reverse migration 13. If corruption requires data recovery,
+use the verified backup/fresh-target procedure and reconcile post-backup writes
+before cutover. Published rights withdrawal uses the existing owner-controlled
+version rights boundary and cache refresh; never direct unreviewed movie edits.
+
+## Regression evidence and limitations
+
+Completed offline checks: 889 unit tests; 692 database assertions in 11 suites;
+35 integration tests (one deliberate GoTrue skip), including the prepared psql
+inspection script authenticated as the restricted review service; synthetic backup/archive
+verification and fresh-target restore (about 5.4 seconds for this small fixture);
+application, gateway and discovery typechecks; tracked/new-code lint; isolated
+production build; private-value scan (837 files, 12 values, zero matches) and
+deployment trace audit (zero operational files). These counts are rehearsal
+evidence, not production verification. The restore time is not a production RTO.
+
+Docker stopped during the last check, then the operator restored engine access.
+The final disposable integration run passed after restoration. Docker's existing
+restart policy also resumed `velora-telegram-bot-api`; the operator was notified.
+The preflight agent did not start it, call its API, or activate a listener. That
+process observation does not establish live update-consumer ownership.
+
+Baseline and extended
+isolated suites cover catalogue, ingestion, publication and playback boundaries.
+The one GoTrue watchlist integration is deliberately skipped by the existing safe
+isolated command because the disposable harness provides PostgREST, not GoTrue;
+it must run in an authorized isolated full-auth environment before enabling that
+flow in a release. Do not run `test:catalogue`/`test:db`: they reset the user's local
+Supabase instance. Browser responsive UI behavior is unchanged; existing server
+markup tests exercise responsive grids and labeled touch controls. This checkpoint
+does not claim a fresh authenticated browser/visual production test.
+
+The isolated production build clears operational env values and reads only the
+synthetic catalogue via a temporary read-only loopback proxy. It is not deployable
+production output: rebuild with approved production configuration for deployment.
+Next.js still emits the pre-existing dynamic-journal tracing warning; explicit
+output tracing exclusions now keep operational directories, env files and service
+state out of web deployment manifests. The secret scan checks actual private env
+values against source/new build artifacts and audits traced operational paths;
+unrelated prior `.next/dev`/cache state is excluded and is not a release artifact.
+
+Mandatory stop after preflight: no hosted migration, no live listener, no reviewer
+assignment, no real rights decision and no real movie publication until that
+specific gate is explicitly authorized.

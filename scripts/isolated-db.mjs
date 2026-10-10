@@ -66,7 +66,7 @@ export function down() {
   quiet("network", "rm", ISOLATED.network);
 }
 
-export function up({ rest = true, seed = false } = {}) {
+export function up({ rest = true, seed = false, stopBefore = null } = {}) {
   down();
   docker("network", "create", ISOLATED.network);
   docker("run", "-d", "--name", ISOLATED.db, "--network", ISOLATED.network, "-p", `127.0.0.1:${ISOLATED.dbPort}:5432`,
@@ -84,11 +84,14 @@ export function up({ rest = true, seed = false } = {}) {
     grant execute on function auth.uid(), auth.jwt() to anon, authenticated, service_role;`, { user: "supabase_admin" });
   if (setup.code !== 0) throw new Error(`harness setup failed: ${setup.err}`);
   const migrations = readdirSync(join(root, "supabase/migrations")).filter((f) => f.endsWith(".sql")).sort();
+  let applied = 0;
   for (const name of migrations) {
+    if (name === stopBefore) break;
     const result = psql(null, { file: join(root, "supabase/migrations", name) });
     if (result.code !== 0) throw new Error(`migration ${name} failed:\n${result.err}`);
+    applied++;
   }
-  console.log(`isolated database: ${migrations.length} migrations applied`);
+  console.log(`isolated database: ${applied} migrations applied`);
   if (seed) {
     const result = psql(null, { file: join(root, "supabase/seeds/dev-catalogue.sql") });
     if (result.code !== 0) throw new Error(`seed failed:

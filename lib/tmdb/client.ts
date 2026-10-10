@@ -33,7 +33,7 @@ export async function tmdbFetch<T>(path: string, params: Params = {}): Promise<T
     url.searchParams.set("api_key", process.env.TMDB_API_KEY);
   }
 
-  const response = await fetch(url, { headers, next: { revalidate: ONE_HOUR } });
+  const response = await fetch(url, { headers, next: { revalidate: ONE_HOUR }, signal: AbortSignal.timeout(15_000) });
   if (response.status === 404) return null;
   if (!response.ok) {
     console.error(`TMDB request failed: ${response.status} ${path}`);

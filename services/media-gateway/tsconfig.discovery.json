@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "lib": ["esnext", "dom"], "erasableSyntaxOnly": false },
+  "include": ["discovery.mts", "discovery-pg.mts", "../../next-env.d.ts"],
+  "exclude": ["node_modules", "../../lib/**/*.test.ts"]
+}

@@ -1,0 +1,15 @@
+begin;
+create extension if not exists pgtap with schema extensions;
+set local search_path = public, extensions;
+select plan(9);
+select ok((select not (rolsuper or rolbypassrls or rolcreatedb or rolcreaterole or rolreplication or rolcanlogin or rolinherit) from pg_roles where rolname = 'velora_discovery_worker'), 'worker ships disabled and unprivileged');
+select ok(not pg_has_role('velora_discovery_worker', 'service_role', 'MEMBER'), 'no service role membership');
+select ok(not pg_has_role('velora_discovery_worker', 'postgres', 'MEMBER'), 'no owner membership');
+select ok(not has_schema_privilege('velora_discovery_worker', 'private', 'USAGE'), 'no private schema access');
+select ok(not has_schema_privilege('velora_discovery_worker', 'catalogue_review', 'USAGE'), 'no approval schema access');
+select is((select count(*)::integer from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname in ('private', 'public') and c.relkind in ('r','v','m','p') and has_table_privilege('velora_discovery_worker', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')), 0, 'no application table privileges');
+select is((select count(*)::integer from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname like 'discovery_%' and has_function_privilege('velora_discovery_worker', p.oid, 'EXECUTE')), 9, 'exactly nine worker RPCs');
+select is((select count(*)::integer from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname in ('public','private','catalogue_review','media_gateway') and p.prosecdef and has_function_privilege('velora_discovery_worker', p.oid, 'EXECUTE') and p.proname not in ('discovery_acquire_consumer','discovery_receive','discovery_claim','discovery_complete','discovery_fail','discovery_catalogue_lookup','discovery_vjs','discovery_health','discovery_release_consumer')), 0, 'no unrelated privileged RPCs');
+select is((select count(*)::integer from private.catalogue_reviewers), 0, 'reviewer enrollment stays empty');
+select * from finish();
+rollback;

@@ -4,7 +4,7 @@ import { BaseSequencer, type TestSpecification } from "vitest/node";
 import { ISOLATED, isolatedJwt } from "./scripts/isolated-db.mjs";
 
 const ISOLATED_REST = `http://127.0.0.1:${ISOLATED.restPort}`;
-const ORDER = ["tests/integration/catalogue.test.ts", "tests/integration/discovery-publication.test.ts", "tests/integration/direct-channel-publication.test.ts"];
+const ORDER = ["tests/integration/catalogue.test.ts", "tests/integration/discovery-publication.test.ts", "tests/integration/direct-channel-publication.test.ts", "tests/integration/discovery-operations.test.ts"];
 
 // One shared disposable database: the seed-exact catalogue suite runs first, then the suites that publish.
 class InOrder extends BaseSequencer {

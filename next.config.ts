@@ -10,6 +10,10 @@ if (
 }
 
 const nextConfig: NextConfig = {
+  // Offline review files and persistent-service state must never enter a web deployment.
+  outputFileTracingExcludes: {
+    "/*": ["./.velora-ingest/**/*", "./.env*", "./.claude/**/*", "./.agents/**/*", "./.codex/**/*", "./services/**/*"],
+  },
   experimental: {
     // Turbopack's dev cache (.next/dev/cache) persists the process environment.
     // A local run holding a per-run secret (the E3 playback proof) turns it off so
