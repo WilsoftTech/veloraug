@@ -1,11 +1,64 @@
 # E3.8B controlled production rollout preflight
 
-Date: 2026-10-10, Africa/Nairobi. **E3.8B preflight plus authorized Gate A preparation.
-Production migrations and activation remain pending.**
-Authorized production identity/history and backup checks are recorded below.
-Live consumer ownership, real rights, reviewer enrollment and publication remain unverified.
+Date: 2026-10-10, Africa/Nairobi. **Gate A production migrations complete.
+Gate B/C authorized; activation requires the operational details below.**
+Production identity/history, backup and migration checks are recorded below.
+Remote consumer ownership, real rights, reviewer enrollment and publication remain unverified.
 
 ## Authorization gates and stop conditions
+
+### Confirmed execution and live checks — 2026-10-10
+
+After receiving the backup/restore evidence and migration/recovery plan, the
+operator explicitly confirmed applying migrations 13–15 now and also authorized
+Gate B/C. This supersedes the pending authorization status of the earlier
+preparation record; it does not supply a movie, rights evidence, reviewer accounts,
+consumer checkpoint or deployment host.
+
+Gate A results:
+
+- Immediately before execution, authenticated Management API identity matched
+  Velora UG, `utxtqsfelovmhhcrknrz`, ACTIVE_HEALTHY. TLS-verified owner access,
+  exact twelve-version history, three migration file hashes and archive hash
+  passed. All 54 backed-up table datasets and the logical schema were unchanged
+  since backup; no active other client, new-role collision or duplicate uploader
+  document provenance was observed.
+- Migrations `20261010090000`, `20261010150000` and `20261010175410` committed
+  in that order, each with its history entry in the same transaction, using
+  5-second lock and 120-second statement timeouts. No automatic retry occurred.
+- Production verification completed at **22:57:34 EAT**, 10 October 2026.
+  Hosted history contains all fifteen migrations. All original column values
+  and twelve original history rows remain unchanged. New snapshots are null;
+  reviewer and discovery cursor tables are empty.
+- Both new roles remain NOLOGIN, NOINHERIT, non-superuser/non-bypass, without
+  create-role/database/replication attributes or memberships. Effective application
+  grants match exactly four review RPCs and nine discovery RPCs, with no application
+  table grants. All thirteen callable wrappers are owned by postgres with empty
+  pinned search paths. RLS is enabled on the six new review/discovery tables.
+- Redacted production migration and privilege evidence is stored encrypted in
+  the approved backup directory alongside the verified archive. No production
+  reviewer, rights decision, candidate or published movie was created.
+
+Gate B read-only checks:
+
+- The existing Movies bot is explicitly listed on the loopback Bot API server.
+  The reused client's `getMe` identity check passed; `getWebhookInfo` reported
+  no webhook and **two pending updates**. No `getUpdates` call, queue acknowledgement,
+  webhook change, Telegram upload or historical media read occurred.
+- Registered production Movies channel matches the configured channel. The
+  Bot API container remains healthy/running. Local process/container inventory
+  found no identified discovery listener, gateway or poller; this cannot establish
+  ownership of remote consumers or every host task.
+- Before activation, the operator must identify any remote consumer, the
+  authoritative final committed update ID (or approve bounded pending-queue
+  inspection and a reviewed cursor policy), and the persistent deployment host.
+  No hosted cursor was fabricated. A restricted database credential and a separate
+  reader session/configuration have not yet been provisioned.
+
+Gate C remains pending the identified first movie, approved existing reviewer
+accounts/capability assignments and documented distribution rights. General
+Gate C authorization does not resolve those facts. No account has been enrolled,
+no rights have been granted, and no movie has been approved or published.
 
 ### Gate A preparation authorization — 2026-10-10
 
@@ -118,8 +171,8 @@ Migration SHA-256 (current working-file bytes):
 | 14 | `3bb505261ad95e5794e655ef5bea3fd72d2a14508cca2bac02bfe1dcdd5a9dbc` |
 | 15 | `e7b2297824b2d72bb48ab14e6f9af619dfe4be5d88665cc30cd46f480a435ea5` |
 
-Current status: **Gate A preparation complete; awaiting final production migration
-confirmation. Production migrations 13–15 not executed.** Recheck target, history,
+Preparation status at that checkpoint: **complete; awaiting final production
+migration confirmation.** Execution is recorded above. Recheck target, history,
 file hashes, constraints and backup freshness immediately before execution. If new
 writes invalidate the agreed recovery point, create and verify a fresh backup first.
 
