@@ -1,10 +1,127 @@
 # E3.8B controlled production rollout preflight
 
-Date: 2026-10-10, Africa/Nairobi. **Offline preflight only. Production is not activated.**
-No production backup, live consumer ownership, hosted schema state, real rights,
-reviewer enrollment or publication is claimed verified here.
+Date: 2026-10-10, Africa/Nairobi. **E3.8B preflight plus authorized Gate A preparation.
+Production migrations and activation remain pending.**
+Authorized production identity/history and backup checks are recorded below.
+Live consumer ownership, real rights, reviewer enrollment and publication remain unverified.
 
 ## Authorization gates and stop conditions
+
+### Gate A preparation authorization — 2026-10-10
+
+The operator authorized preparation for **Velora UG**, project reference
+`utxtqsfelovmhhcrknrz`: verify production identity/history, create and verify a
+recoverable backup, and present the execution/recovery plan. **Applying migrations
+still requires a separate final confirmation after those safeguards pass.**
+Gate B and Gate C remain unauthorized. Leave the existing Bot API container running.
+
+Preparation evidence:
+
+- Release source: `36b4f22056c353fd3331e1a3155fc232999df437`.
+- Fresh isolated rerun: all 15 migrations applied, 692/692 assertions in 11/11 suites.
+- After token rotation, authenticated Management API verified Velora UG,
+  `utxtqsfelovmhhcrknrz`, `ACTIVE_HEALTHY`, `eu-west-1`, PostgreSQL 17.6.1.166.
+- Hosted history exactly matches the twelve earlier repository versions; 13–15
+  are pending. History columns are `version`, `statements` and `name`; new service
+  roles are absent. Duplicate uploader document provenance count is zero.
+- Session-pooler owner connection succeeded with certificate/hostname verification
+  using the [official Studio CA URL configuration](https://github.com/supabase/supabase/blob/master/apps/studio/hooks/custom-content/custom-content.json).
+  Server-side SSL enforcement was already disabled and was left unchanged.
+  Client TLS was verified; backend `pg_stat_ssl` behind the pooler is not evidence
+  about that client connection. No TLS verification was disabled for production.
+- Approved production backup: `C:\Users\willi\VeloraBackups\E38B-utxtqsfelovmhhcrknrz-20261010T191251Z\database.dump`.
+  Created 10 October 2026, 22:18:08 EAT; custom archive 576,990 bytes. One exported
+  read-only repeatable-read snapshot supplied the dump and 54-table data inventory.
+  The archive and evidence are EFS-encrypted, outside Git, with account/SYSTEM ACLs.
+  Operator confirmed successful EFS certificate export; its password/private key
+  were not accessed. Export retention is operator-confirmed, not independently tested.
+- Archive SHA-256: `e82a96dbf44632b059568a6175bf4f7f82a22a1ca81ffb143bb23a6a9ad4fa09`.
+  Archive parsing and hash verification passed. Fresh compatible disposable restore
+  passed all 54 table counts/digests, application ownership/grants/RLS/function and
+  logical schema comparisons in about 59 seconds. This is a measured local rehearsal,
+  not a promised production RTO.
+- Restored-production migrations 13–15 passed, each with its history INSERT in
+  the same transaction. All original column values and original history rows stayed
+  unchanged; added metadata snapshots remained null, and reviewer enrollment stayed empty.
+- Backups API returned no daily backup entries and PITR disabled; no provider
+  restore point is claimed verified. This readiness evidence uses the local archive.
+
+Restore rehearsal protections and findings:
+
+- The disposable Docker network was internal; production archive copies used RAM
+  storage and database data used tmpfs. Scheduled jobs were disabled, and two
+  cron/operational queue DATA entries were omitted from the rehearsal manifest.
+  The original archive retains them for separately reviewed recovery. Containers
+  were removed after rehearsal; no production task or network endpoint was invoked.
+- Fresh-target default API grants widened access unless cleared **before** object
+  creation. The successful rehearsal removed those target defaults for `postgres`
+  and `supabase_admin`, then restored source ACL/default-ACL entries from the archive.
+  Production grants were not changed. Never accept a restore without verifying
+  effective grants; an absent source default ACL does not clear target defaults.
+- Schema comparison pins an empty search path, compares grant sets rather than
+  ACL array ordering, treats owner-only null/default ACLs equivalently, preserves
+  relative column order across dropped-column gaps, and recognizes only the two
+  known equivalent AND-only search constraint renderings. Other definitions,
+  ownership, policies and privileges remain strict. The source schema was checked
+  unchanged since backup before qualified metadata was captured.
+- The migration data comparison projects original columns: the new nullable
+  `metadata_match_candidates.snapshot` is checked separately. New history entries
+  are expected additions; all twelve original history rows remain unchanged.
+
+Expected changes: migration 13 adds channel review/delivery/cursor/evidence/rights
+records, revision-bound review gates, document provenance uniqueness, media
+identity guards, restricted publication wrappers and the shared owner materializer;
+14 adds restricted inspection/capability queries, pre-publication rights withdrawal,
+lease release and health metrics; 15 creates the disabled discovery-worker role
+with nine RPC grants. None enrolls a reviewer or publishes a movie. These database
+functions become available only after migration; Gate B/C activation remains separate.
+
+Principal risks: strong ingestion/media-table locks, existing-data constraint/index
+validation failures, migration-history drift, wrong-owner/default-grant drift,
+backup recovery limitations and loss of writes after a recovery point. Do not
+promise zero downtime or automatically repair production inconsistencies.
+
+Proposed execution sequence, subject to final review of live evidence:
+
+1. Verify authenticated project identity and TLS-verified owner connection;
+   compare the exact hosted migration history to the twelve preceding repository
+   migrations. Inspect required schema, duplicates, role collisions and active writers.
+2. Confirm backup storage encryption/access and restore target. Create a fresh
+   logical archive plus protected recovery inventories using a consistent snapshot;
+   verify archive parsing, hash and scope, then restore into a fresh disposable
+   compatible target. Compare schema/grants, counts and protected catalogue/media
+   digests. Report excluded external Storage/Telegram bytes and recovery limitations.
+3. Present identity/history, backup location/time/hash, restore results, exact
+   migration file hashes, proposed window/deadlines and stop conditions; obtain
+   the operator's final confirmation. No migration runs before this step.
+4. In the confirmed maintenance window, verify no new drift and the fresh backup
+   recovery point. Quiesce ingestion writers only under the approved window;
+   leave the Bot API server running. Apply only 13, then 14, then 15, each with its
+   history entry in the same bounded transaction. Stop after any failure.
+5. Read back migration history, grants/RLS/owners, disabled new logins, empty
+   reviewers/uninitialized cursor and unchanged published catalogue. No listener,
+   reviewer enrollment, rights grant or publication follows this verification.
+
+Recovery: an uncommitted failed transaction rolls back. If a response is lost,
+inspect authoritative history and schema before retrying. Earlier successfully
+committed migrations remain recorded if a later one fails; do not blindly rerun
+or reverse SQL. Stop rollout and assess whether to retain the safe additive schema
+or perform an explicitly authorized data recovery. Restore a verified backup to
+a fresh target, validate it and reconcile later writes before any separately
+approved cutover. Restoring production is not authorized by preparation approval.
+
+Migration SHA-256 (current working-file bytes):
+
+| Migration | SHA-256 |
+| --- | --- |
+| 13 | `e6bed14e39b8d5075bd8c54d7dbc487aa56549d8140a71f21d29bd6a0b3c3a7e` |
+| 14 | `3bb505261ad95e5794e655ef5bea3fd72d2a14508cca2bac02bfe1dcdd5a9dbc` |
+| 15 | `e7b2297824b2d72bb48ab14e6f9af619dfe4be5d88665cc30cd46f480a435ea5` |
+
+Current status: **Gate A preparation complete; awaiting final production migration
+confirmation. Production migrations 13–15 not executed.** Recheck target, history,
+file hashes, constraints and backup freshness immediately before execution. If new
+writes invalidate the agreed recovery point, create and verify a fresh backup first.
 
 Each gate needs a new, explicit authorization naming the production project,
 operator, scope and maintenance window. Authorization never transfers between gates.
@@ -68,7 +185,12 @@ Worker: `VELORA_DISCOVERY_LIVE_AUTHORIZED`, `VELORA_DISCOVERY_DATABASE_URL`,
 `TELEGRAM_MOVIES_BOT_USERNAME`, `TELEGRAM_MOVIES_CHANNEL_ID`,
 `TELEGRAM_MEDIA_API_ID`, `TELEGRAM_MEDIA_API_HASH`, `TELEGRAM_MEDIA_BOT_ID`,
 `TELEGRAM_MEDIA_BOT_USERNAME`, `TMDB_ACCESS_TOKEN` (or `TMDB_API_KEY`),
-`VELORA_FFPROBE_PATH`, `VELORA_FFMPEG_PATH`.
+`VELORA_FFPROBE_PATH`, `VELORA_FFMPEG_PATH`, `NODE_EXTRA_CA_CERTS`.
+
+Gate B host preparation must configure certificate-verified database TLS. Node
+uses the official trusted CA through `NODE_EXTRA_CA_CERTS` and a verified SSL mode
+in the database URL; libpq uses `PGSSLMODE=verify-full` and `PGSSLROOTCERT`. Never
+substitute an unverified TLS mode to work around a self-signed-chain error.
 
 Website: existing `NEXT_PUBLIC_SUPABASE_URL`,
 `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `NEXT_PUBLIC_SITE_URL`,
@@ -175,7 +297,11 @@ of all pending migrations. Never add `--include-all`, `--include-seed`, or
 After apply, read back history, object owners, RLS, grants, catalogue snapshots,
 empty reviewers/cursor and disabled login roles. Archive redacted results.
 
-## Backup and recovery — no production backup exists by this evidence
+## Backup and recovery
+
+The original offline preflight created only synthetic backups. The subsequently
+authorized Gate A production archive and recovery evidence are recorded above;
+its local key retention and external-media limitations still apply.
 
 Gate A requires an operator with authorized backup/restore access and an owner
 database login capable of dumping all required schema/data under RLS. Confirm

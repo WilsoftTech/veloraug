@@ -18,7 +18,7 @@
  */
 import { createHmac } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const ISOLATED = {
@@ -34,6 +34,7 @@ export const ISOLATED = {
 };
 
 const root = join(import.meta.dirname, "..");
+let useContainerSql = false;
 
 /** HS256 JWT signed with the isolated PostgREST's synthetic secret (tests only). */
 export function isolatedJwt(claims) {
@@ -45,6 +46,12 @@ const docker = (...args) => execFileSync("docker", args, { encoding: "utf8", std
 const quiet = (...args) => spawnSync("docker", args, { encoding: "utf8" });
 
 export function psql(sql, { user = "postgres", file = null } = {}) {
+  if (useContainerSql) {
+    const result = spawnSync("docker", ["exec", "-i", "-e", `PGPASSWORD=${ISOLATED.password}`, ISOLATED.db,
+      "psql", "-X", "-h", "127.0.0.1", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-At"], {
+      input: file ? readFileSync(file, "utf8") : sql, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    return { code: result.status, out: result.stdout ?? "", err: result.stderr ?? "" };
+  }
   const args = ["-X", "-h", "127.0.0.1", "-p", String(ISOLATED.dbPort), "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-At"];
   if (file) args.push("-f", file);
   const result = spawnSync("psql", args, { input: file ? undefined : sql, encoding: "utf8", env: { ...process.env, PGPASSWORD: ISOLATED.password, PGCONNECT_TIMEOUT: "5" }, maxBuffer: 64 * 1024 * 1024 });
@@ -64,11 +71,13 @@ export function down() {
   quiet("rm", "-f", ISOLATED.rest);
   quiet("rm", "-f", ISOLATED.db);
   quiet("network", "rm", ISOLATED.network);
+  useContainerSql = false;
 }
 
-export function up({ rest = true, seed = false, stopBefore = null } = {}) {
+export function up({ rest = true, seed = false, stopBefore = null, internalNetwork = false } = {}) {
   down();
-  docker("network", "create", ISOLATED.network);
+  useContainerSql = internalNetwork;
+  docker("network", "create", ...(internalNetwork ? ["--internal"] : []), ISOLATED.network);
   docker("run", "-d", "--name", ISOLATED.db, "--network", ISOLATED.network, "-p", `127.0.0.1:${ISOLATED.dbPort}:5432`,
     "-e", `POSTGRES_PASSWORD=${ISOLATED.password}`, "--tmpfs", "/var/lib/postgresql/data:rw", ISOLATED.image);
   waitFor(() => quiet("exec", ISOLATED.db, "pg_isready", "-U", "postgres", "-h", "127.0.0.1").status === 0
