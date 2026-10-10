@@ -1,10 +1,44 @@
 # E3.8B controlled production rollout preflight
 
 Date: 2026-10-10, Africa/Nairobi. **Gate A production migrations complete.
-Discovery-only preparation continues; live activation awaits separate approval.
+Discovery activation is now authorized; host/cursor prerequisites remain pending.
 Gate C is deferred and blocked pending new authorization.**
 Production identity/history, backup and migration checks are recorded below.
-Remote consumer ownership, real rights, reviewer enrollment and publication remain unverified.
+The existing account has separately authorized review-only dashboard access.
+Remote consumer ownership is operator-confirmed; real rights and publication
+remain outside the authorized scope.
+
+## Gate B activation update — 2026-10-11
+
+The operator explicitly requested listener activation, confirmed no other Movies
+bot update consumer exists, approved one bounded pending-queue inspection, and
+selected an always-on server whose identity/access remains to be supplied.
+This supersedes earlier statements that Gate B activation lacks authorization.
+Gate C remains deferred: no rights clearance or publication is authorized.
+
+Read-only checks confirmed 15 production migrations, the registered Movies
+channel and bot identity, no webhook, no discovery cursor, and a restricted
+`velora_discovery_worker` role that is still NOLOGIN. The existing Bot API
+container remains healthy and running. No identified local Node discovery
+consumer was found; remote ownership is based on the operator's confirmation.
+
+One `getUpdates` request used `limit=100`, `timeout=0`, and no offset or
+`allowed_updates` argument. It returned seven Movies document events, update
+IDs 12922862–12922868, channel messages 44–50, dated 2026-10-10. No follow-up
+acknowledgement request, channel history/media read, queue discard, candidate
+import or database mutation occurred. The proposed initial committed offset
+12922861 preserves these events for the worker; it is pending operator approval
+and has not been written. Recheck the queue/ownership before actual cutover;
+this observation is not a guarantee that Telegram retains these events forever.
+
+The selected server needs its hostname, operating system and trusted access
+method before deployment. The current Bot API is bound to Windows loopback
+`127.0.0.1:8081`; a remote worker requires a separately reviewed private connection
+or an explicitly authorized Bot API hosting change. Never expose it publicly or
+silently migrate/logout the bot. Provision the dedicated discovery credential
+only into the identified host's protected configuration, with verified database
+TLS. Metadata-only discovery needs no MTProto reader session and cannot clear
+media readiness, rights or publication gates. No live worker has started.
 
 ## Authorization gates and stop conditions
 
