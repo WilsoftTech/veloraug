@@ -2858,6 +2858,171 @@ decision.
   - the crash drill, the near-ceiling test, bulk ingestion and the Series
     migration each still need authorization.
 
+# C2B.2G — Controlled crash/recovery drill: blocked at preflight
+
+Date: 2026-09-27. **C2B.2G CONTROLLED CRASH/RECOVERY DRILL: BLOCKED — UNCERTAIN**
+(runtime baseline unavailable; no upload attempt started).
+
+- Local HEAD and live `veloraug/phase-a-foundation` both resolve to
+  `ee459f1a16c1239b24203bb7d6bb0eb8d30cb872`.
+- Read-only enumeration of `G:\Movies` found 14 files. No candidate was selected;
+  fingerprint, VJ, TMDB and planner validation were not reached.
+- Docker inspection outside the sandbox failed because its configured
+  `dockerDesktopLinuxEngine` named pipe does not exist. Independently, the
+  local HTTP endpoint `127.0.0.1:8081` returned `ECONNREFUSED`.
+- The effective Node environment with `.env.local` loaded reports real-upload
+  authorization disabled. It was never enabled.
+- Bot identity, recovery group, read-only mount, hosted counts, channel
+  registration/checkpoint and On The Hunt's hosted regression state were not
+  reverified. Previous checkpoint evidence is not a current verification.
+- No durable floor, crash point, interruption or recovery outcome exists for
+  this drill. Journals were not modified. Docker was not started, stopped or
+  restarted; no process was terminated.
+- Exact external write counts: `sendDocument` **0**, recovery markers **0**,
+  forward probes **0**, probe deletions **0**, hosted writes **0**.
+  Series and catalogue content were untouched.
+- Post-recovery validation was not reached. No implementation changes or test
+  runs were made. Unrelated UI changes and `.claude/` were preserved.
+
+The existing Local Bot API runtime must be available before repeating preflight
+and selecting one source. The single-upload budget remains unused.
+
+## C2B.2G retry — execution evidence (2026-09-27)
+
+The user requested a retry after the runtime became available. The preflight
+block above describes the first, zero-write run only.
+
+### Candidate and baseline
+
+- Selected `Fuze 2026.VJ Ice P.mkv`, 1,056,312,383 bytes (1,007.4 MiB),
+  1,040,839,617 bytes below the 2,097,152,000-byte ceiling.
+- Fingerprint: `sf1-33472dfeba5078e64c4c876a7d52cb7a2a9996efbe44ef68a72e883db8aea9e0`.
+- Parse: movie, Fuze, 2026, VJ Ice P, no season/episode. Active VJ 1,
+  `vj-ice-p`. TMDB 1242265, exact title/year, score 1, high confidence.
+- Duplicate result `none`, planner `upload`, no stop reasons. Read-only hosted
+  baseline contains only On The Hunt; selected-source status RPC is `absent`.
+- Exact-fingerprint dry run selects 1 of 14 scanned files, passes local-path
+  preflight and recomputes the same fingerprint. No substitute was used.
+- HEAD and live remote remain `ee459f1a16c1239b24203bb7d6bb0eb8d30cb872`.
+- Movies identity and recovery access verified with the existing adapter;
+  configured Movies channel matches its hosted registration, checkpoint 24.
+  Series is not listed locally and has no hosted channel registration.
+- Hosted counts before: ingestion events 1, Telegram media 1, match candidates
+  0, movies 0, movie versions 0. Existing event is uploaded, attempt count 1,
+  floor 22, media reference 1 (On The Hunt).
+- Docker has `G:/Movies` mounted at `/media/movies` with `RW=false`. Container
+  started at 08:40:59.9595813Z, restart count 0. Authorization disabled before
+  execution; enabled only in the single CLI child's environment.
+
+### Controlled interruption
+
+Operational harnesses and evidence are Git-ignored in `.velora-ingest/`;
+application code was not changed. An exclusive sentinel prevents rerunning the
+upload harness. A preload observes the existing HTTP transport without changing
+its request or timeout. The CLI uses its normal exact-fingerprint upload path.
+
+- CLI PID 10416 started at 08:47:44.666Z.
+- Hosted start time 08:47:46.111Z; `uploading`, durable floor **24**.
+- `sendDocument` request finished sending at 08:47:46.386Z; no response event.
+- At 08:47:50.215Z, independent hosted status still reports uploading/floor 24;
+  `/proc/1/fd` identifies the selected Fuze file as open. Container outbound
+  bytes rose from 20,283 before execution to 2,816,429 and then 8,985,083.
+- At **08:47:50.216Z**, only the Node CLI received SIGKILL; exit confirmed at
+  08:47:50.225Z. No Docker/Bot API restart, stop, unmount or media deletion.
+- At 08:47:52.194Z, hosted status remained uploading/floor 24; the file remained
+  open and outbound bytes reached 13,736,807. Traffic continued afterward.
+- Preserved journal: uploading, one pending attempt, floor 24, no Telegram
+  record or DB acknowledgement. Snapshot: `.velora-ingest/journal-at-crash.json`.
+
+### Fresh-state proof before recovery
+
+The old default journal was not present at its default path. This drill created
+an isolated original journal and preserves it. A separate fresh scan reconstructed
+source identity from disk without copying attempt history. The Fuze entry has
+`not_uploaded`, zero local attempts, no floor and no Telegram evidence. Its
+single-entry recovery journal is `.velora-ingest/drill-recovery/`.
+
+A fresh CLI `resume --server` on that journal returns exactly one action:
+**reconcile**. The authoritative unresolved attempt and floor therefore come
+from hosted state, not the crash journal.
+
+### Outcome A — PASS: completed after process death, recovered without resend
+
+The file closed by 08:55:35Z and outbound traffic levelled off at about
+1,061,266,403 bytes by 08:56:05Z. This was used only to decide when to reconcile,
+not as evidence of success. The independent recovery proof followed:
+
+- A fresh CLI ran `resume --server --execute` against the discovery-only Fuze
+  journal. Authorization was process-scoped and removed in `finally`.
+- Marker **26** posted at 08:56:37Z. The entire bounded interval contained just
+  **message 25**, which was forwarded once to the recovery group.
+- The existing adapter validated configured Movies channel, document media,
+  1,056,312,383 bytes and the exact source-fingerprint caption token.
+  **24 < 25 < 26**. Telegram's document date is **08:55:06Z**, more than seven
+  minutes after the uploader process died.
+- The forwarded copy (recovery-group message 13) was deleted successfully.
+  The original channel document and marker remain intact.
+- The normal lifecycle boundary recorded the original event as `uploaded`,
+  **attempt count 1**, with Telegram media reference 2. The existing protocol
+  advanced Movies checkpoint to **26**. CLI: `uploaded`, `acknowledged: true`.
+- Fresh recovery journal agrees on uploaded state, message 25 and DB
+  acknowledgement. Its local attempt history remains empty/count 0 because
+  this machine state never sent the file; the hosted attempt count is 1. No
+  attempt history was invented or copied from the forensic crash journal.
+- Original crash journal and its snapshot are preserved unchanged, including
+  the stale process lock, for comparison; they are not recovery authority.
+
+### Duplicate proof and regression
+
+With authorization disabled:
+
+- Recovered-state rescan: `skip`, `already_uploaded`.
+- Exact-fingerprint dry run: current source matches; `would not upload
+  (plan_skip, journal_uploaded)`.
+- Recovered-state server resume: Fuze has nothing to settle. The unrelated
+  On The Hunt discovery entry offers only `adopt_server`.
+- A separate discovery-only journal, with no attempts or Telegram evidence,
+  now offers `adopt_server` for Fuze/message 25. Execution checks this server
+  decision before any start/send; missing local history cannot authorize a
+  second upload. The offline planner alone can still say `upload`, as designed.
+- On The Hunt remains uploaded, attempt count 1, media reference 1, message
+  23, with no unresolved state. No probe or mutation touched its message.
+- Final hosted counts: ingestion events **2**, Telegram media **2**, match
+  candidates **0**, movies **0**, movie versions **0**. Both events uploaded.
+- Series remains cloud/unregistered; no approval, publication, near-ceiling
+  test or bulk ingestion. Bot API start time unchanged, restart count **0**.
+
+### Exact writes and retained evidence
+
+| Write | Count |
+| --- | ---: |
+| Movies `sendDocument` | 1 |
+| Recovery marker `sendMessage` | 1 |
+| Recovery `forwardMessage` | 1 |
+| Probe-copy `deleteMessage` | 1 |
+| Hosted `ingest_upload_start` | 1 |
+| Hosted `ingest_upload_record` | 1 |
+| Hosted `ingest_channel_checkpoint` | 1 |
+| Hosted failure/abandon calls | 0 |
+| Series / catalogue writes | 0 |
+
+Git-ignored forensic files: `crash-evidence.jsonl`, `upload-trace.jsonl`,
+`settle-evidence.jsonl`, `recovery-trace.jsonl`, `journal-at-crash.json`,
+`hosted-before-upload.json`, `hosted-after-recovery.json`, and the isolated
+journal directories, all under `.velora-ingest/`. No credentials are in these
+traces. The upload sentinel is retained to prevent harness reuse.
+
+### Validation
+
+Post-recovery `npm test`: **323/323**, including uploader, CLI, store, transport
+and recovery suites. Lint and typecheck pass. Post-recovery database tests:
+**339/339**. Catalogue integration tests: **30/30**. Final production build
+passes. `git diff --check` passes. Real-upload authorization is disabled.
+An earlier sandboxed build could not fetch the hosted catalogue; the same
+build passed with network access. PowerShell blocks `npm.ps1`, so commands use
+`npm.cmd` without changing execution policy. No application code, dependency,
+migration or test changes were needed. Unrelated working-tree edits remain.
+
 ---
 
 # C2B.2H — Uploaded movie → catalogue: publication foundation

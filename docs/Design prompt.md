@@ -149,7 +149,7 @@ Avoid:
 
 * Glass around everything — posters stay bare; glass belongs to chrome and content panels
 * Stacked heavy blurs
-* Neon overload — glow is reserved for hover, focus and active states
+* Supabase overload — glow is reserved for hover, focus and active states
 * Heavy borders and huge shadows
 * Excessive badges — eyebrow pills only for featured content and category tags
 * Dashboard-style boxes everywhere

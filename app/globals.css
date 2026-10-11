@@ -34,7 +34,7 @@
   /* Ratings keep the conventional star colour; the one non-palette hue. */
   --star: #f59e0b;
   --ambient-glow: rgb(37 99 235 / 0.12);
-  --logo-backdrop: transparent;
+  --logo-filter: brightness(1.3) saturate(1.15);
 }
 
 [data-theme="light"] {
@@ -54,7 +54,7 @@
   --destructive: #b42318;
   --star: #b45309;
   --ambient-glow: rgb(37 99 235 / 0.08);
-  --logo-backdrop: #0f172a;
+  --logo-filter: brightness(0.75) saturate(1.35);
 }
 
 [data-theme="dark"] {
@@ -79,8 +79,21 @@
     --destructive: #b42318;
     --star: #b45309;
     --ambient-glow: rgb(37 99 235 / 0.08);
-    --logo-backdrop: #0f172a;
+    --logo-filter: brightness(0.75) saturate(1.35);
   }
+}
+
+/* Match the wordmark with a bright, theme-aware blue. */
+.logo-region {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  font-family: var(--font-jakarta), Arial, sans-serif;
+  font-size: 1.125rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.06em;
+  color: var(--highlight);
 }
 
 @theme inline {
