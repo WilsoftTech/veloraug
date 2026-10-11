@@ -426,3 +426,88 @@ needs (up to about 16 MiB).
 **State left running.** Bounded mode. Every press of **Run media check** is now
 a real Telegram read, and a new post to the channel is media-checked by itself.
 The base compose file returns the listener to metadata mode.
+
+## Second canary attempt and return to metadata mode (2026-10-11)
+
+**Message 46 ("Brave: Gunjyou Senki") has still not been inspected.** Two more
+reviewer requests reached the bounded listener, on other films, and the listener
+was then returned to metadata mode as the approved plan provides.
+
+Before the attempt nothing was queued (0 candidates due, 0 leased, uploads
+disabled), so only a reviewer request or a new channel post could start an
+inspection. The reviewer was given the exact dashboard address of message 46.
+
+| Requested (UTC) | Candidate | Revision | Result | Telegram bytes read |
+| --- | --- | --- | --- | --- |
+| 14:56:30 | Message 49, "Hunting Grounds" | 3 to 4 | `container_not_mp4` (the post is a Matroska file) | 16 of 1,593,739,073 |
+| 14:56:46 | Message 50, "In Cold Light" (third request) | 7 to 8 | `mp4_not_fast_start` again | 64 |
+
+Both kept their confirmed film, year, VJ and match candidates, and both stay in
+review at the media gate. Messages 44 to 48 are unchanged. Total read from
+Telegram across all three live inspections: 144 bytes. The dev server log does
+not record which candidate an action was posted for, so why the requests landed
+on these films is not known from the server side; the database records are
+unambiguous.
+
+**Listener.** With unrelated candidates being inspected and the canary not, the
+bounded listener was stopped and the previous listener restored from the base
+compose file: `velora-discovery:gate-b`, metadata mode, healthy, holding the
+consumer lease, checkpoint unchanged. A media check requested now reads nothing.
+
+**Defect found: the bounded listener does not release its lease on SIGTERM.**
+The MTProto library installs its own SIGINT and SIGTERM handlers
+(`@mtcute/node/utils/exit-hook.js`), which end the process before the worker's
+shutdown runs. The consumer lease then lingers until it expires (120 s). The
+restored listener was refused with `discovery_consumer_busy` and restarted 10
+times over about two and a half minutes before it acquired the lease. Those
+attempts touch only the database. No update was lost: the checkpoint is
+committed with each batch. This needs a fix before bounded mode is used again.
+
+## In Cold Light: fast-start repair plan (read-only, nothing executed)
+
+**What Telegram holds.** Message 50, `IN THE COLD LIGHT___VJ ICE P.2026.mp4`,
+1,549,155,053 bytes, posted 2026-10-10. An MP4 whose index is at the end. Its
+codecs are unknown: the inspection stopped at the layout, as designed.
+
+**Original source file: not found on this machine.** A search of `G:`, `F:`,
+`D:` and the user's Downloads, Videos and Documents folders found no video file
+with that exact size or title. The repair needs the file from wherever it was
+posted, or a one-time full download from Telegram (1.55 GB, a separately
+authorized read; the Local Bot API's `getFile` is the existing mechanism).
+
+**Repair, with the existing tools.**
+
+1. `ingest scan` on the file, then `ingest normalize`: a stream copy with
+   `-movflags +faststart`. No re-encoding. It proves every video and audio
+   packet and the codec configuration identical to the source, and leaves the
+   source unchanged.
+2. Expected output: a fast-start MP4 of about 1.55 to 1.56 GB (E3.1 measured
+   +0.3 percent), under the 2000 MiB upload ceiling.
+3. This only helps if the streams are already inside the policy (H.264 video,
+   AAC or MP3 audio). `scan` reports that before anything is written. Another
+   codec would need a transcode, which is not built and not proposed here.
+
+**Storage.** Source and rendition together about 3.1 GB on the library drive
+(150 GB free), plus a 1.55 GB staging copy on the internal disk with its 2 GiB
+reserve (63 GB free on `C:`). Peak about 4.7 GB.
+
+**Getting the repaired file into Telegram and the catalogue.**
+
+- *Existing upload and reconciliation path (as E3.3 and E3.7D).* `ingest stage`,
+  then `ingest upload --fingerprint` with the real-upload gate set for that one
+  command: exactly one `sendDocument` by the Movies bot. A lost acknowledgement
+  is settled by the bounded marker protocol, never by a resend. The result is a
+  new channel message of uploader origin. Discovery ignores the uploader's own
+  posts by design, so the film is then evaluated and published through the
+  owner path of C2B.2H, with its own rights confirmation, and the old candidate
+  (message 50) is rejected in the dashboard. The old message stays in the
+  channel, unlinked.
+- *Alternative: stay in the dashboard.* Post the repaired file to the channel by
+  hand. Discovery detects it as a new candidate; the film and VJ are confirmed
+  again, the media check runs, and rights, approval and publication happen in
+  the dashboard. No exactly-once upload guarantee, and message 50 is rejected.
+- Replacing the document inside message 50 is possible only by hand in
+  Telegram, and by design resets the confirmation.
+
+Hunting Grounds (Matroska) needs the same treatment, with the same open
+question about its codecs.
