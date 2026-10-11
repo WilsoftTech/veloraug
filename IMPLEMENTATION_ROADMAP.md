@@ -246,6 +246,15 @@ The first Velora UG task is reconciliation, not feature construction.
   - **Results.** Unit 845 passed / 27 skipped; isolated SQL 9 suites, 621 assertions; isolated integration 32 passed / 1 skipped, including the end-to-end direct-channel publication; build, typecheck and lint pass.
   - **External state.** Telegram 0, hosted 0, no listener started.
   - Record and rollout procedure: `docs/E3_8_CHANNEL_DISCOVERY.md`, "E3.8A".
+- E3.8 media inspection recovery (2026-10-11): **PASS (isolated) — live reinspection awaits separate approval.** The seven channel candidates wait at the media gate because the listener runs in metadata mode, with no media reader, and nothing claims a candidate already in review.
+  - **Defect fixed.** A reinspection re-ran metadata matching, and its completion replaced a reviewer's confirmed film and VJ with a suggestion.
+  - **Migration** `20261011112745_channel_media_inspection_recovery.sql` (**local only, not deployed**; hosted has 16, and the six admin-upload migrations before it are also undeployed). It replaces five existing functions and adds no object or grant. The claim carries the confirmed choice, completion never replaces it, transient reader failures back off 30 to 240 s inside the unchanged five-attempt bound, and the reviewer view reports the last inspection.
+  - **Worker.** A confirmed candidate is read for its media only. Reader outages are scheduled as failed attempts and never recorded as evidence; a file outside the policy is recorded with its reason and stays blocked at the media gate.
+  - **Dashboard.** Last inspection, last failure, attempts, next retry and one **Run media check** action, shown only when the database supports it.
+  - **Results.** Unit 966 passed / 28 skipped; disposable database 17 suites, 987 assertions (66 new; 21 of them fail without the migration); isolated integration 44 passed / 1 skipped; typecheck, lint and build pass.
+  - **External state.** Telegram 0, hosted 0, listener unchanged, no reinspection, rights decision or publication.
+  - **Next (each a separate approval).** Deploy the migration, rebuild the listener image, provision the reader bot's discovery session, restart in bounded mode, then a one-candidate canary. Three of the seven report MKV and are expected to need an approved MP4 rendition.
+  - Record and rollout plan: `docs/E3_8_MEDIA_RECOVERY.md`.
 - Database regression suite: `npm run test:db` (local Supabase; resets it). Without touching developer state: `npm run test:db:isolated` (disposable container, every migration and suite) and, with `VELORA_E38_ISOLATED_TESTS=true`, `npm run test:integration:isolated`.
 
 ## 2. Product and data rules

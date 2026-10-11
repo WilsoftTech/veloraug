@@ -108,6 +108,63 @@ describe("worker persistence over RPC", () => {
     expect(calls[1].args.p_code).toBe("inspection_provider_failed");
   });
 
+  describe("a confirmed candidate (media-only inspection)", () => {
+    const selection = { title: "Example Movie", year: 2024, vj_text: "Test", vj_id: 3, tmdb_id: 9800001, snapshot: snapshot(9800001) };
+    const confirmed = { ...claim, revision: 4, confirmed_selection: selection };
+    const evidence = (reasons: string[]) => ({ identity: claim.identity, method: "bounded_mtproto_v1", policy_version: 2, media_class: reasons.length ? "unverified" as const : "canonical" as const, reasons,
+      container: reasons.length ? null : "mp4", video_codec: reasons.length ? null : "h264", audio_codec: reasons.length ? null : "aac", accessible: !reasons.length, gateway_compatible: true, playback_ready: !reasons.length, bytes_read: 3072 });
+    // Any metadata lookup would be a second look at something the reviewer already decided.
+    const mediaOnly = (media: InspectionPorts["media"]): InspectionPorts => {
+      const refuse = async (): Promise<never> => { throw new Error("metadata_lookup_not_expected"); };
+      return { catalogue: refuse, vjs: refuse, search: refuse, snapshot: refuse, media };
+    };
+
+    it("reads the media only and sends the confirmed choice back unchanged", async () => {
+      calls.length = 0;
+      const store = databasePersistence(rpc({ discovery_claim: confirmed, discovery_complete: "needs_review" }), { channelId: channel });
+      expect(await store.inspectNext(mediaOnly(async () => ({ duplicateOf: null, source: null, evidence: null, verification: evidence([]) })), () => new Date())).toBe(true);
+      expect(calls.map((call) => call.fn)).toEqual(["discovery_claim", "discovery_complete"]);
+      expect(calls[1].args).toMatchObject({ p_key: claim.key, p_lease: claim.lease, p_revision: 4 });
+      expect(calls[1].args.p_result).toMatchObject({ outcome: "review", title: "Example Movie", year: 2024, vj_text: "Test", vj_id: 3, identity_state: "proposed", proposed_tmdb_id: 9800001,
+        candidates: [{ tmdb_id: 9800001, snapshot: { tmdb_id: 9800001 } }], evidence: { identity: claim.identity, media_class: "canonical" } });
+    });
+
+    it("schedules a transient reader failure for retry and never records it as evidence", async () => {
+      calls.length = 0;
+      const store = databasePersistence(rpc({ discovery_claim: confirmed, discovery_fail: "failed" }), { channelId: channel });
+      await store.inspectNext(mediaOnly(async () => ({ duplicateOf: null, source: null, evidence: null, verification: evidence(["media_read_flood_wait"]) })), () => new Date());
+      expect(calls.map((call) => call.fn)).toEqual(["discovery_claim", "discovery_fail"]);
+      expect(calls[1].args).toEqual({ p_key: claim.key, p_lease: claim.lease, p_revision: 4, p_code: "media_read_flood_wait" });
+    });
+
+    it("records a property of the document as evidence: it stays blocked at the media gate with its reason", async () => {
+      calls.length = 0;
+      const store = databasePersistence(rpc({ discovery_claim: confirmed, discovery_complete: "needs_review" }), { channelId: channel });
+      await store.inspectNext(mediaOnly(async () => ({ duplicateOf: null, source: null, evidence: null, verification: evidence(["container_not_mp4"]) })), () => new Date());
+      expect(calls.map((call) => call.fn)).toEqual(["discovery_claim", "discovery_complete"]);
+      expect(calls[1].args.p_result).toMatchObject({ evidence: { media_class: "unverified", reasons: ["container_not_mp4"], playback_ready: false } });
+    });
+
+    it("completes without evidence when the worker has no media reader, and fails with a fixed code when the reader throws", async () => {
+      calls.length = 0;
+      const none = databasePersistence(rpc({ discovery_claim: confirmed, discovery_complete: "needs_review" }), { channelId: channel });
+      await none.inspectNext(mediaOnly(async () => ({ duplicateOf: null, source: null, evidence: null })), () => new Date());
+      expect(calls[1].args.p_result).toMatchObject({ evidence: null, proposed_tmdb_id: 9800001 });
+      calls.length = 0;
+      const broken = databasePersistence(rpc({ discovery_claim: confirmed, discovery_fail: "failed" }), { channelId: channel });
+      await broken.inspectNext(mediaOnly(async () => { throw new Error("session=SECRET"); }), () => new Date());
+      expect(calls[1]).toMatchObject({ fn: "discovery_fail", args: { p_code: "inspection_provider_failed" } }); expect(JSON.stringify(calls)).not.toContain("SECRET");
+    });
+
+    it("an unconfirmed candidate keeps its first-inspection behaviour: unreadable media is recorded, metadata is not thrown away", async () => {
+      calls.length = 0;
+      const store = databasePersistence(rpc({ discovery_claim: { ...claim, confirmed_selection: null }, discovery_complete: "needs_review" }), { channelId: channel });
+      await store.inspectNext(ports(async () => ({ duplicateOf: null, source: null, evidence: null, verification: evidence(["media_read_flood_wait"]) })), () => new Date());
+      expect(calls.map((call) => call.fn)).toEqual(["discovery_claim", "discovery_complete"]);
+      expect(calls[1].args.p_result).toMatchObject({ identity_state: "proposed", proposed_tmdb_id: 9800001, evidence: { reasons: ["media_read_flood_wait"] } });
+    });
+  });
+
   it("returns false when nothing is due and maps database refusals to fixed codes", async () => {
     expect(await databasePersistence(rpc({ discovery_claim: null }), { channelId: channel }).inspectNext(ports(async () => ({ duplicateOf: null, source: null, evidence: null })), () => new Date())).toBe(false);
     await expect(databasePersistence(rpc({ discovery_acquire_consumer: new Error("discovery_consumer_busy") }), { channelId: channel }).checkpoint()).rejects.toMatchObject({ code: "discovery_consumer_busy" });
@@ -140,6 +197,16 @@ describe("reviewer client mapping", () => {
     expect(mapped.evidence).toMatchObject({ container: true, gateway: true, browser: true, mediaClass: "canonical", video: "h264", bytesRead: 3072 });
     expect(mapped.evidence!.reference).toContain("not full-file integrity");
     expect(mapped.firstSeen).toBe("2026-10-10T09:00:00.123Z");
+  });
+
+  it("carries the worker's last inspection and the next retry when the database reports them", () => {
+    const failed = toCandidate(view("failed", ["inspection_pending"], { error_code: "media_read_flood_wait", attempts: 2,
+      inspection: { retry_at: "2026-10-11T12:01:00+00:00", last: { at: "2026-10-11T12:00:00.5+00:00", action: "inspection_failed", detail: "media_read_flood_wait", revision: 3 } } }));
+    expect(failed).toMatchObject({ status: "failed", attempts: 2, retryAt: Date.parse("2026-10-11T12:01:00Z"), lastInspection: { at: "2026-10-11T12:00:00.500Z", action: "inspection_failed", detail: "media_read_flood_wait", revision: 3 } });
+    expect(toCandidate(view("needs_review", [], { inspection: { retry_at: null, last: null } }))).toMatchObject({ retryAt: 0, lastInspection: null });
+    // A database without the migration: no last inspection at all, which is how the UI knows not to offer the media-only check.
+    const older = toCandidate(view("needs_review", []));
+    expect(older.retryAt).toBe(0); expect(older.lastInspection).toBeUndefined();
   });
 
   it("refuses a view that claims anything but a bounded check", () => {

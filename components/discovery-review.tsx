@@ -6,7 +6,7 @@ import { Field } from "@/components/form-field";
 import { EmptyState } from "@/components/empty-state";
 import { TabLinks } from "@/components/tab-links";
 import { PosterImage, BackdropImage } from "@/components/media-image";
-import { canReinspect, guidance, inspectionExhausted, otherGates, reviewOpen, steps, REVIEW_GROUPS, type ReviewGroup, type ReviewGuidance } from "@/lib/discovery/guidance";
+import { canReinspect, guidance, inspectionExhausted, lastFailure, mediaCheckAvailable, otherGates, reviewOpen, steps, REVIEW_GROUPS, type ReviewGroup, type ReviewGuidance } from "@/lib/discovery/guidance";
 import { cn } from "@/lib/utils";
 import type { ReviewCandidate, ReviewVj } from "@/lib/discovery/model";
 import type { ReviewCapabilities } from "@/lib/discovery/database";
@@ -19,6 +19,7 @@ const human = (text: string) => text.replaceAll("_", " ");
 const size = (bytes: number | null) => bytes === null ? "Unknown size" : `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
 const readiness = (candidate: ReviewCandidate) => candidate.evidence?.browser && candidate.evidence.container && candidate.evidence.gateway && candidate.evidence.accessible ? "Verified" : "Awaiting verification";
 const name = (candidate: ReviewCandidate) => candidate.title ?? candidate.event.media.name ?? "Untitled document";
+const when = (iso: string) => `${iso.slice(0, 16).replace("T", " ")} UTC`;
 
 const BADGE: Record<ReviewGroup, string> = {
   action: "border-highlight/40 bg-accent/12 text-highlight",
@@ -72,6 +73,7 @@ export function ReviewQueue({ candidates, search, group, mode = "fixture", error
           <dt className="text-muted">Media</dt><dd>{readiness(item)}</dd>
           <dt className="text-muted">Rights</dt><dd>{item.rights ? (database ? "Clearance recorded" : "Fixture clearance recorded") : "Awaiting clearance"}</dd>
           <dt className="text-muted">Status</dt><dd>{human(item.status)}</dd>
+          {database && lastFailure(item) && <><dt className="text-muted">Last failure</dt><dd className="break-words">{lastFailure(item)}</dd></>}
         </dl>
       </li>; })}
     </ul>}
@@ -134,6 +136,12 @@ export function ReviewDetail({ candidate, vjs, action, error, notice, mode = "fi
   const working = candidate.status === "detected" || candidate.status === "inspecting" || candidate.status === "publishing";
   // A failed inspection is the next step itself, so its action sits with the explanation, not among the secondary actions.
   const urgent = database && (inspectionExhausted(candidate) || candidate.status === "failed");
+  // A confirmed candidate whose media was not verified: the check is the next step, requested by a reviewer.
+  const diagnostics = database && mediaCheckAvailable(candidate);
+  const mediaDue = diagnostics && candidate.status === "awaiting_media";
+  const mayInspect = capabilities === null || capabilities.review;
+  const failure = lastFailure(candidate);
+  const last = candidate.lastInspection;
   // The decision the candidate is waiting for: approval when the database reports no gate, publication when this revision is approved.
   const decision = !database ? null : candidate.status === "awaiting_review" && !candidate.gates?.length ? "approve" as const
     : candidate.status === "approved" && candidate.approval?.revision === candidate.revision ? "publish" as const : null;
@@ -154,8 +162,10 @@ export function ReviewDetail({ candidate, vjs, action, error, notice, mode = "fi
               : <p className="text-body-sm text-muted">{capabilities === null ? "The Approve and Publish buttons are not switched on yet: the database is waiting for an update."
                 : decision === "approve" ? "Approving needs the review permission, which your account does not have." : "Publishing needs the publish permission, which your account does not have."}</p>}
           </div>}
-          {(urgent || working) && <div className="mt-4 flex flex-wrap gap-3">
-            {urgent && <form action={action}>{candidateId}<button name="command" value="retry" className={buttonClass()}>Reinspect now</button></form>}
+          {(urgent || mediaDue || working) && <div className="mt-4 flex flex-wrap gap-3">
+            {(urgent || mediaDue) && (mayInspect
+              ? <form action={action}>{candidateId}<button name="command" value="retry" className={buttonClass()}>{mediaDue ? "Run media check" : "Reinspect now"}</button></form>
+              : <p className="text-body-sm text-muted">Running an inspection needs the review permission, which your account does not have.</p>)}
             {working && <Link prefetch={false} href={`/admin/discovery/${candidate.id}`} className={buttonClass("secondary")}>Refresh</Link>}
           </div>}
         </NextStep>
@@ -170,6 +180,12 @@ export function ReviewDetail({ candidate, vjs, action, error, notice, mode = "fi
           <dt className="text-muted">Container / gateway / browser</dt><dd>{[evidence?.container, evidence?.gateway, evidence?.browser].map((value) => value ? "Verified" : "Unknown").join(" / ")}</dd>
           {evidence?.mediaClass && <><dt className="text-muted">Media policy</dt><dd>{human(evidence.mediaClass)} · video {evidence.video ?? "unknown"} · audio {evidence.audio ?? "unknown"}{evidence.reasons?.length ? ` · ${evidence.reasons.map(human).join(", ")}` : ""}</dd></>}
           <dt className="text-muted">Verification reference</dt><dd>{evidence?.reference ?? "No verification evidence"}</dd>
+          {diagnostics && <>
+            <dt className="text-muted">Last inspection</dt><dd>{last ? `${when(last.at)} · ${human(last.action)} · revision ${last.revision}` : "No inspection recorded"}</dd>
+            <dt className="text-muted">Last failure</dt><dd>{failure ?? "None"}</dd>
+            <dt className="text-muted">Inspection attempts</dt><dd>{candidate.attempts} of 5{candidate.status === "failed" && candidate.retryAt > 0 ? ` · next retry ${when(new Date(candidate.retryAt).toISOString())}` : ""}</dd>
+            <dt className="text-muted">Manual action</dt><dd>{guidance(candidate).group === "action" ? "Needed" : "Not needed now"}</dd>
+          </>}
           <dt className="text-muted">Rights</dt><dd>{candidate.rights?.reference ?? "No clearance; publication blocked"}</dd>
           {candidate.publication && <><dt className="text-muted">Published</dt><dd><Link className="underline underline-offset-4" href={`/movies/${candidate.publication.movieSlug}`}>{candidate.publication.movieSlug}</Link> · version {candidate.publication.versionId}</dd></>}
         </dl>
@@ -210,7 +226,7 @@ export function ReviewDetail({ candidate, vjs, action, error, notice, mode = "fi
     {(open || (database && candidate.publication)) && <form action={action} className="flex flex-wrap gap-3">{candidateId}
       {!database && open && <button name="command" value="approve" className={buttonClass()}>Approve local review</button>}
       {open && <button name="command" value="reject" className={buttonClass("secondary")}>Reject candidate</button>}
-      {canReinspect(candidate, database) && !urgent && <button name="command" value="retry" className={buttonClass("secondary")}>{database ? "Reinspect" : "Reinspect fixture"}</button>}
+      {canReinspect(candidate, database) && !urgent && !mediaDue && <button name="command" value="retry" className={buttonClass("secondary")}>{database ? "Reinspect" : "Reinspect fixture"}</button>}
       {database
         ? candidate.publication && <button name="command" value="refresh" className={buttonClass("secondary")}>Refresh public pages</button>
         : open && <button name="command" value="prepare" className={buttonClass("secondary")} disabled={candidate.status !== "approved"}>Prepare existing owner publication script</button>}

@@ -206,6 +206,64 @@ describe.skipIf(process.env.VELORA_E38_ISOLATED_TESTS !== "true" || process.env.
     expect(isolatedSql(`select reconciliation_incomplete from private.discovery_cursors`)).toBe("f");
   });
 
+  // E3.8 media inspection recovery: the state of a candidate whose first inspection ran without a media reader.
+  it("re-inspects a confirmed candidate for its media only: bounded retry on a reader outage, the reviewer's film and VJ kept", async () => {
+    const TMDB2 = 9810002;
+    const film: MovieSnapshot = { ...FILM, tmdb_id: TMDB2, title: "Recovered Film", original_title: "Recovered Film" };
+    const update = { update_id: 510, channel_post: { message_id: 910, date: 1760100000, chat: { id: CHANNEL, type: "channel" },
+      document: { file_id: "synthetic-bot-file-910", file_unique_id: "AgADdirect910", file_size: SIZE, file_name: "Recovered.Film.2025.VJ.Direct.mp4", mime_type: "video/mp4" }, caption: "Recovered Film (2025)\nVJ Direct" } };
+    let lookups = 0;
+    const metadata: InspectionPorts = { ...databaseCataloguePorts(service),
+      async search() { lookups++; return [{ tmdbId: TMDB2, mediaType: "movie", title: film.title, originalTitle: film.original_title, year: 2025 }]; },
+      async snapshot(id) { lookups++; return id === TMDB2 ? film : null; },
+      async media() { return { duplicateOf: null, source: null, evidence: null }; } };
+    const reading = (read: (file: ReturnType<typeof virtualMp4>) => ReturnType<typeof virtualMp4>["read"]): InspectionPorts => ({ ...metadata,
+      async media(event) {
+        const file = virtualMp4({ size: event.media.size! });
+        return { duplicateOf: null, source: null, evidence: null,
+          verification: await verifyChannelMedia({ identity: channelIdentity(event)!, sizeBytes: event.media.size! }, { read: read(file), probe: async (head) => probeOf(undefined, head.length), gatewayCompatible: true }) };
+      } });
+    const evidenceRows = () => isolatedSql(`select count(*) from private.media_evidence ev join private.telegram_media m on m.id = ev.telegram_media_id where m.chat_id = ${CHANNEL} and m.message_id = 910`);
+    const vj = Number(isolatedSql(`select id from public.vjs where slug = 'vj-direct'`));
+
+    // 1. Detected and inspected by a worker without a media reader, then confirmed: it waits at the media gate.
+    isolatedSql(`update private.discovery_cursors set consumer_until = now() - interval '1 second'`);
+    const worker = databasePersistence(service, { channelId: CHANNEL });
+    await runReplay(worker, replayProvider([update]), metadata, options());
+    const confirmed = await reviewer(REVIEW).correct(key(910), 1, { tmdbId: TMDB2, year: 2025, vjId: vj });
+    expect(confirmed).toMatchObject({ revision: 2, status: "awaiting_media", identity: "confirmed", evidence: null, gates: ["media_verification_required", "rights_clearance_required"] });
+    // Nothing claims it by itself: the check is a reviewer's request.
+    expect(await worker.inspectNext(metadata, () => new Date())).toBe(false);
+    await expect(reviewer(RIGHTS).retry(key(910), 2)).rejects.toMatchObject({ code: "review_not_authorized" });
+    expect(await reviewer(REVIEW).retry(key(910), 2)).toMatchObject({ revision: 3, status: "detected", identity: "confirmed", tmdbId: TMDB2, vjId: vj });
+
+    // 2. The reader is rate limited: a failed attempt with its code and a scheduled retry; no evidence, no metadata lookup.
+    const before = lookups;
+    const limited = reading(() => async () => { throw Object.assign(new Error("flood_wait"), { name: "GatewayError", code: "flood_wait" }); });
+    expect(await worker.inspectNext(limited, () => new Date())).toBe(true);
+    const retrying = (await reviewer(REVIEW).get(key(910)))!.candidate;
+    expect(retrying).toMatchObject({ status: "failed", attempts: 1, error: "media_read_flood_wait", identity: "confirmed", tmdbId: TMDB2, vjId: vj, evidence: null,
+      lastInspection: { action: "inspection_failed", detail: "media_read_flood_wait", revision: 3 } });
+    expect(retrying.retryAt).toBeGreaterThan(Date.now());
+    expect(evidenceRows()).toBe("0");
+    expect(await worker.inspectNext(limited, () => new Date())).toBe(false); // waiting for its backoff
+
+    // 3. The retry reads the document: verified evidence, and still exactly what the reviewer confirmed.
+    isolatedSql(`update private.channel_reviews set retry_at = now() - interval '1 second' where discovery_key = '${key(910)}'`);
+    expect(await worker.inspectNext(reading((file) => file.read), () => new Date())).toBe(true);
+    const checked = (await reviewer(REVIEW).get(key(910)))!.candidate;
+    expect(checked).toMatchObject({ status: "awaiting_rights", revision: 3, attempts: 2, identity: "confirmed", tmdbId: TMDB2, vjId: vj, title: "Recovered Film", year: 2025, gates: ["rights_clearance_required"],
+      evidence: { mediaClass: "canonical", video: "h264", audio: "aac", browser: true, gateway: true, accessible: true }, lastInspection: { action: "media_inspected", detail: "verified", revision: 3 } });
+    expect(checked.choices.map((choice) => choice.tmdb_id)).toEqual([TMDB2]);
+    expect(lookups).toBe(before);
+    expect(evidenceRows()).toBe("1");
+    expect(isolatedSql(`select string_agg(a.action || coalesce(':' || a.detail, ''), ',' order by a.id) from private.channel_review_audit a join private.channel_reviews r on r.ingestion_event_id = a.ingestion_event_id where r.discovery_key = '${key(910)}'`))
+      .toBe(`detected,inspected:proposed,identity_confirmed:tmdb:${TMDB2},vj:${vj},reinspection_requested:media_only,inspection_failed:media_read_flood_wait,media_inspected:verified`);
+    // A media check is never a rights decision, an approval or a publication.
+    expect(isolatedSql(`select count(*) from public.movies where tmdb_id = ${TMDB2}`)).toBe("0");
+    expect(refused(() => owner(approvalCommand(key(910), 3, REVIEW)))).toMatch(/review_gates_not_met/);
+  });
+
   it("leaves every title that existed before unchanged", () => {
     const after = isolatedSql(`select coalesce(jsonb_agg(jsonb_build_object('m', to_jsonb(m), 'v', (select jsonb_agg(to_jsonb(v) order by v.id) from public.movie_versions v where v.movie_id = m.id)) order by m.id), '[]')
       from public.movies m where m.tmdb_id is distinct from ${TMDB}`);

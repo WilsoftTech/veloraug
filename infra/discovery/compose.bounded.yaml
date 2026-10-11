@@ -1,0 +1,27 @@
+# Bounded media verification for the discovery listener
+# (docs/E3_8_MEDIA_RECOVERY.md). An override: the base file stays metadata-only,
+# and nothing changes until an operator names this file explicitly:
+#
+#   docker compose -f infra/discovery/compose.yaml -f infra/discovery/compose.bounded.yaml up -d
+#
+# Requires, in the worker's private env file (never in Git or the frontend):
+#   TELEGRAM_MEDIA_API_ID, TELEGRAM_MEDIA_API_HASH,
+#   TELEGRAM_MEDIA_BOT_ID, TELEGRAM_MEDIA_BOT_USERNAME
+# and VELORA_DISCOVERY_READER_DIR: a private host directory holding
+# `reader.session`, the dedicated reader bot's own MTProto session. The worker
+# never logs in; without that file it refuses to start. The directory is mounted
+# writable because the reader replaces the session file atomically (temporary
+# file, then rename); Docker never creates it, so a missing directory fails this
+# override instead of starting with an empty one. The reader is not the Movies
+# bot: the worker refuses a session that belongs to it.
+services:
+  discovery:
+    environment:
+      VELORA_DISCOVERY_INSPECTION: bounded
+      VELORA_DISCOVERY_SESSION_FILE: /var/lib/velora-discovery/reader.session
+    volumes:
+      - type: bind
+        source: ${VELORA_DISCOVERY_READER_DIR:?set VELORA_DISCOVERY_READER_DIR to the private reader-session directory}
+        target: /var/lib/velora-discovery
+        bind:
+          create_host_path: false

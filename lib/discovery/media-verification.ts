@@ -3,6 +3,18 @@ import type { ReadRange } from "@/lib/ingestion/fingerprint";
 import { channelIdentity } from "@/lib/discovery/events";
 import type { InspectionPorts } from "@/lib/discovery/pipeline";
 
+// The reader fails with the gateway's closed error model (lib/media-gateway/errors.ts). It is recognised by
+// shape, because this module imports nothing of the gateway, and only these codes ever become a reason:
+// never an exception's text.
+const READ_FAILURES = new Set(["not_ready", "telegram_unavailable", "flood_wait", "mtproto_disconnected", "upstream_timeout", "document_resolution_failed", "range_not_satisfiable"]);
+function readFailure(error: unknown): string {
+  const { name, code } = (error ?? {}) as { name?: unknown; code?: unknown };
+  return name === "GatewayError" && typeof code === "string" && READ_FAILURES.has(code) ? `media_read_${code}` : "media_unreadable";
+}
+// Conditions of the reader or the probe that pass by themselves. A document
+// that does not resolve or is outside the policy needs another file, not a retry.
+const TRANSIENT_REASONS = new Set(["media_read_not_ready", "media_read_telegram_unavailable", "media_read_flood_wait", "media_read_mtproto_disconnected", "media_read_upstream_timeout", "probe_timeout"]);
+
 /**
  * Bounded verification of a document posted directly to the Movies channel
  * (E3.8A). It applies the existing browser-playback policy (lib/ingestion/media.ts,
@@ -44,6 +56,15 @@ export interface ChannelMediaEvidence {
   playback_ready: boolean;
   bytes_read: number;
 }
+
+/**
+ * The reason a verification should be tried again by itself, or null when its
+ * result stands (verified, or a property of the document). Such a result says
+ * nothing about the document, so it is scheduled as a failed inspection and is
+ * never recorded as evidence.
+ */
+export const transientMediaFailure = (evidence: ChannelMediaEvidence): string | null =>
+  evidence.media_class === "unverified" ? evidence.reasons.find((reason) => TRANSIENT_REASONS.has(reason)) ?? null : null;
 
 export interface VerificationPorts {
   /** Bounded reads of this exact document. */
@@ -88,8 +109,8 @@ export async function verifyChannelMedia(
       headerOffsets.push(offset);
       return counted(offset, length);
     });
-  } catch {
-    return unverified(["media_unreadable"]);
+  } catch (error) {
+    return unverified([readFailure(error)]);
   }
   if (!layout) return unverified(["container_not_mp4"]);
   if (!layout.complete) return unverified(["mp4_layout_incomplete"], { container: "mp4" });
@@ -110,8 +131,8 @@ export async function verifyChannelMedia(
   try {
     head = await counted(0, probeEnd);
     tail = await counted(document.sizeBytes - tailLength, tailLength);
-  } catch {
-    return unverified(["media_unreadable"], { container: "mp4" });
+  } catch (error) {
+    return unverified([readFailure(error)], { container: "mp4" });
   }
   const accessible = head.byteLength === probeEnd && tail.byteLength === tailLength;
   if (!accessible) return unverified(["media_unreadable"], { container: "mp4" });
@@ -124,8 +145,8 @@ export async function verifyChannelMedia(
     const format = { ...(probe?.format ?? {}) };
     delete format.size;
     inspection = inspectionFromProbe({ ...probe, format }, document.sizeBytes, layout);
-  } catch {
-    return unverified(["probe_failed"], { container: "mp4", accessible });
+  } catch (error) {
+    return unverified([error instanceof Error && error.message === "probe_timeout" ? "probe_timeout" : "probe_failed"], { container: "mp4", accessible });
   }
   const verdict = classifyMedia(inspection);
   const video = playableVideo(inspection)[0]?.codec ?? null;

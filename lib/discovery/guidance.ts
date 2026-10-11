@@ -28,6 +28,58 @@ const BLOCKED: Record<string, string> = {
   document_identity_conflict: "The same file appears in another post with a different size.",
 };
 
+/** Why an inspection or a media check did not pass, in plain words. An unknown code is shown as it is. */
+const REASONS: Record<string, string> = {
+  no_evidence: "The listener ran without its media reader, so the file was not checked.",
+  inspection_provider_failed: "A lookup the inspection depends on (TMDB or the media reader) failed.",
+  media_read_not_ready: "The media reader was not connected to Telegram.",
+  media_read_mtproto_disconnected: "The media reader lost its connection to Telegram.",
+  media_read_telegram_unavailable: "Telegram did not answer the media reader.",
+  media_read_flood_wait: "Telegram asked the media reader to slow down.",
+  media_read_upstream_timeout: "Reading the file from Telegram timed out.",
+  probe_timeout: "Reading the file's index timed out.",
+  media_read_document_resolution_failed: "The post no longer holds the document that was detected.",
+  media_read_range_not_satisfiable: "The file is shorter than Telegram reports.",
+  media_unreadable: "The file could not be read from Telegram.",
+  probe_failed: "The file's index could not be read as video.",
+  container_not_mp4: "The file is not an MP4 (for example an MKV). It needs an approved MP4 version.",
+  mp4_not_fast_start: "The MP4 keeps its index at the end, so a browser cannot start it. It needs a fast-start version.",
+  mp4_fragmented: "The MP4 is fragmented, which the player does not support.",
+  mp4_layout_incomplete: "The file's structure does not cover the size Telegram reports.",
+  moov_over_budget: "The file's index is larger than the bounded check reads.",
+  no_video: "The file has no video stream.",
+  no_audio: "The file has no audio stream.",
+  multiple_video_streams: "The file has more than one video stream.",
+  multiple_audio_streams: "The file has more than one audio stream.",
+};
+export const reasonText = (code: string): string => REASONS[code] ?? `Not accepted by the media policy: ${code.replaceAll("_", " ")}.`;
+
+const verified = (candidate: ReviewCandidate): boolean =>
+  Boolean(candidate.evidence?.browser && candidate.evidence.container && candidate.evidence.gateway && candidate.evidence.accessible);
+
+/**
+ * What the last inspection could not do, or null. A failed attempt is named by
+ * the worker's code; a completed media check by the reasons in its evidence.
+ */
+export function lastFailure(candidate: ReviewCandidate): string | null {
+  const last = candidate.lastInspection;
+  if ((candidate.status === "failed" || inspectionExhausted(candidate)) && last?.action === "inspection_failed" && last.detail) return reasonText(last.detail);
+  if (candidate.evidence && !verified(candidate)) {
+    const reasons = candidate.evidence.reasons ?? [];
+    return reasons.length ? reasons.slice(0, 3).map(reasonText).join(" ") : "The file did not pass the media policy.";
+  }
+  if (!candidate.evidence && last?.action === "media_inspected" && last.detail === "no_evidence") return reasonText("no_evidence");
+  return null;
+}
+
+/**
+ * Whether a re-inspection of this candidate keeps a confirmed film and VJ (the
+ * database reports its inspections: migration 20261011112745). Without it a
+ * re-inspection replaces the confirmation with a suggestion, so the media check
+ * is not offered as a step.
+ */
+export const mediaCheckAvailable = (candidate: ReviewCandidate): boolean => candidate.lastInspection !== undefined;
+
 /** A blocked candidate may be inspected again only when inspection itself gave up (the database rule). */
 export const inspectionExhausted = (candidate: ReviewCandidate): boolean =>
   candidate.status === "blocked" && candidate.error === "inspection_attempts_exhausted";
@@ -42,14 +94,22 @@ export const canReinspect = (candidate: ReviewCandidate, database: boolean): boo
 export function guidance(candidate: ReviewCandidate): ReviewGuidance {
   const status = candidate.status;
   if (WORKING.includes(status)) return { group: "progress", label: "Being inspected", next: "The listener is reading the file name and looking the film up. Refresh in a few seconds." };
-  if (status === "failed") return { group: "progress", label: "Inspection retrying", next: `Attempt ${candidate.attempts} of 5 failed. It retries by itself; you can also reinspect now.` };
+  const failure = lastFailure(candidate);
+  if (status === "failed") return { group: "progress", label: "Inspection retrying", next: `Attempt ${candidate.attempts} of 5 failed.${failure ? ` ${failure}` : ""} It retries by itself; you can also reinspect now.` };
   if (status === "blocked") {
-    return { group: inspectionExhausted(candidate) ? "action" : "closed", label: inspectionExhausted(candidate) ? "Inspection failed" : "Blocked",
-      next: BLOCKED[candidate.error ?? ""] ?? "This candidate cannot continue. See the warnings below." };
+    const exhausted = inspectionExhausted(candidate);
+    return { group: exhausted ? "action" : "closed", label: exhausted ? "Inspection failed" : "Blocked",
+      next: exhausted && failure ? `Automatic inspection failed five times. ${failure} Reinspect to run it again.`
+        : BLOCKED[candidate.error ?? ""] ?? "This candidate cannot continue. See the warnings below." };
   }
   if (status === "awaiting_metadata" || status === "awaiting_identity") return { group: "action", label: "Choose the film", next: "Pick the correct film and the VJ, then confirm." };
   if (status === "awaiting_vj") return { group: "action", label: "Choose the VJ", next: "The film is confirmed. Pick the VJ, then confirm." };
-  if (status === "awaiting_media") return { group: "progress", label: "Waiting for media check", next: "Film and VJ are confirmed. The file still has to pass the automatic media check before it can be published." };
+  if (status === "awaiting_media") {
+    if (!mediaCheckAvailable(candidate)) return { group: "progress", label: "Waiting for media check", next: "Film and VJ are confirmed. The file still has to pass the automatic media check before it can be published." };
+    // Nothing runs by itself here: a check is requested by a reviewer, and a file outside the policy needs replacing.
+    return candidate.evidence ? { group: "action", label: "Media check failed", next: `${failure ?? "The file did not pass the media policy."} Film and VJ stay confirmed. Run the check again once the file is fixed.` }
+      : { group: "action", label: "Media check needed", next: `${failure ? `${failure} ` : ""}Film and VJ are confirmed. Run the media check: it reads the file's index from Telegram and does not change the post.` };
+  }
   if (status === "awaiting_rights") return { group: "action", label: "Rights needed", next: "Record the contract or licence reference that allows this movie to be streamed." };
   if (status === "awaiting_review") return { group: "action", label: "Ready to approve", next: "Every check passes. Approve it; publishing is the step after." };
   if (status === "approved") return { group: "action", label: "Approved", next: "Approved at this revision. Publish it to put it on the site." };

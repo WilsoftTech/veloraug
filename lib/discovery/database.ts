@@ -3,7 +3,7 @@ import { z } from "zod";
 import { detectDocument, newCandidate } from "@/lib/discovery/events";
 import { inspectCandidate, type CatalogueMatch, type InspectionPorts } from "@/lib/discovery/pipeline";
 import { candidateSchema, eventSchema, type ReviewCandidate, type ReviewVj } from "@/lib/discovery/model";
-import type { ChannelMediaEvidence } from "@/lib/discovery/media-verification";
+import { transientMediaFailure, type ChannelMediaEvidence } from "@/lib/discovery/media-verification";
 import type { DiscoveryPersistence } from "@/lib/discovery/worker";
 import { scoreCandidate } from "@/lib/ingestion/match";
 import type { KnownVj } from "@/types/ingestion";
@@ -74,6 +74,9 @@ const claimSchema = z.object({
   chat_id: z.number().int().safe(), message_id: z.number().int().positive(), file_unique_id: z.string().min(1).max(128),
   size: z.number().int().nonnegative().nullable(), name: z.string().max(1024).nullable(), mime: z.string().max(255).nullable(),
   caption: z.string().max(4096).nullable(), identity: z.string().regex(/^tg1-[a-f0-9]{64}$/).nullable(),
+  // The reviewer's confirmed film and VJ (migration 20261011112745). Absent on a database without it; null until confirmed.
+  confirmed_selection: z.object({ title: z.string().max(300).nullable(), year: z.number().int().nullable(), vj_text: z.string().max(100).nullable(),
+    vj_id: z.number().int().positive(), tmdb_id: z.number().int().positive(), snapshot: candidateSchema.shape.snapshot.unwrap() }).nullable().optional(),
 });
 const health = z.object({
   candidates: z.number(), pending: z.number(), awaiting_review: z.number(), approved: z.number(), published: z.number(),
@@ -186,12 +189,26 @@ export function databasePersistence(rpc: DiscoveryRpc, options: { channelId: num
         verification = media.verification ?? null;
         return { duplicateOf: null, source: null, evidence: media.evidence };
       } };
+      const selected = claim.confirmed_selection;
       let result: ReviewCandidate;
       try {
-        result = await inspectCandidate(candidate, scoped);
+        if (selected) {
+          // The reviewer already confirmed the film and VJ: only the media is
+          // read. The database keeps the confirmed metadata whatever is sent back.
+          verification = (await ports.media(event)).verification ?? null;
+          result = { ...candidate, title: selected.title, year: selected.year, vjText: selected.vj_text, vjId: selected.vj_id, tmdbId: selected.tmdb_id,
+            identity: "proposed", choices: [selected.snapshot], snapshot: selected.snapshot };
+        } else result = await inspectCandidate(candidate, scoped);
       } catch {
         // Never persist provider exception text (tokens/URLs can appear there).
         await call(rpc, "discovery_fail", { p_key: claim.key, p_lease: claim.lease, p_revision: claim.revision, p_code: "inspection_provider_failed" });
+        return true;
+      }
+      // A media-only inspection that could not reach the document proves nothing
+      // about it: bounded retry with backoff, and any earlier evidence stands.
+      const transient = selected && verification ? transientMediaFailure(verification) : null;
+      if (transient) {
+        await call(rpc, "discovery_fail", { p_key: claim.key, p_lease: claim.lease, p_revision: claim.revision, p_code: transient });
         return true;
       }
       await call(rpc, "discovery_complete", { p_key: claim.key, p_lease: claim.lease, p_revision: claim.revision, p_result: completionPayload(result, verification, claim.identity) });
@@ -246,6 +263,8 @@ const viewSchema = z.object({
   approval: z.object({ revision: z.number(), by: z.string(), at: stamp }).nullable(),
   publication: z.object({ movie_slug: z.string(), version_id: z.number(), published_at: z.string().nullable() }).nullable(),
   blockers: z.array(z.string()),
+  // Migration 20261011112745. Absent on a database without it.
+  inspection: z.object({ retry_at: stamp.nullable(), last: z.object({ at: stamp, action: z.string(), detail: z.string().nullable(), revision: z.number() }).nullable() }).optional(),
   choices: z.array(z.unknown()).optional(),
   vjs: z.array(z.object({ id: z.number(), slug: z.string(), name: z.string(), active: z.boolean() })).optional(),
   audit: z.array(z.object({ at: stamp, actor_kind: z.string(), actor: z.string().nullable(), action: z.string(), revision: z.number(), detail: z.string().nullable() })).optional(),
@@ -283,7 +302,8 @@ export function toCandidate(input: unknown): ReviewCandidate {
     event: { id: view.event.event_id, messageKey: view.key, updateId: view.event.update_id, channelId: view.event.chat_id, messageId: view.event.message_id,
       kind: view.event.kind ?? "reconciliation", timestamp: view.event.observed_at, digest: view.event.payload_digest,
       media: { uniqueId: view.event.file_unique_id, size: view.event.size, name: view.event.name, mime: view.event.mime, caption: view.event.caption } },
-    firstSeen: view.first_seen, lastSeen: view.last_seen, status: reviewStatus(view), attempts: view.attempts, lease: null, retryAt: 0,
+    firstSeen: view.first_seen, lastSeen: view.last_seen, status: reviewStatus(view), attempts: view.attempts, lease: null,
+    retryAt: view.inspection?.retry_at ? Date.parse(view.inspection.retry_at) : 0, lastInspection: view.inspection ? view.inspection.last : undefined,
     error: view.error_code, title: view.title, year: view.year, vjText: view.vj_text, vjId: view.vj?.id ?? null, tmdbId: view.tmdb_id, movieId: view.movie_id,
     identity: view.identity_state, relation: view.relation,
     choices: view.choices ?? (snapshot ? [snapshot] : []), snapshot, warnings: view.warnings.slice(0, 50),

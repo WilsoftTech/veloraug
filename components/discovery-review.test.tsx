@@ -4,10 +4,24 @@ import { describe, expect, it } from "vitest";
 import { ReviewQueue, ReviewDetail } from "./discovery-review";
 import { initialInbox, receive } from "@/lib/discovery/events";
 import { fixtureSchema } from "@/lib/discovery/fixtures";
+import type { ReviewCandidate } from "@/lib/discovery/model";
 
 const fixture = fixtureSchema.parse(JSON.parse(readFileSync("scripts/discovery/example.json", "utf8")));
 const inbox = initialInbox(fixture.channelId); receive(inbox, fixture.updates, "2026-10-09T12:00:00.000Z");
 const candidate = Object.values(inbox.candidates)[0];
+function mediaPreviews(view: typeof candidate) {
+  const reviewer = { review: true, rights: true, publish: false };
+  const at = "2026-10-11T12:00:00.000Z";
+  const waiting = { ...view, status: "awaiting_media" as const, identity: "confirmed" as const, tmdbId: fixture.movies[0].tmdb_id, vjId: fixture.vjs[0].id, revision: 3, attempts: 1,
+    gates: ["media_verification_required", "rights_clearance_required"], lastInspection: { at, action: "media_inspected", detail: "no_evidence", revision: 3 } };
+  const refused = { ...waiting, id: "d".repeat(64), lastInspection: { at, action: "media_inspected", detail: "unverified:unverified", revision: 3 },
+    evidence: { mediaKey: "d".repeat(64), container: false, gateway: true, browser: false, accessible: false, checkedAt: at, reference: "bounded_mtproto_v1: 16 bytes read (bounded check, not full-file integrity)", mediaClass: "unverified", reasons: ["container_not_mp4"] } };
+  const retrying = { ...waiting, id: "e".repeat(64), status: "failed" as const, attempts: 2, retryAt: Date.parse("2026-10-11T12:01:00Z"), gates: ["inspection_pending", ...waiting.gates],
+    lastInspection: { at, action: "inspection_failed", detail: "media_read_flood_wait", revision: 3 } };
+  const detail = (item: ReviewCandidate) => renderToStaticMarkup(<ReviewDetail candidate={item} vjs={fixture.vjs} action={async () => {}} mode="database" capabilities={reviewer} />);
+  return { "queue-media": renderToStaticMarkup(<ReviewQueue candidates={[waiting, refused, retrying]} search="" group="" mode="database" />),
+    "detail-media-needed": detail(waiting), "detail-media-failed": detail(refused), "detail-media-retrying": detail(retrying) };
+}
 describe("review UI server markup", () => {
   it("shows queue state, safe empty filtering, labeled controls and responsive grid", () => {
     const html = renderToStaticMarkup(<ReviewQueue candidates={[candidate]} search="" group="" />);
@@ -55,6 +69,37 @@ describe("review UI server markup", () => {
     for (const text of ["Reinspect all failed (1)", "All (2)", "Needs you (1)", "In progress (1)", 'href="/admin/discovery?show=action"']) expect(queue).toContain(text);
     expect(renderToStaticMarkup(<ReviewQueue candidates={[stuck, candidate]} search="" group="progress" mode="database" />)).not.toContain("Inspection failed");
   });
+  it("a confirmed candidate waiting at the media gate offers the media check, with the last inspection and its reason", () => {
+    const reviewer = { review: true, rights: false, publish: false };
+    const waiting = { ...candidate, status: "awaiting_media" as const, identity: "confirmed" as const, title: "Example Movie", revision: 3, attempts: 1, gates: ["media_verification_required", "rights_clearance_required"],
+      lastInspection: { at: "2026-10-11T12:00:00.000Z", action: "media_inspected", detail: "no_evidence", revision: 3 } };
+    const html = renderToStaticMarkup(<ReviewDetail candidate={waiting} vjs={fixture.vjs} action={async () => {}} mode="database" capabilities={reviewer} />);
+    for (const text of ["Media check needed", "Run media check", "Last inspection", "2026-10-11 12:00 UTC · media inspected · revision 3", "Last failure", "without its media reader", "Inspection attempts", "1 of 5", "Manual action", "Needed", "Reject candidate"]) expect(html).toContain(text);
+    // One inspection control, the primary one; no disabled buttons.
+    expect(html.match(/value="retry"/g)).toHaveLength(1); expect(html).not.toContain('disabled=""'); expect(html).not.toContain("Reinspect now");
+    // Without the review permission there is an explanation instead of the button.
+    const limited = renderToStaticMarkup(<ReviewDetail candidate={waiting} vjs={fixture.vjs} action={async () => {}} mode="database" capabilities={{ review: false, rights: true, publish: false }} />);
+    expect(limited).toContain("needs the review permission"); expect(limited).not.toContain('value="retry"');
+    // Checked and refused by the policy: the reason, the same single action, and the confirmation kept.
+    const mkv = { ...waiting, evidence: { mediaKey: "d".repeat(64), container: false, gateway: true, browser: false, accessible: false, checkedAt: "2026-10-11T12:00:00.000Z", reference: "bounded_mtproto_v1: 16 bytes read (bounded check, not full-file integrity)", mediaClass: "unverified", reasons: ["container_not_mp4"] },
+      lastInspection: { at: "2026-10-11T12:00:00.000Z", action: "media_inspected", detail: "unverified:unverified", revision: 3 } };
+    const failed = renderToStaticMarkup(<ReviewDetail candidate={mkv} vjs={fixture.vjs} action={async () => {}} mode="database" capabilities={reviewer} />);
+    for (const text of ["Media check failed", "not an MP4", "stay confirmed", "Run media check"]) expect(failed).toContain(text);
+    // A retrying inspection shows when it runs next; the queue names the failure and counts it as needing a person only when it does.
+    const retrying = { ...waiting, id: "c".repeat(64), status: "failed" as const, attempts: 2, retryAt: Date.parse("2026-10-11T12:01:00Z"), lastInspection: { at: "2026-10-11T12:00:00.000Z", action: "inspection_failed", detail: "media_read_flood_wait", revision: 3 } };
+    const retryHtml = renderToStaticMarkup(<ReviewDetail candidate={retrying} vjs={fixture.vjs} action={async () => {}} mode="database" capabilities={reviewer} />);
+    for (const text of ["Inspection retrying", "2 of 5 · next retry 2026-10-11 12:01 UTC", "slow down", "Not needed now", "Reinspect now"]) expect(retryHtml).toContain(text);
+    const queue = renderToStaticMarkup(<ReviewQueue candidates={[waiting, retrying]} search="" group="" mode="database" />);
+    for (const text of ["Needs you (1)", "In progress (1)", "Media check needed", "Last failure", "without its media reader"]) expect(queue).toContain(text);
+    // A database where a re-inspection would replace the confirmation (no migration 20261011112745): the screen is as it was.
+    const older = { ...waiting, lastInspection: undefined };
+    const olderHtml = renderToStaticMarkup(<ReviewDetail candidate={older} vjs={fixture.vjs} action={async () => {}} mode="database" capabilities={reviewer} />);
+    for (const text of ["Waiting for media check", 'value="retry"']) expect(olderHtml).toContain(text);
+    for (const text of ["Run media check", "Last inspection", "stay confirmed", "Manual action"]) expect(olderHtml).not.toContain(text);
+    expect(renderToStaticMarkup(<ReviewQueue candidates={[older]} search="" group="" mode="database" />)).toContain("In progress (1)");
+    // The offline fixture has no worker diagnostics.
+    expect(renderToStaticMarkup(<ReviewDetail candidate={candidate} vjs={fixture.vjs} action={async () => {}} />)).not.toContain("Last inspection");
+  });
   it("database review picks the film from poster choices; the year comes from the choice", () => {
     const view = { ...candidate, status: "awaiting_identity" as const, title: "Example Movie", choices: fixture.movies, vjId: fixture.vjs[0].id, gates: ["identity_unconfirmed"] };
     const html = renderToStaticMarkup(<ReviewDetail candidate={view} vjs={fixture.vjs} action={async () => {}} mode="database" />);
@@ -79,6 +124,8 @@ describe("review UI server markup", () => {
       "detail-failed": renderToStaticMarkup(<ReviewDetail candidate={stuck} vjs={fixture.vjs} action={async () => {}} mode="database" />),
       "detail-choose": renderToStaticMarkup(<ReviewDetail candidate={choose} vjs={fixture.vjs} action={async () => {}} mode="database" />),
       "detail-nofilm": renderToStaticMarkup(<ReviewDetail candidate={{ ...choose, choices: [] }} vjs={fixture.vjs} action={async () => {}} mode="database" />),
+      // The media gate (E3.8 media recovery): a check to run, a file outside the policy, and a reader outage retrying by itself.
+      ...mediaPreviews(view),
     };
     // VELORA_E38_UI_PREVIEW_CSS: the running dev server's stylesheet URL, so the previews carry the real tokens and utilities.
     const css = process.env.VELORA_E38_UI_PREVIEW_CSS ? `<link rel="stylesheet" href="${process.env.VELORA_E38_UI_PREVIEW_CSS}">` : "";

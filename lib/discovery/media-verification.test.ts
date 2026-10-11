@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { verifyChannelMedia, VERIFICATION_METHOD } from "./media-verification";
+import { transientMediaFailure, verifyChannelMedia, VERIFICATION_METHOD } from "./media-verification";
 import { AAC_LC, H264_HIGH, HEVC, probeOf, virtualMp4 } from "./synthetic-media";
 import { MEDIA_POLICY_VERSION } from "@/lib/ingestion/media";
+
+// The shape of the gateway reader's closed errors (lib/media-gateway/errors.ts), which this module never imports.
+const readerError = (code: string) => Object.assign(new Error(code), { name: "GatewayError", code });
 
 const identity = `tg1-${"a".repeat(64)}`;
 const ports = (file: ReturnType<typeof virtualMp4>, probe: (head: Uint8Array) => Promise<unknown> = async (head) => probeOf(undefined, head.length)) =>
@@ -67,6 +70,42 @@ describe("bounded channel media verification (E3.8A)", () => {
     const file = virtualMp4();
     expect(await verifyChannelMedia({ identity, sizeBytes: file.size }, ports(file, async () => { throw new Error("ffprobe exited 1"); }))).toMatchObject({ reasons: ["probe_failed"], media_class: "unverified" });
     expect(await verifyChannelMedia({ identity, sizeBytes: file.size }, ports(file, async () => ({ not: "a probe" })))).toMatchObject({ reasons: ["probe_failed"] });
+  });
+
+  it("names a reader failure by its closed code; only conditions that pass by themselves are transient", async () => {
+    const file = virtualMp4();
+    const failing = (code: string) => ({ read: async () => { throw readerError(code); }, probe: vi.fn(), gatewayCompatible: true });
+    for (const code of ["not_ready", "telegram_unavailable", "flood_wait", "mtproto_disconnected", "upstream_timeout"] as const) {
+      const evidence = await verifyChannelMedia({ identity, sizeBytes: file.size }, failing(code));
+      expect(evidence).toMatchObject({ media_class: "unverified", reasons: [`media_read_${code}`], accessible: false, playback_ready: false });
+      expect(transientMediaFailure(evidence)).toBe(`media_read_${code}`);
+    }
+    // The document itself: another file is needed, a retry would not help.
+    for (const code of ["document_resolution_failed", "range_not_satisfiable"] as const) {
+      const evidence = await verifyChannelMedia({ identity, sizeBytes: file.size }, failing(code));
+      expect(evidence.reasons).toEqual([`media_read_${code}`]); expect(transientMediaFailure(evidence)).toBeNull();
+    }
+    // Anything unclassified keeps the fixed reason and never its text.
+    const raw = await verifyChannelMedia({ identity, sizeBytes: file.size }, { read: async () => { throw new Error("token=SECRET https://example.invalid"); }, probe: vi.fn(), gatewayCompatible: true });
+    expect(raw.reasons).toEqual(["media_unreadable"]); expect(JSON.stringify(raw)).not.toContain("SECRET"); expect(transientMediaFailure(raw)).toBeNull();
+    expect(transientMediaFailure(await verifyChannelMedia({ identity, sizeBytes: file.size }, failing("internal_error")))).toBeNull();
+    // A code on some other error is not the reader's: it names nothing.
+    const foreign = await verifyChannelMedia({ identity, sizeBytes: file.size }, { read: async () => { throw Object.assign(new Error("x"), { code: "flood_wait" }); }, probe: vi.fn(), gatewayCompatible: true });
+    expect(foreign.reasons).toEqual(["media_unreadable"]);
+    // A read that fails after the layout was read is classified the same way.
+    const late = virtualMp4();
+    let reads = 0;
+    const lateEvidence = await verifyChannelMedia({ identity, sizeBytes: late.size }, { read: async (offset, length) => { if (length > 16) reads++; if (reads > 0) throw readerError("flood_wait"); return late.read(offset, length); }, probe: vi.fn(), gatewayCompatible: true });
+    expect(lateEvidence).toMatchObject({ reasons: ["media_read_flood_wait"], container: "mp4" });
+  });
+
+  it("a probe that timed out is transient; a probe that failed or a policy verdict is not", async () => {
+    const file = virtualMp4();
+    const slow = await verifyChannelMedia({ identity, sizeBytes: file.size }, ports(file, async () => { throw new Error("probe_timeout"); }));
+    expect(slow).toMatchObject({ media_class: "unverified", reasons: ["probe_timeout"], accessible: true }); expect(transientMediaFailure(slow)).toBe("probe_timeout");
+    expect(transientMediaFailure(await verifyChannelMedia({ identity, sizeBytes: file.size }, ports(file, async () => { throw new Error("ffprobe exited 1"); })))).toBeNull();
+    expect(transientMediaFailure(await verifyChannelMedia({ identity, sizeBytes: file.size }, ports(file)))).toBeNull();
+    expect(transientMediaFailure(await verifyChannelMedia({ identity, sizeBytes: file.size }, ports(file, async (head) => probeOf([HEVC, AAC_LC], head.length))))).toBeNull();
   });
 
   it("binds evidence to a well-formed identity only", async () => {

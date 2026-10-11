@@ -43,6 +43,9 @@ export const candidateSchema = z.strictObject({
   audit: z.array(auditSchema).max(500),
   // Database-backed review only: the gates the database itself reports (authoritative there).
   gates: z.array(z.string().max(100)).max(50).optional(),
+  // The worker's last inspection result, as fixed codes (never a provider's text). Present (possibly null) only when the
+  // database has media-only re-inspection (migration 20261011112745); absent in the offline inbox and on an older database.
+  lastInspection: z.strictObject({ at: instant, action: z.string().max(60), detail: z.string().max(300).nullable(), revision: z.number().int().positive() }).nullable().optional(),
 });
 export type ReviewCandidate = z.infer<typeof candidateSchema>;
 export const inboxSchema = z.strictObject({
