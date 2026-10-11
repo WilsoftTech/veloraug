@@ -519,7 +519,7 @@ describe("media gate (E3.5)", () => {
     ];
     expect(refused.slice(-4, -1).map((m) => m?.classification.class)).toEqual(["remux", "manual_review", "video_transcode_required"]);
     for (const value of refused) {
-      expect(await uploadEntry(entry({ media: value }), CAPTION, deps(store, api))).toEqual({ result: "refused", code: "media_not_verified" });
+      expect(await uploadEntry(entry({ media: value, kind: "series" }), CAPTION, deps(store, api))).toEqual({ result: "refused", code: "media_not_verified" });
     }
     expect(store.calls).toEqual([]);
     expect(api.preflight).not.toHaveBeenCalled();

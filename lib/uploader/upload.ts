@@ -208,8 +208,9 @@ export async function uploadEntry(entry: JournalEntry, caption: string, deps: Up
   // First, before any server read, journal write, upload start or Telegram call.
   if (!isRealTelegramUploadAuthorized()) return { result: "refused", code: "telegram_uploads_not_authorized" };
   if (!isUploadPlanned(entry)) return { result: "refused", code: `plan_${entry.plan?.action ?? "missing"}` };
-  // Playback media only (E3.5): canonical bytes, or a verified stream-copy rendition.
-  if (!mediaAllowsUpload(entry.media)) return { result: "refused", code: "media_not_verified" };
+  // Accept original movies without transforming them; preserve the legacy series/rendition gate.
+  if (!mediaAllowsUpload(entry.media, entry.kind, entry.fileName)) return { result: "refused", code: "media_not_verified" };
+  if (entry.kind === "movie" && !["mp4", "mkv"].includes(entry.fileName.split(".").pop()?.toLowerCase() ?? "")) return { result: "refused", code: "unsupported_movie_container" };
   if (entry.intendedChannelId === null) return { result: "refused", code: "channel_not_planned" };
   if (!deps.store.available) return { result: "refused", code: "server_boundary_unavailable" };
 

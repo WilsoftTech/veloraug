@@ -466,7 +466,7 @@ export type PlannedAction =
  * rendition is already recorded. Null means not inspected, which never uploads.
  */
 export interface MediaVerdict {
-  class: "canonical" | "remux" | "audio_normalization" | "video_transcode_required" | "manual_review";
+  class: "original" | "canonical" | "remux" | "audio_normalization" | "video_transcode_required" | "manual_review";
   reasons: string[];
   renditionRecorded: boolean;
 }

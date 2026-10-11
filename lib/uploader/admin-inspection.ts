@@ -1,9 +1,10 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { assembleDiskUpload,diskManifestSchema,verifiedUploadPath } from "@/lib/uploader/disk-transfer";
+import { assembleDiskUpload,diskManifestSchema,existingVerifiedUploadPath } from "@/lib/uploader/disk-transfer";
 import { fingerprintFile,hashFile } from "@/lib/uploader/scan";
 import { probeMedia,resolveMediaTools,validatePlayback } from "@/lib/uploader/media-tools";
+import { assessOriginalMedia, classifyOriginalMovie } from "@/lib/ingestion/original-media";
 import { classifyMedia } from "@/lib/ingestion/media";
 import { parseFilename } from "@/lib/ingestion/parser";
 import { decideMatch } from "@/lib/ingestion/match";
@@ -33,13 +34,14 @@ export async function inspectAdminUpload(root: string,ports: UploadInspectionPor
       if (stage!=="uploaded") throw new Error("upload_verification_not_persisted");
     } else {
       if (!claim.verified_file_key || !session.verified_sha256) throw new Error("upload_verification_missing");
-      const path = verifiedUploadPath(root,session.id,claim.verified_file_key);
+      const path = await existingVerifiedUploadPath(root,session.id,claim.verified_file_key,session.file_name);
       if (await hashFile(path,session.size_bytes)!==session.verified_sha256) throw new Error("upload_chunk_corrupt");
       const tools = await resolveMediaTools();
       if (!tools.ok) throw new Error("upload_media_tools_missing");
       const probe = await probeMedia(tools.tools.ffprobe,path);
       if (!probe.ok) throw new Error(probe.code);
-      const classification = classifyMedia(probe.inspection);
+      const classification = session.metadata.kind === "movie" ? classifyOriginalMovie(probe.inspection, session.file_name) : classifyMedia(probe.inspection);
+      const assessment = session.metadata.kind === "movie" ? assessOriginalMedia(probe.inspection, session.file_name) : null;
       if(session.storage==="r2" && classification.class==="canonical") await validatePlayback(tools.tools.ffmpeg,path);
       const parsed = parseFilename(session.file_name);
       const vj = resolveVj(parsed.vjText,claim.vjs.map(({ active,...record }) => ({ ...record,isActive: active })));
@@ -51,7 +53,7 @@ export async function inspectAdminUpload(root: string,ports: UploadInspectionPor
       const decision = decideMatch(query,choices);
       const snapshots = (await Promise.all(choices.slice(0,20).filter((choice) => choice.mediaType==="movie").map((choice) => fetchMovieSnapshot(choice.tmdbId)))).filter((snapshot) => snapshot!==null);
       const stage = await ports.finish(session.id,claim.token,{ outcome: "inspected",inspection: {
-        choices: snapshots,parsed,query,classification,media: probe.inspection,vj,decoded:session.storage==="r2" && classification.class==="canonical",
+        choices: snapshots,parsed,query,classification,assessment,media: probe.inspection,vj,decoded:session.storage==="r2" && classification.class==="canonical",
         evaluation: evaluationPayload({ kind: {status: "confirmed",kind: query.kind},title: query.title,year: query.year,vjText: parsed.vjText,vj,season: session.metadata.season ?? parsed.season,episode: session.metadata.episode ?? parsed.episode,match: decision }),
         proposed_vj_id: vj.status==="resolved" ? vj.vjId : null,
         proposed_tmdb_id: decision.outcome==="matched" && decision.confidence==="high" ? decision.best.candidate.tmdbId : null,

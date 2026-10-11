@@ -91,7 +91,7 @@ export async function copyStage(source: string, partial: string, size: number, s
 /** Called under the existing journal lock; no server/Telegram dependency exists here. */
 export async function stageEntry(entry: JournalEntry, options: StagingOptions, journal: Journal, io: StagingIO): Promise<StagingResult> {
   if (unresolved(entry)) return { result: "refused", code: "upload_unresolved" };
-  if (entry.kind !== "movie" || !mediaAllowsUpload(entry.media) || entry.sizeBytes <= 0 || entry.sizeBytes > TELEGRAM_MAX_FILE_BYTES) return { result: "refused", code: "media_not_stageable" };
+  if (entry.kind !== "movie" || !mediaAllowsUpload(entry.media, entry.kind, entry.fileName) || entry.sizeBytes <= 0 || entry.sizeBytes > TELEGRAM_MAX_FILE_BYTES) return { result: "refused", code: "media_not_stageable" };
   if (!/^[0-9a-f]{64}$/.test(options.sha256) || !isSafeServerRoot(options.serverRoot)) return { result: "refused", code: "staging_configuration_invalid" };
   try {
     const target = stagingPaths(entry, options.root);

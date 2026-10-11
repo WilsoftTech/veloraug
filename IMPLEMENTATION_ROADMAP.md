@@ -261,15 +261,15 @@ The first Velora UG task is reconciliation, not feature construction.
   - **Next (separate approval).** Fix the lease release, then the canary on message 46 through a path that cannot land on another film. No candidate has passed the media check yet.
   - Record and rollout plan: `docs/E3_8_MEDIA_RECOVERY.md`.
 - E3.9 MP4/MKV native playback and download, Checkpoints 0 and 1 (2026-10-11): **PASS (local) — browser baseline recorded; Checkpoints 2 to 9 not started.**
-  - **Direction (Gate A, approved conditionally).** Original MP4 and MKV files are accepted and preserved with no conversion, transcoding or remuxing. Media integrity and streaming readiness are separated from browser compatibility, and an authorized original-file download covers what a browser cannot play. Published versions, series rules, rights clearance, publication approval and one version per VJ are unchanged. This replaces the E3.5 stream-copy normalization for new uploads once implemented; nothing is implemented yet.
+  - **Direction (Gate A, approved conditionally).** Original MP4 and MKV files are accepted and preserved with no conversion, transcoding or remuxing. Media integrity and streaming readiness are separated from browser compatibility, and an authorized original-file download covers what a browser cannot play. Published versions, series rules, rights clearance, publication approval and one version per VJ are unchanged. This replaces the E3.5 stream-copy normalization for new uploads once implemented; Checkpoints 2?3 now implement local acceptance and inspection; database persistence and later playback/download checkpoints remain gated.
   - **Test infrastructure.** `@playwright/test` 1.64.0, exact pin, development only. `tests/browser/` plays thirteen committed synthetic fixtures (3.6 MB, FFmpeg test pattern and tone) through the real gateway core on loopback. `npm run test:browser`.
   - **Baseline** (Chrome 154, Edge 155, Chromium 156, Playwright Firefox 157, Windows).
-    - MP4 with H.264 and AAC or MP3 plays everywhere, fast-start or with the index at the end (one extra request to the tail).
+    - MP4 with H.264 and AAC or MP3 plays in the tested Chrome/Edge/Chromium/Firefox combinations, fast-start or with the index at the end (one extra request to the tail).
     - MKV with H.264 and AAC plays in the Chromium family from the first 2 MiB. Firefox reported metadata only after the whole 55 MB test file was sent, so it does not stream MKV; MKV with MP3 is silent there.
     - HEVC depends on the device's hardware decoder. AC-3 is silent in every browser. Neither raises an error, so a player has to observe it.
     - `canPlayType()` was wrong in both directions in Firefox.
   - **Not covered.** Safari on macOS and iOS and all Android browsers are **NOT TESTED** (real devices). Playwright WebKit is an approximation and is not Safari.
-  - **Listener defect (read-only).** The bounded listener loses its lease on SIGTERM because its one-shot signal handler is gone when the MTProto library re-raises the signal. Reproduced offline in a disposable container. Proposed fix: `process.on` in `discovery.mts`. Not applied; the running listener was not touched.
+  - **Listener defect (read-only).** The bounded listener loses its lease on SIGTERM because its one-shot signal handler is gone when the MTProto library re-raises the signal. Reproduced offline in a disposable container. Local fix: persistent `process.on` handlers in `discovery.mts`, with offline repeated-signal tests proving idempotent abort and one lease release. The running listener was not rebuilt, restarted or replaced.
   - **External state.** Telegram 0, hosted 0, no migration, no upload, no reinspection, no product code changed.
   - Record: `docs/MP4_MKV_NATIVE_PLAYBACK.md`.
 - Database regression suite: `npm run test:db` (local Supabase; resets it). Without touching developer state: `npm run test:db:isolated` (disposable container, every migration and suite) and, with `VELORA_E38_ISOLATED_TESTS=true`, `npm run test:integration:isolated`.
@@ -712,3 +712,8 @@ UI / routes
 - Public reads are published-only; privileged writes use narrow audited server paths.
 - Preserve deliberate restrictions when regenerating database types.
 - Prefer the simplest solution satisfying correctness, security, performance, and migration safety.
+
+  - **Checkpoint 1 close-out.** Full matrix retained; 141 raw results archived. Four transient headed failures all passed on rerun; two missing failure diagnostics remain unavailable. Runs were not flawless.
+  - **Checkpoint 2.** New movie uploads accept original MP4/MKV only. Valid tail-index MP4/MKV no longer require remux planning. Series and historical renditions retain policy 2; movie normalization execution is disabled. Admin disk/R2 caches use the exact validated original basename, with historical path recovery preserved.
+  - **Checkpoint 3.** Policy 3 records metadata consistency, potential streaming, fixture-based compatibility predictions, track metadata and unavailable download separately. Bounded MKV requires Matroska DocType and complete Tracks. Tail-index MP4 uses original-offset bounded probe samples and a startup warning. No full-integrity/browser verification or publication approval is inferred.
+  - **Gate.** No migration was created or applied, no hosted state or backlog media was touched, and nothing was pushed or deployed. New evidence cannot be persisted through the current exact legacy RPC contract until Checkpoint 4.

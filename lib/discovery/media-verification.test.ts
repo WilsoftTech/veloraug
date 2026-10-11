@@ -1,22 +1,27 @@
 import { describe, expect, it, vi } from "vitest";
 import { transientMediaFailure, verifyChannelMedia, VERIFICATION_METHOD } from "./media-verification";
 import { AAC_LC, H264_HIGH, HEVC, probeOf, virtualMp4 } from "./synthetic-media";
-import { MEDIA_POLICY_VERSION } from "@/lib/ingestion/media";
+import { ORIGINAL_MEDIA_POLICY_VERSION } from "@/lib/ingestion/original-media";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { resolveMediaTools, headProbe, probeMedia } from "@/lib/uploader/media-tools";
+
+const tools = await resolveMediaTools();
 
 // The shape of the gateway reader's closed errors (lib/media-gateway/errors.ts), which this module never imports.
 const readerError = (code: string) => Object.assign(new Error(code), { name: "GatewayError", code });
 
 const identity = `tg1-${"a".repeat(64)}`;
 const ports = (file: ReturnType<typeof virtualMp4>, probe: (head: Uint8Array) => Promise<unknown> = async (head) => probeOf(undefined, head.length)) =>
-  ({ read: file.read, probe: vi.fn(probe), gatewayCompatible: true });
+  ({ read: file.read, probe: vi.fn(probe as import("./media-verification").VerificationPorts["probe"]), gatewayCompatible: true });
 
 describe("bounded channel media verification (E3.8A)", () => {
   it("verifies a canonical fast-start MP4 from a bounded index, sample and tail", async () => {
     const file = virtualMp4();
     const port = ports(file);
     const evidence = await verifyChannelMedia({ identity, sizeBytes: file.size }, port);
-    expect(evidence).toEqual({ identity, method: VERIFICATION_METHOD, policy_version: MEDIA_POLICY_VERSION, media_class: "canonical", reasons: [],
-      container: "mp4", video_codec: "h264", audio_codec: "aac", accessible: true, gateway_compatible: true, playback_ready: true, bytes_read: evidence.bytes_read });
+    expect(evidence).toMatchObject({ identity, method: VERIFICATION_METHOD, policy_version: ORIGINAL_MEDIA_POLICY_VERSION, media_class: "original", reasons: [],
+      container: "mp4", video_codec: "h264", audio_codec: "aac", accessible: true, gateway_compatible: true, playback_ready: false, bytes_read: evidence.bytes_read });
     // A ~1 GB document costs under 80 KiB: index, 64 KiB sample, headers and tail.
     expect(evidence.bytes_read).toBeLessThan(80 * 1024);
     expect(file.reads.every((read) => read.offset < file.head.length || read.offset >= file.size - 4096)).toBe(true);
@@ -26,7 +31,7 @@ describe("bounded channel media verification (E3.8A)", () => {
   it("never records more than a bounded, playback-policy claim", async () => {
     const file = virtualMp4();
     const evidence = await verifyChannelMedia({ identity, sizeBytes: file.size }, { ...ports(file), gatewayCompatible: false });
-    expect(evidence.media_class).toBe("canonical");
+    expect(evidence.media_class).toBe("original");
     expect(evidence.playback_ready).toBe(false); // not read through the gateway's reader: not playback-ready
     expect(evidence).not.toHaveProperty("full_integrity");
   });
@@ -34,15 +39,17 @@ describe("bounded channel media verification (E3.8A)", () => {
   it("records unsupported codecs as such (HEVC is never playback-ready)", async () => {
     const file = virtualMp4();
     const evidence = await verifyChannelMedia({ identity, sizeBytes: file.size }, ports(file, async (head) => probeOf([HEVC, AAC_LC], head.length)));
-    expect(evidence).toMatchObject({ media_class: "video_transcode_required", video_codec: "hevc", playback_ready: false });
-    expect(evidence.reasons).toContain("video_codec_hevc");
+    expect(evidence).toMatchObject({ media_class: "original", video_codec: "hevc", playback_ready: false });
+    expect(evidence.assessment?.compatibility.chromium).toBe("device_dependent_or_untested");
   });
 
-  it("refuses a non-fast-start file without probing it", async () => {
+  it("inspects a non-fast-start MP4 with its bounded original-offset index", async () => {
     const file = virtualMp4({ fastStart: false });
     const port = ports(file);
-    expect(await verifyChannelMedia({ identity, sizeBytes: file.size }, port)).toMatchObject({ media_class: "unverified", reasons: ["mp4_not_fast_start"], playback_ready: false });
-    expect(port.probe).not.toHaveBeenCalled();
+    expect(await verifyChannelMedia({ identity, sizeBytes: file.size }, port)).toMatchObject({ media_class: "original", reasons: [], playback_ready: false, assessment: { streaming: "potentially_playable_startup_warning", warnings: ["mp4_startup_tail_required"] } });
+    expect(port.probe).toHaveBeenCalledOnce();
+    expect(port.probe.mock.calls[0][1]?.[0].offset).toBe(file.size - 2048);
+    expect(file.reads.reduce((sum, read) => sum + read.length, 0)).toBeLessThan(80 * 1024);
   });
 
   it("refuses a container whose boxes do not cover the size Telegram reports", async () => {
@@ -66,7 +73,7 @@ describe("bounded channel media verification (E3.8A)", () => {
 
   it("refuses non-MP4 and unprobeable documents", async () => {
     const mkv = { size: 10_000, read: async (offset: number, length: number) => new Uint8Array(Math.min(length, 10_000 - offset)).fill(0x1a) };
-    expect(await verifyChannelMedia({ identity, sizeBytes: mkv.size }, { read: mkv.read, probe: async () => ({}), gatewayCompatible: true })).toMatchObject({ reasons: ["container_not_mp4"] });
+    expect(await verifyChannelMedia({ identity, sizeBytes: mkv.size }, { read: mkv.read, probe: async () => ({}), gatewayCompatible: true })).toMatchObject({ reasons: ["container_not_mp4_or_mkv"] });
     const file = virtualMp4();
     expect(await verifyChannelMedia({ identity, sizeBytes: file.size }, ports(file, async () => { throw new Error("ffprobe exited 1"); }))).toMatchObject({ reasons: ["probe_failed"], media_class: "unverified" });
     expect(await verifyChannelMedia({ identity, sizeBytes: file.size }, ports(file, async () => ({ not: "a probe" })))).toMatchObject({ reasons: ["probe_failed"] });
@@ -118,6 +125,35 @@ describe("bounded channel media verification (E3.8A)", () => {
     const file = virtualMp4();
     const evidence = await verifyChannelMedia({ identity, sizeBytes: file.size }, ports(file, async () => probeOf([H264_HIGH, AAC_LC], 7)));
     expect(evidence.reasons).not.toContain("size_mismatch");
-    expect(evidence.media_class).toBe("canonical");
+    expect(evidence.media_class).toBe("original");
+  });
+});
+
+describe.skipIf(!tools.ok)("offline real-fixture inspection integration", () => {
+  it("keeps truncated MKV tracks and over-budget tail indexes unverified without probing", async () => {
+    const bytes = await readFile(join("tests/browser/fixtures", "mkv-h264-aac.mkv"));
+    const probe = vi.fn();
+    const evidence = await verifyChannelMedia({ identity, sizeBytes: bytes.length }, {
+      read: async (offset, length) => bytes.subarray(offset, offset + length), probe, gatewayCompatible: true,
+    }, { maxHeadBytes: 64, tailBytes: 32 });
+    expect(evidence).toMatchObject({ media_class: "unverified", reasons: ["mkv_tracks_incomplete"], playback_ready: false });
+    expect(probe).not.toHaveBeenCalled();
+    const slow = virtualMp4({ fastStart: false, moovBytes: 128 * 1024 });
+    expect(await verifyChannelMedia({ identity, sizeBytes: slow.size }, ports(slow), { maxHeadBytes: 32 * 1024, tailBytes: 4096 })).toMatchObject({ media_class: "unverified", reasons: ["moov_over_budget"] });
+  });
+  it.each(["mp4-h264-aac-faststart.mp4", "mp4-h264-aac-moov-at-end.mp4", "mkv-h264-aac.mkv", "mkv-h264-aac-two-audio.mkv", "mkv-h264-aac-subtitles.mkv", "mkv-hevc-aac.mkv", "mkv-h264-ac3.mkv"])("inspects %s without replacing or transforming its bytes", async (name) => {
+    if (!tools.ok) throw new Error("media_tools_missing");
+    const path = join("tests/browser/fixtures", name);
+    const before = await readFile(path);
+    const local = await probeMedia(tools.tools.ffprobe, path);
+    expect(local.ok).toBe(true);
+    const evidence = await verifyChannelMedia({ identity, sizeBytes: before.length }, {
+      read: async (offset, length) => before.subarray(offset, offset + length),
+      probe: headProbe(tools.tools.ffprobe), gatewayCompatible: true,
+    });
+    expect(evidence).toMatchObject({ media_class: "original", inspection_scope: "bounded", accessible: true, playback_ready: false });
+    expect(evidence.assessment?.tracks.length).toBe(local.ok ? local.inspection.streams.length : 0);
+    expect(evidence.assessment?.compatibility.perFile).toBe("prediction");
+    expect(await readFile(path)).toEqual(before);
   });
 });

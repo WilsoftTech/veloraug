@@ -274,13 +274,24 @@ describe("dry-run plan", () => {
 
   describe("media gate (E3.5)", () => {
     const ok = "John.Wick.2014.VJ.Junior.mp4";
+    it("plans original MP4/MKV movie uploads, rejects other new movie extensions and retains series remux policy", () => {
+      for (const extension of ["mp4", "mkv"]) {
+        expect(planSource(input(`John.Wick.2014.VJ.Junior.${extension}`, { media: { class: "original", reasons: [], renditionRecorded: false } }))).toMatchObject({ action: "upload", stopReasons: [] });
+      }
+      expect(planSource(input("John.Wick.2014.VJ.Junior.avi"))).toMatchObject({ action: "reject", stopReasons: ["unsupported_extension"] });
+      const series = input("Example.S01E01.VJ.Junior.mkv", { media: { class: "remux", reasons: ["container_matroska"], renditionRecorded: false } });
+      series.source.declaredKind = "series";
+      expect(planSource(series)).toMatchObject({ action: "normalize", stopReasons: ["media_remux_required"] });
+      series.media = { class: "original", reasons: [], renditionRecorded: false };
+      expect(planSource(series)).toMatchObject({ action: "hold", stopReasons: ["media_original"] });
+    });
     it("never plans an upload for media that was not inspected", () => {
       expect(planSource(input(ok, { media: null }))).toMatchObject({ action: "hold", stopReasons: ["media_not_inspected"] });
     });
 
-    it("plans Class 2 for normalization, never for upload, before and after its rendition exists", () => {
-      expect(planSource(input("John.Wick.2014.VJ.Junior.mkv", { media: { class: "remux", reasons: ["container_matroska"], renditionRecorded: false } }))).toMatchObject({ action: "normalize", stopReasons: ["media_remux_required"] });
-      expect(planSource(input("John.Wick.2014.VJ.Junior.mkv", { media: { class: "remux", reasons: ["container_matroska"], renditionRecorded: true } }))).toMatchObject({ action: "normalize", stopReasons: ["media_rendition_recorded"] });
+    it("never mandates movie remuxing from historical verdicts", () => {
+      expect(planSource(input("John.Wick.2014.VJ.Junior.mkv", { media: { class: "remux", reasons: ["container_matroska"], renditionRecorded: false } }))).toMatchObject({ action: "hold", stopReasons: ["media_remux", "media_container_matroska"] });
+      expect(planSource(input("John.Wick.2014.VJ.Junior.mkv", { media: { class: "remux", reasons: ["container_matroska"], renditionRecorded: true } }))).toMatchObject({ action: "hold", stopReasons: ["media_remux", "media_container_matroska"] });
     });
 
     it.each(["audio_normalization", "video_transcode_required", "manual_review"] as const)("holds %s with its reasons", (cls) => {

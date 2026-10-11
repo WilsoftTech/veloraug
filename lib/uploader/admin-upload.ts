@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { SUPPORTED_EXTENSIONS } from "@/lib/ingestion/parser";
+import { MOVIE_UPLOAD_EXTENSIONS } from "@/lib/ingestion/original-media";
 import { movieSnapshotSchema } from "@/lib/tmdb/ingestion-search";
 import { DiscoveryStoreError, storeError, type DiscoveryRpc } from "@/lib/discovery/database";
 
@@ -9,8 +9,8 @@ export const adminUploadStages = ["draft", "uploading", "verifying", "uploaded",
 export type AdminUploadStage = (typeof adminUploadStages)[number];
 
 export const uploadFileSchema = z.strictObject({
-  fileName: z.string().trim().min(1).max(255).refine((name) => !/[\\/\x00-\x1f\x7f]/.test(name) && ![".", ".."].includes(name), "Choose a plain filename.")
-    .refine((name) => SUPPORTED_EXTENSIONS.includes(name.split(".").pop()!.toLowerCase()), "Unsupported video container."),
+  fileName: z.string().min(1).max(255).refine((name) => !/[\\/\x00-\x1f\x7f]/.test(name) && ![".", ".."].includes(name), "Choose a plain filename.")
+    .refine((name) => MOVIE_UPLOAD_EXTENSIONS.includes(name.split(".").pop()!.toLowerCase()), "Unsupported video container."),
   sizeBytes: z.number().int().positive().max(ADMIN_UPLOAD_MAX_BYTES),
 });
 

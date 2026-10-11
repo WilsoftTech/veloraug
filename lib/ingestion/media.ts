@@ -1,3 +1,5 @@
+// Legacy policy 2 is retained for series and historical renditions.
+// Original movie acceptance lives in original-media.ts (policy 3).
 import { createHash } from "node:crypto";
 import * as z from "zod";
 import type { ReadRange } from "@/lib/ingestion/fingerprint";
@@ -63,6 +65,10 @@ export interface MediaStream {
   bitRate: number | null;
   /** Cover art: an image stored as a video stream. */
   attachedPicture: boolean;
+  language?: string | null;
+  title?: string | null;
+  defaultTrack?: boolean;
+  forced?: boolean;
 }
 
 /** Top-level ISO-BMFF box order, read from the box headers only. */
@@ -76,6 +82,7 @@ export interface Mp4Layout {
 
 export interface MediaInspection {
   formatName: string;
+  matroskaDocType?: string | null;
   majorBrand: string | null;
   durationSeconds: number | null;
   /** Bytes on disk (stat), and what the probe reported. */
@@ -84,6 +91,61 @@ export interface MediaInspection {
   streams: MediaStream[];
   /** Null when the file is not ISO-BMFF (its first box is not ftyp). */
   layout: Mp4Layout | null;
+}
+
+/** EBML header parsing only. A WebM DocType must not masquerade as MKV. */
+function ebmlNumber(bytes: Uint8Array, at: number, id = false): { value: number; end: number } | null {
+  const first = bytes[at];
+  if (!first) return null;
+  let width = 1;
+  while (width <= 8 && !(first & (1 << (8 - width)))) width++;
+  if (width > (id ? 4 : 8) || at + width > bytes.length) return null;
+  let value = id ? first : first & ((1 << (8 - width)) - 1);
+  for (let i = 1; i < width; i++) value = value * 256 + bytes[at + i];
+  return Number.isSafeInteger(value) ? { value, end: at + width } : null;
+}
+
+export function matroskaDocType(bytes: Uint8Array): string | null {
+  const root = ebmlNumber(bytes, 0, true);
+  const size = root && ebmlNumber(bytes, root.end);
+  if (root?.value !== 0x1a45dfa3 || !size || size.end + size.value > bytes.length) return null;
+  const end = size.end + size.value;
+  for (let at = size.end; at < end;) {
+    const id = ebmlNumber(bytes, at, true);
+    const length = id && ebmlNumber(bytes, id.end);
+    if (!id || !length || length.end + length.value > end) return null;
+    if (id.value === 0x4282) return new TextDecoder().decode(bytes.subarray(length.end, length.end + length.value));
+    at = length.end + length.value;
+  }
+  return null;
+}
+
+/** Tracks must be complete in the bounded sample before ffprobe's track list is trusted. */
+export function completeMatroskaTracks(bytes: Uint8Array, documentSize?: number): boolean {
+  const root = ebmlNumber(bytes, 0, true);
+  const rootSize = root && ebmlNumber(bytes, root.end);
+  if (!rootSize) return false;
+  let at = rootSize.end + rootSize.value;
+  const segment = ebmlNumber(bytes, at, true);
+  // Segment size can be the 8-byte unknown-length sentinel; only its width is needed.
+  if (segment?.value !== 0x18538067) return false;
+  const first = bytes[segment.end];
+  let width = 1;
+  while (width <= 8 && !(first & (1 << (8 - width)))) width++;
+  if (!first || width > 8) return false;
+  const unknownSize = (first & ((1 << (8 - width)) - 1)) === (1 << (8 - width)) - 1
+    && bytes.subarray(segment.end + 1, segment.end + width).every((byte) => byte === 255);
+  const segmentSize = ebmlNumber(bytes, segment.end);
+  if (!unknownSize && (!segmentSize || (documentSize !== undefined && segmentSize.end + segmentSize.value !== documentSize))) return false;
+  at = segment.end + width;
+  while (at < bytes.length) {
+    const id = ebmlNumber(bytes, at, true);
+    const size = id && ebmlNumber(bytes, id.end);
+    if (!id || !size || size.end + size.value > bytes.length) return false;
+    if (id.value === 0x1654ae6b) return size.value > 0;
+    at = size.end + size.value;
+  }
+  return false;
 }
 
 export interface MediaClassification {
@@ -118,7 +180,8 @@ const probeSchema = z.object({
     channels: z.number().optional(),
     channel_layout: z.string().optional(),
     bit_rate: numeric,
-    disposition: z.object({ attached_pic: z.number().optional() }).partial().optional(),
+    tags: z.record(z.string(), z.string()).optional(),
+    disposition: z.object({ attached_pic: z.number().optional(), default: z.number().optional(), forced: z.number().optional() }).partial().optional(),
   })).default([]),
   format: z.object({
     format_name: z.string(),
@@ -168,6 +231,8 @@ export function inspectionFromProbe(probe: unknown, sizeBytes: number, layout: M
       channelLayout: s.channel_layout ?? null,
       bitRate: num(s.bit_rate),
       attachedPicture: s.disposition?.attached_pic === 1,
+      language: s.tags?.language ?? null, title: s.tags?.title ?? null,
+      defaultTrack: s.disposition?.default === 1, forced: s.disposition?.forced === 1,
     })),
     layout,
   };

@@ -20,7 +20,7 @@ it.skipIf(!tools.ok)("verifies a locally generated MP4 through the real bounded 
     await withReadRange(file, async (read) => {
       const verified = await channelMediaPort(() => read, headProbe(tools.tools.ffprobe))(event);
       expect(verified.verification!.reasons).toEqual([]);
-      expect(verified.verification).toMatchObject({ media_class: "canonical", playback_ready: true, video_codec: "h264", audio_codec: "aac", method: "bounded_mtproto_v1" });
+      expect(verified.verification).toMatchObject({ media_class: "original", playback_ready: false, video_codec: "h264", audio_codec: "aac", method: "bounded_original_v2" });
       expect(verified.verification!.bytes_read).toBeLessThanOrEqual(size + 4096 + 64);
     });
   } finally { await rm(directory, { recursive: true, force: true }); }

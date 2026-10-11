@@ -240,7 +240,7 @@ describe("upload --fingerprint on plain Node (C2B.2C.2)", () => {
       expect(result.stdout).toContain("media        NOT_INSPECTED");
       expect(result.stdout).toContain("would not upload (media_not_verified)");
       await journal.put({ ...original, media: sourceMedia(matroskaInspection(original.sizeBytes)) });
-      expect(run(TELEGRAM, "--fingerprint", A).stdout).toContain("would not upload (media_not_verified)");
+      expect(run(TELEGRAM, "--fingerprint", A).stdout).not.toContain("would not upload (media_not_verified)");
     } finally {
       await journal.put(original);
     }
@@ -264,20 +264,20 @@ describe("upload --fingerprint on plain Node (C2B.2C.2)", () => {
       expect(dry.stdout).toContain("stream copy (-c copy) of stream 0 (video) and stream 1 (audio)");
       expect(dry.stdout).toContain("encoding       none");
       expect(dry.stdout).toContain("no Telegram call, no database write");
-      expect(dry.stdout).toContain("would not normalize (media_tools_unavailable)");
+      expect(dry.stdout).toContain("would not normalize (original_movie_preserved: no remux permitted");
       expect(existsSync(renditions)).toBe(false);
       for (const secret of [MOVIE_TOKEN, String(MOVIES)]) expect(dry.stdout + dry.stderr).not.toContain(secret);
 
       const execute = ingest({ ...TELEGRAM, VELORA_RENDITIONS_DIR: renditions }, "normalize", "--fingerprint", B, "--execute");
       expect(execute.status).toBe(1);
-      expect(execute.stderr).toContain("media tools are unavailable; nothing was written");
+      expect(execute.stderr).toContain("movie originals are preserved; normalization is disabled");
       expect(ingest({}, "normalize", "--fingerprint", B).stderr).toContain("VELORA_RENDITIONS_DIR");
       expect(ingest({ VELORA_RENDITIONS_DIR: join(resolve(__dirname, "../.."), "renditions") }, "normalize", "--fingerprint", B).stderr).toContain("must be outside the repository");
 
       const show = ingest({}, "show", "--fingerprint", B);
       expect(show.stdout).toContain("media          REMUX");
       expect(show.stdout).toContain("normalization  not started");
-      expect(show.stdout).toContain("upload         blocked by media policy");
+      expect(show.stdout).toContain("upload         allowed by media policy");
 
       expect(ingest({}, "cleanup", "--fingerprint", B, "--execute").stderr).toContain("cleanup removes rendition files only");
       expect(snapshot()).toEqual(before);
@@ -315,7 +315,7 @@ describe("upload --fingerprint on plain Node (C2B.2C.2)", () => {
       expect(review.stdout).toContain("upload         blocked by media policy");
       const refused = ingest("normalize", "--fingerprint", B);
       expect(refused.stdout).toContain("action         none: the film's video and audio stream cannot be selected unambiguously");
-      expect(refused.stdout).toContain("would not normalize (media_manual_review");
+      expect(refused.stdout).toContain("media_manual_review");
       expect(refused.stdout).toContain("stream_selection_ambiguous");
       expect(snapshot()).toEqual(beforeReview);
     } finally {

@@ -16,7 +16,7 @@
 //   cleanup-staging --fingerprint sf1-… [--execute]               (local copy only)
 //
 // Media (E3.5): `scan` probes every file with ffprobe (VELORA_FFPROBE_PATH or
-// PATH) and classifies it (lib/ingestion/media.ts); only canonical bytes are
+// PATH) and classifies it (lib/ingestion/media.ts); movie originals with complete inspection metadata are
 // ever planned for upload. A Class 2 source plans `normalize`: `normalize
 // --execute` repackages it by stream copy into a verified fast-start MP4
 // under the renditions root (VELORA_RENDITIONS_DIR, default
@@ -59,6 +59,7 @@ import { planSource } from "@/lib/ingestion/plan";
 import { titleKey } from "@/lib/ingestion/duplicates";
 import { resolveVj } from "@/lib/ingestion/vj";
 import { buildUploadCaption, TELEGRAM_MAX_FILE_BYTES } from "@/lib/ingestion/telegram";
+import { classifyOriginalMovie } from "@/lib/ingestion/original-media";
 import { artworkStreams, classifyMedia, MEDIA_POLICY_VERSION, playableVideo, audioStreams, selectPlaybackStreams, unreadableMedia, type MediaInspection, type MediaStream } from "@/lib/ingestion/media";
 import { createLocalBotApiClient, loadLocalBotApiConfig, toServerFileUri, type LocalBotApiConfig } from "@/lib/telegram/local-bot-api";
 import { longRunningFetch } from "@/lib/telegram/long-running-fetch";
@@ -176,7 +177,7 @@ async function planFile(file: Pick<DiscoveredFile, "fileName" | "relativePath" |
     match: await match(kind, parse.title, parse.year),
     known: knownSubjects(entries, vjs, fingerprint),
     journal: existing ? existing.state : null,
-    media: mediaVerdict(media),
+    media: mediaVerdict(media, kind),
   });
 }
 
@@ -195,10 +196,10 @@ const mediaTools = () => (toolsCache ??= resolveMediaTools(process.env));
  * unchanged (same fingerprint) and re-classified from the stored inspection if
  * the policy changed; otherwise probed. Null when no ffprobe is available.
  */
-async function sourceMedia(path: string, existing: JournalEntry | null, tools: MediaTools | null): Promise<JournalMedia | null> {
+async function sourceMedia(path: string, existing: JournalEntry | null, tools: MediaTools | null, kind: CatalogueKind): Promise<JournalMedia | null> {
   const stored = existing?.media;
   if (stored && stored.role === "source" && stored.inspection !== null) {
-    return stored.classification.policyVersion === MEDIA_POLICY_VERSION ? stored : { ...stored, classification: classifyMedia(stored.inspection) };
+    return kind === "movie" || stored.classification.policyVersion === MEDIA_POLICY_VERSION ? stored : { ...stored, classification: classifyMedia(stored.inspection) };
   }
   if (tools === null) return stored ?? null;
   const probed = await probeMedia(tools.ffprobe, path);
@@ -207,14 +208,14 @@ async function sourceMedia(path: string, existing: JournalEntry | null, tools: M
     inspectedAt: new Date().toISOString(),
     tools: { ffprobe: tools.ffprobe.version, ffmpeg: tools.ffmpeg.version },
     inspection: probed.ok ? probed.inspection : null,
-    classification: probed.ok ? classifyMedia(probed.inspection) : unreadableMedia(probed.code),
+    classification: probed.ok ? (kind === "movie" ? classifyOriginalMovie(probed.inspection, basename(path)) : classifyMedia(probed.inspection)) : unreadableMedia(probed.code),
     rendition: stored?.rendition ?? null,
     derivedFrom: null,
     normalizationFailure: stored?.normalizationFailure ?? null,
   };
 }
 
-const CLASS_LABEL: Record<string, string> = { canonical: "CANONICAL", remux: "REMUX", audio_normalization: "AUDIO_NORMALIZATION", video_transcode_required: "VIDEO_TRANSCODE_REQUIRED", manual_review: "MANUAL_REVIEW" };
+const CLASS_LABEL: Record<string, string> = { original: "ORIGINAL", canonical: "CANONICAL", remux: "REMUX", audio_normalization: "AUDIO_NORMALIZATION", video_transcode_required: "VIDEO_TRANSCODE_REQUIRED", manual_review: "MANUAL_REVIEW" };
 const mediaLabel = (media: JournalMedia | null) => (media === null ? "NOT_INSPECTED" : CLASS_LABEL[media.classification.class]);
 
 function describeStream(s: MediaStream): string {
@@ -282,7 +283,7 @@ async function scan() {
         counts.set("hold", (counts.get("hold") ?? 0) + 1);
         continue;
       }
-      const media = await sourceMedia(file.absolutePath, existing, tools);
+      const media = await sourceMedia(file.absolutePath, existing, tools, kind);
       const plan = await planFile(file, kind, fingerprint, entries, vjs, existing, media);
       const now = new Date();
       const base = existing ?? newJournalEntry({ fingerprint, kind, intendedChannelId: channelId, ...file }, now);
@@ -315,7 +316,7 @@ async function inspect() {
   const fingerprint = await fingerprintFile(path, facts.size);
   const existing = await store.get(fingerprint);
   const resolved = await mediaTools();
-  const media = await sourceMedia(path, existing, resolved.ok ? resolved.tools : null);
+  const media = await sourceMedia(path, existing, resolved.ok ? resolved.tools : null, kind);
   const plan = await planFile(file, kind, fingerprint, await store.list(), vjs, existing, media);
   const parse = parseFilename(file.fileName);
   console.log(JSON.stringify({
@@ -435,7 +436,7 @@ async function describeSelected(entry: JournalEntry, total: number, text: string
   console.log(`media        ${mediaLabel(entry.media)}${entry.media?.role === "rendition" ? " rendition (stream copy verified)" : ""}`);
   const reasons: string[] = [];
   if (!isUploadPlanned(entry)) reasons.push(`plan_${entry.plan?.action ?? "missing"}`);
-  if (!mediaAllowsUpload(entry.media)) reasons.push("media_not_verified");
+  if (!mediaAllowsUpload(entry.media, entry.kind, entry.fileName)) reasons.push("media_not_verified");
   if (entry.state.upload === "uploading" || entry.state.upload === "uploaded") reasons.push(`journal_${entry.state.upload}`);
   if (entry.intendedChannelId === null) reasons.push("channel_not_planned");
 
@@ -727,6 +728,7 @@ async function normalize() {
   line("tools", resolved.ok ? `ffmpeg ${resolved.tools.ffmpeg.version} (${resolved.tools.ffmpeg.source}), ffprobe ${resolved.tools.ffprobe.version} (${resolved.tools.ffprobe.source})` : `unavailable: ${resolved.errors.join("; ")}`);
 
   const reasons: string[] = [];
+  if (source.kind === "movie") reasons.push("original_movie_preserved: no remux permitted");
   if (media === null) reasons.push("media_not_inspected (scan with media tools first)");
   else if (media.classification.class !== "remux") reasons.push(`media_${media.classification.class}: only Class 2 (remux) is normalized automatically`);
   if (source.state.upload !== "not_uploaded" || source.attempts.length > 0) reasons.push("source_has_upload_history (a replacement needs a reviewer, not normalize)");
@@ -761,6 +763,7 @@ async function normalize() {
     console.log(`\ndry run: ${reasons.length === 0 ? "would normalize this source" : `would not normalize (${reasons.join("; ")})`}. Nothing was written.`);
     return;
   }
+  if (source.kind === "movie") fail("movie originals are preserved; normalization is disabled");
   if (!resolved.ok) fail("media tools are unavailable; nothing was written");
   const release = await store.lock();
   try {
@@ -802,7 +805,7 @@ async function show() {
     if (rendition) line("rendition", `upload ${rendition.state.upload}${rendition.telegram ? `, Telegram message ${rendition.telegram.messageId}` : ""}`);
   }
   line("plan", `${entry.plan?.action ?? "none"}${entry.plan?.stopReasons.length ? `  (${entry.plan.stopReasons.join(", ")})` : ""}`);
-  line("upload", mediaAllowsUpload(media) ? `allowed by media policy; ${realUploadsState()}` : "blocked by media policy (only canonical bytes or a verified rendition are uploaded)");
+  line("upload", mediaAllowsUpload(media, entry.kind, entry.fileName) ? `allowed by media policy; ${realUploadsState()}` : "blocked by media policy (movie originals need complete inspection metadata; series use the legacy policy)");
   line("telegram", entry.telegram ? `uploaded, message ${entry.telegram.messageId}${entry.dbAcknowledgedAt ? ", server acknowledged" : ", server acknowledgement pending (resume)"}` : entry.state.upload === "uploading" ? "uploading or uncertain: settle with resume before anything else" : "not uploaded");
   line("review", entry.state.review);
   line("publication", "separate: evaluate, review, rights clearance, then the owner's publication script");

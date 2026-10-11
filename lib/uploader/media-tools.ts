@@ -1,9 +1,9 @@
 import "server-only";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, stat, statfs, writeFile } from "node:fs/promises";
+import { mkdtemp, open, rm, stat, statfs, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, delimiter, isAbsolute, join } from "node:path";
-import { createPacketDigest, inspectionFromProbe, packetListArguments, readMp4Layout, remuxArguments, type MediaInspection, type PacketDigest, type PlaybackSelection } from "@/lib/ingestion/media";
+import { createPacketDigest, inspectionFromProbe, matroskaDocType, packetListArguments, readMp4Layout, remuxArguments, type MediaInspection, type PacketDigest, type PlaybackSelection } from "@/lib/ingestion/media";
 import { withReadRange } from "@/lib/uploader/scan";
 
 /**
@@ -154,7 +154,9 @@ export async function probeMedia(ffprobe: MediaTool, path: string, run: Runner =
   if (!probe.ok) return probe;
   try {
     const layout = await withReadRange(path, (read) => readMp4Layout(sizeBytes, read));
-    return { ok: true, inspection: inspectionFromProbe(probe.json, sizeBytes, layout) };
+    const inspection = inspectionFromProbe(probe.json, sizeBytes, layout);
+    if (inspection.formatName.split(",").includes("matroska")) inspection.matroskaDocType = await withReadRange(path, async (read) => matroskaDocType(await read(0, Math.min(4096, sizeBytes))));
+    return { ok: true, inspection };
   } catch {
     return { ok: false, code: "probe_output_invalid" };
   }
@@ -177,12 +179,25 @@ async function probeJson(ffprobe: MediaTool, path: string, run: Runner): Promise
  * verification (lib/discovery/media-verification.ts). The bytes go to a private
  * temporary file that is always removed; nothing else of the document is held.
  */
-export function headProbe(ffprobe: MediaTool, run: Runner = runProcess): (head: Uint8Array) => Promise<unknown> {
-  return async (head) => {
+export function headProbe(ffprobe: MediaTool, run: Runner = runProcess): (head: Uint8Array, segments?: { offset: number; bytes: Uint8Array }[]) => Promise<unknown> {
+  return async (head, segments) => {
     const dir = await mkdtemp(join(tmpdir(), "velora-head-"));
     try {
       const path = join(dir, "head.mp4");
       await writeFile(path, head, { mode: 0o600, flag: "wx" });
+      if (segments?.length) {
+        const file = await open(path, "r+");
+        try {
+          for (const segment of segments) {
+            let written = 0;
+            while (written < segment.bytes.length) {
+              const result = await file.write(segment.bytes, written, segment.bytes.length - written, segment.offset + written);
+              if (!result.bytesWritten) throw new Error("probe_write_failed");
+              written += result.bytesWritten;
+            }
+          }
+        } finally { await file.close(); }
+      }
       const probe = await probeJson(ffprobe, path, run);
       if (!probe.ok) throw new Error(probe.code);
       return probe.json;

@@ -7,7 +7,8 @@ describe("admin upload boundary", () => {
     for (const sizeBytes of [0, -1, 1.5, ADMIN_UPLOAD_MAX_BYTES + 1]) expect(uploadFileSchema.safeParse({ fileName: "movie.mp4", sizeBytes }).success).toBe(false);
   });
   it("rejects paths, control characters and unsupported files", () => {
-    for (const fileName of ["../movie.mp4", "C:\\movie.mp4", "movie\n.mp4", "movie.exe", "..", ""]) expect(uploadFileSchema.safeParse({ fileName, sizeBytes: 100 }).success).toBe(false);
+    for (const fileName of ["../movie.mp4", "C:\\movie.mp4", "movie\n.mp4", "movie.exe", "movie.avi", "movie.mov", "movie.webm", "..", ""]) expect(uploadFileSchema.safeParse({ fileName, sizeBytes: 100 }).success).toBe(false);
+    expect(uploadFileSchema.parse({ fileName: " Film VJ Junior.MKV", sizeBytes: 100 }).fileName).toBe(" Film VJ Junior.MKV");
   });
   it("does not accept privileged metadata, including nested forged clearance", () => {
     for (const field of ["rights", "approved", "owner_id", "stage", "verified_sha256", "app_metadata"]) expect(uploadMetadataSchema.safeParse({ ...emptyUploadMetadata, [field]: true }).success).toBe(false);

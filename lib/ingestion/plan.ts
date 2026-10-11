@@ -1,3 +1,4 @@
+import { MOVIE_UPLOAD_EXTENSIONS } from "@/lib/ingestion/original-media";
 import { classifyDuplicate, duplicateIsNoop, duplicateNeedsReview, titleKey } from "@/lib/ingestion/duplicates";
 import { decideKind, SUPPORTED_EXTENSIONS } from "@/lib/ingestion/parser";
 import { approvalBlockers, MAX_UPLOAD_ATTEMPTS } from "@/lib/ingestion/state";
@@ -36,15 +37,11 @@ export interface PlanInput {
   media: MediaVerdict | null;
 }
 
-/**
- * Media gate (E3.5): only bytes already classified canonical may be uploaded.
- * Class 2 is repackaged first (its rendition is a separate, verified entry);
- * every other class stops for the operator with its reasons.
- */
-function mediaStop(media: MediaVerdict | null): { action: PlannedAction; reasons: string[] } | null {
+/** Original movies need inspection metadata; series retain legacy normalization. */
+function mediaStop(media: MediaVerdict | null, movie: boolean): { action: PlannedAction; reasons: string[] } | null {
   if (media === null) return { action: "hold", reasons: ["media_not_inspected"] };
-  if (media.class === "canonical") return null;
-  if (media.class === "remux") return { action: "normalize", reasons: [media.renditionRecorded ? "media_rendition_recorded" : "media_remux_required"] };
+  if (media.class === "canonical" || (movie && media.class === "original")) return null;
+  if (media.class === "remux" && !movie) return { action: "normalize", reasons: [media.renditionRecorded ? "media_rendition_recorded" : "media_remux_required"] };
   return { action: "hold", reasons: [`media_${media.class}`, ...media.reasons.map((reason) => `media_${reason}`)] };
 }
 
@@ -65,12 +62,12 @@ export function planSource({ source, parse, vjs, match, known, journal, media }:
   const duplicate = classifyDuplicate(subject, known);
 
   const stopReasons: string[] = [];
-  const mediaGate = mediaStop(media);
+  const mediaGate = mediaStop(media, unitKind === "movie");
   let action: PlannedAction;
   if (duplicateIsNoop(duplicate)) {
     action = "skip";
     stopReasons.push(duplicate.type === "renamed" ? "already_ingested_renamed" : "already_ingested");
-  } else if (!SUPPORTED_EXTENSIONS.includes(parse.extension)) {
+  } else if (!(unitKind === "movie" ? MOVIE_UPLOAD_EXTENSIONS : SUPPORTED_EXTENSIONS).includes(parse.extension)) {
     action = "reject";
     stopReasons.push("unsupported_extension");
   } else if (source.sizeBytes > TELEGRAM_MAX_FILE_BYTES) {

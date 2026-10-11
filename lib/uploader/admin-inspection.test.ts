@@ -6,7 +6,7 @@ const mocks = vi.hoisted(() => ({ assemble: vi.fn(),fingerprint: vi.fn(),hash: v
 vi.mock("@/lib/uploader/disk-transfer",async (original) => ({ ...await original<typeof import("./disk-transfer")>(),assembleDiskUpload: mocks.assemble }));
 vi.mock("@/lib/uploader/scan",() => ({ fingerprintFile: mocks.fingerprint,hashFile: mocks.hash }));
 vi.mock("@/lib/uploader/media-tools",() => ({ resolveMediaTools: mocks.tools,probeMedia: mocks.probe }));
-vi.mock("@/lib/ingestion/media",() => ({ classifyMedia: mocks.classify }));
+import { canonicalInspection } from "./test-media";
 vi.mock("@/lib/tmdb/ingestion-search",async (original) => ({ ...await original<typeof import("../tmdb/ingestion-search")>(),searchTmdbForIngestion: mocks.search,fetchMovieSnapshot: mocks.snapshot }));
 import { inspectAdminUpload } from "./admin-inspection";
 
@@ -22,7 +22,7 @@ beforeEach(() => {
   mocks.fingerprint.mockResolvedValue(`sf1-${"b".repeat(64)}`);
   mocks.hash.mockResolvedValue("a".repeat(64));
   mocks.tools.mockResolvedValue({ ok: true,tools: { ffprobe: { version: "test" },ffmpeg: { version: "test" } } });
-  mocks.probe.mockResolvedValue({ ok: true,inspection: {} });
+  mocks.probe.mockResolvedValue({ ok: true,inspection: canonicalInspection(3) });
   mocks.classify.mockReturnValue({ class: "canonical",reasons: [],policyVersion: 1 });
   mocks.search.mockResolvedValue([]);
 });

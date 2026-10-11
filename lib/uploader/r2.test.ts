@@ -61,6 +61,19 @@ describe("R2 control and integrity",()=>{
     const state=fixture(),db=controls(state),sdk=storage(state);await signR2Part(state.session.id,1,state.parts[0].sha256,db,sdk);
     expect(db.command).toHaveBeenCalledWith(state.session.id,"reserve_part",{number:1,sha256:state.parts[0].sha256});expect(sdk.sign).toHaveBeenCalledWith(state.reference,1,3);
   });
+  it("preserves the original MKV name in R2 disk staging and supports historical cache paths explicitly",async()=>{
+    const state=fixture();state.state="complete";state.reference.etag="opaque-final-2";state.session.file_name="Original VJ Junior.MKV";
+    const bytes=Buffer.from("abc"),dir=await mkdtemp(join(tmpdir(),"velora-r2-name-"));
+    try {
+      const original=await downloadR2Verified(dir,state,storage(state,bytes));
+      expect(original.path.endsWith("Original VJ Junior.MKV")).toBe(true);
+      expect(await readFile(original.path)).toEqual(bytes);
+      const historical=await downloadR2Verified(dir,state,storage(state,bytes),randomUUID(),undefined,true);
+      expect(historical.path.endsWith(".verified.mp4")).toBe(true);
+      expect(await readFile(historical.path)).toEqual(bytes);
+      expect(original.sha256).toBe(historical.sha256);
+    } finally {await rm(dir,{recursive:true,force:true});}
+  });
   it.each(["valid","corrupt","truncated","overflow"])("streams %s content with whole-file and part integrity",async(mode)=>{
     const state=fixture();state.state="complete";state.reference.etag="opaque-final-2";
     const bytes=Buffer.from(mode==="corrupt"?"abd":mode==="truncated"?"ab":mode==="overflow"?"abcd":"abc");

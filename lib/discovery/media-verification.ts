@@ -1,4 +1,5 @@
-import { MEDIA_POLICY_VERSION, audioStreams, classifyMedia, inspectionFromProbe, playableVideo, readMp4Layout, type MediaClass } from "@/lib/ingestion/media";
+import { audioStreams, inspectionFromProbe, matroskaDocType, completeMatroskaTracks, playableVideo, readMp4Layout, type MediaClass } from "@/lib/ingestion/media";
+import { assessOriginalMedia, classifyOriginalMovie, ORIGINAL_MEDIA_POLICY_VERSION } from "@/lib/ingestion/original-media";
 import type { ReadRange } from "@/lib/ingestion/fingerprint";
 import { channelIdentity } from "@/lib/discovery/events";
 import type { InspectionPorts } from "@/lib/discovery/pipeline";
@@ -16,32 +17,20 @@ function readFailure(error: unknown): string {
 const TRANSIENT_REASONS = new Set(["media_read_not_ready", "media_read_telegram_unavailable", "media_read_flood_wait", "media_read_mtproto_disconnected", "media_read_upstream_timeout", "probe_timeout"]);
 
 /**
- * Bounded verification of a document posted directly to the Movies channel
- * (E3.8A). It applies the existing browser-playback policy (lib/ingestion/media.ts,
- * the same rules that admit uploader files) to the document as Telegram holds
- * it, reading only:
- *
- * - one 16-byte header per top-level MP4 box (readMp4Layout), which also proves
- *   the boxes cover exactly the size Telegram reports;
- * - ftyp..moov plus at most 64 KiB of initial media samples, together capped
- *   at `maxHeadBytes`, handed to ffprobe (index alone omits codec profiles);
- * - the last bytes of the file, to prove the document is readable to its end.
- *
- * It never reads the media data in between, so it never claims full-file
- * integrity: the evidence says `bounded`, and the database refuses any other
- * scope. A document whose index is missing, too large, unreadable or outside
- * the policy is recorded as such, and publication stays blocked.
- *
- * In production `read` is lib/media-gateway/range-reader.ts over the gateway's
- * own MediaReader (the dedicated MTProto reader), so a document that verifies
- * here is one the gateway can serve. This module imports nothing of the gateway.
- * Detection never calls this; inspection does, once per document identity.
+ * Read-only inspection of original MP4/MKV documents through the gateway reader.
+ * MP4 box headers bound the layout; the index and initial sample stay within
+ * maxHeadBytes. A tail index is handed to ffprobe at its original offset in a
+ * disposable sparse file. MKV needs an explicit Matroska DocType and complete
+ * Tracks within the bounded head. A tail read checks end accessibility.
+ * No claim of full-file integrity, browser verification, download availability,
+ * rights clearance or publication approval follows from these samples.
+ * Policy 3 evidence requires the separately approved Checkpoint 4 database work.
  */
 
-export const VERIFICATION_METHOD = "bounded_mtproto_v1";
+export const VERIFICATION_METHOD = "bounded_original_v2";
 export const DEFAULT_VERIFICATION_BUDGET = { maxHeadBytes: 16 * 1024 * 1024, tailBytes: 4096 } as const;
 
-/** The evidence payload the database records (snake_case, as discovery_complete expects). */
+/** Local policy 3 evidence; persistence requires Checkpoint 4 schema/RPC support. */
 export interface ChannelMediaEvidence {
   identity: string;
   method: string;
@@ -55,6 +44,8 @@ export interface ChannelMediaEvidence {
   gateway_compatible: boolean;
   playback_ready: boolean;
   bytes_read: number;
+  assessment?: ReturnType<typeof assessOriginalMedia>;
+  inspection_scope?: "bounded";
 }
 
 /**
@@ -70,7 +61,7 @@ export interface VerificationPorts {
   /** Bounded reads of this exact document. */
   read: ReadRange;
   /** ffprobe JSON (`-show_format -show_streams`) of bounded index/sample bytes. */
-  probe(head: Uint8Array): Promise<unknown>;
+  probe(head: Uint8Array, segments?: { offset: number; bytes: Uint8Array }[]): Promise<unknown>;
   /** True when `read` is the gateway's MediaReader: what verifies is what the gateway serves. */
   gatewayCompatible: boolean;
 }
@@ -97,9 +88,9 @@ export async function verifyChannelMedia(
     return bytes;
   };
   const unverified = (reasons: string[], extra: Partial<ChannelMediaEvidence> = {}): ChannelMediaEvidence => ({
-    identity: document.identity, method: VERIFICATION_METHOD, policy_version: MEDIA_POLICY_VERSION,
+    identity: document.identity, method: VERIFICATION_METHOD, policy_version: ORIGINAL_MEDIA_POLICY_VERSION,
     media_class: "unverified", reasons, container: null, video_codec: null, audio_codec: null,
-    accessible: false, gateway_compatible: ports.gatewayCompatible, playback_ready: false, bytes_read: bytesRead, ...extra,
+    accessible: false, gateway_compatible: ports.gatewayCompatible, playback_ready: false, bytes_read: bytesRead, inspection_scope: "bounded", ...extra,
   });
 
   // 1. Top-level layout from box headers; each header read starts one box.
@@ -112,19 +103,41 @@ export async function verifyChannelMedia(
   } catch (error) {
     return unverified([readFailure(error)]);
   }
-  if (!layout) return unverified(["container_not_mp4"]);
-  if (!layout.complete) return unverified(["mp4_layout_incomplete"], { container: "mp4" });
-  const moov = layout.boxes.indexOf("moov");
-  if (moov === -1 || !layout.fastStart || layout.fragmented) {
-    return unverified([...(layout.fragmented ? ["mp4_fragmented"] : []), ...(!layout.fastStart ? ["mp4_not_fast_start"] : [])], { container: "mp4" });
+  let container: "mp4" | "mkv" = "mp4";
+  let segments: { offset: number; bytes: Uint8Array }[] | undefined;
+  let headEnd: number;
+  if (!layout) {
+    let header: Uint8Array;
+    try { header = await counted(0, Math.min(4096, document.sizeBytes)); }
+    catch (error) { return unverified([readFailure(error)]); }
+    // EBML DocType must explicitly be Matroska; WebM and arbitrary bytes are not MKV.
+    if (matroskaDocType(header) !== "matroska") return unverified(["container_not_mp4_or_mkv"]);
+    container = "mkv";
+    headEnd = Math.min(document.sizeBytes, budget.maxHeadBytes);
+  } else {
+    if (!layout.complete) return unverified(["mp4_layout_incomplete"], { container });
+    const moov = layout.boxes.indexOf("moov");
+    if (moov === -1) return unverified(["mp4_index_missing"], { container });
+    const indexStart = headerOffsets[moov];
+    const indexEnd = headerOffsets[moov + 1] ?? document.sizeBytes;
+    if (layout.fastStart) headEnd = indexEnd;
+    else {
+      const indexBytes = indexEnd - indexStart;
+      const prefixBytes = Math.min(indexStart, 64 * 1024);
+      if (indexBytes + prefixBytes > budget.maxHeadBytes) return unverified(["moov_over_budget"], { container });
+      try {
+        const bytes = await counted(indexStart, indexBytes);
+        if (bytes.length !== indexBytes) return unverified(["media_unreadable"], { container });
+        segments = [{ offset: indexStart, bytes }];
+      } catch (error) { return unverified([readFailure(error)], { container }); }
+      headEnd = prefixBytes;
+    }
+    if (headEnd > budget.maxHeadBytes) return unverified(["moov_over_budget"], { container });
   }
-  // fastStart: ftyp first, moov before mdat. The index ends where the next box starts.
-  const headEnd = headerOffsets[moov + 1] ?? document.sizeBytes;
-  if (headEnd > budget.maxHeadBytes) return unverified(["moov_over_budget"], { container: "mp4" });
 
   // 2. Include a small sample after the index: real ffprobe needs packets to
   // identify H.264 pixel format/profile and AAC profile. Unknown stays blocked.
-  const probeEnd = Math.min(document.sizeBytes, budget.maxHeadBytes, headEnd + 64 * 1024);
+  const probeEnd = Math.min(document.sizeBytes, budget.maxHeadBytes - (segments?.[0].bytes.length ?? 0), headEnd + (segments || container === "mkv" ? 0 : 64 * 1024));
   let head: Uint8Array;
   let tail: Uint8Array;
   const tailLength = Math.min(budget.tailBytes, document.sizeBytes);
@@ -132,34 +145,40 @@ export async function verifyChannelMedia(
     head = await counted(0, probeEnd);
     tail = await counted(document.sizeBytes - tailLength, tailLength);
   } catch (error) {
-    return unverified([readFailure(error)], { container: "mp4" });
+    return unverified([readFailure(error)], { container });
   }
   const accessible = head.byteLength === probeEnd && tail.byteLength === tailLength;
-  if (!accessible) return unverified(["media_unreadable"], { container: "mp4" });
+  if (!accessible) return unverified(["media_unreadable"], { container });
 
-  // 3. The existing policy on the probed index. The probe saw only the head, so
+  if (container === "mkv" && !completeMatroskaTracks(head, document.sizeBytes)) return unverified(["mkv_tracks_incomplete"], { container, accessible });
+
+  // 3. The original-file policy on the probed index. The probe saw only the head, so
   // its own size field is meaningless; size agreement is proven by the layout.
   let inspection: ReturnType<typeof inspectionFromProbe>;
   try {
-    const probe = (await ports.probe(head)) as { format?: Record<string, unknown> } | null;
+    const probe = (await ports.probe(head, segments)) as { format?: Record<string, unknown> } | null;
     const format = { ...(probe?.format ?? {}) };
     delete format.size;
     inspection = inspectionFromProbe({ ...probe, format }, document.sizeBytes, layout);
+    if (container === "mkv") inspection.matroskaDocType = matroskaDocType(head);
   } catch (error) {
-    return unverified([error instanceof Error && error.message === "probe_timeout" ? "probe_timeout" : "probe_failed"], { container: "mp4", accessible });
+    return unverified([error instanceof Error && error.message === "probe_timeout" ? "probe_timeout" : "probe_failed"], { container, accessible });
   }
-  const verdict = classifyMedia(inspection);
+  const assessment = assessOriginalMedia(inspection);
+  const verdict = classifyOriginalMovie(inspection);
   const video = playableVideo(inspection)[0]?.codec ?? null;
   const audio = audioStreams(inspection)[0]?.codec ?? null;
   const iso = inspection.formatName.split(",").includes("mp4");
   return {
     identity: document.identity, method: VERIFICATION_METHOD, policy_version: verdict.policyVersion,
-    media_class: verdict.class,
+    media_class: assessment.accepted ? verdict.class : "unverified",
     reasons: verdict.reasons.map((reason) => token(reason, 100) ?? "unknown").slice(0, 50),
-    container: iso ? "mp4" : token(inspection.formatName.split(",")[0]),
+    container: iso ? "mp4" : assessment.container,
     video_codec: token(video), audio_codec: token(audio),
     accessible, gateway_compatible: ports.gatewayCompatible,
-    playback_ready: verdict.class === "canonical" && accessible && ports.gatewayCompatible,
+    // Browser readiness and publication approval are never asserted by inspection.
+    playback_ready: false,
+    assessment, inspection_scope: "bounded",
     bytes_read: bytesRead,
   };
 }

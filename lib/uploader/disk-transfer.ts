@@ -1,9 +1,9 @@
 import "server-only";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, rename, stat, statfs, unlink } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { mkdir, open, rename, rmdir, stat, statfs, unlink } from "node:fs/promises";
+import { dirname, isAbsolute, join } from "node:path";
 import { z } from "zod";
-import { uploadSessionSchema } from "@/lib/uploader/admin-upload";
+import { uploadSessionSchema, uploadFileSchema } from "@/lib/uploader/admin-upload";
 
 export const DISK_CHUNK_BYTES = 8 * 1024 * 1024;
 export const diskManifestSchema = z.strictObject({ session: uploadSessionSchema, chunks: z.array(z.strictObject({
@@ -72,9 +72,13 @@ export async function storeDiskChunk(root: string, input: { id: string; owner: s
 }
 
 /** Assemble only the persisted contiguous manifest and rehash every chunk. */
-export function verifiedUploadPath(root: string,id: string,key: string): string {
+export function verifiedUploadPath(root: string,id: string,key: string,fileName?: string): string {
   if (!isAbsolute(root)) throw new Error("upload_staging_root_invalid");
-  return join(root,`${z.uuid().parse(id)}.${z.uuid().parse(key)}.verified.mp4`);
+  const prefix = `${z.uuid().parse(id)}.${z.uuid().parse(key)}`;
+  if (fileName === undefined) return join(root,`${prefix}.verified.mp4`); // historical cache
+  const name = uploadFileSchema.shape.fileName.parse(fileName);
+  if (name !== fileName || /[<>:"|?*]/.test(name) || /[. ]$/.test(name) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) throw new Error("upload_filename_invalid");
+  return join(root,prefix,name);
 }
 export async function assembleDiskUpload(root: string, manifest: DiskManifest): Promise<{ path: string; sha256: string; key: string }> {
   const parsed = diskManifestSchema.parse(manifest);
@@ -82,7 +86,8 @@ export async function assembleDiskUpload(root: string, manifest: DiskManifest): 
   const disk = await statfs(root);
   if (Number(disk.bavail) * Number(disk.bsize) < parsed.session.size_bytes + 2 * 1024 ** 3) throw new Error("upload_disk_full");
   const key = randomUUID();
-  const output = verifiedUploadPath(root,parsed.session.id,key);
+  const output = verifiedUploadPath(root,parsed.session.id,key,parsed.session.file_name);
+  await mkdir(join(root,`${parsed.session.id}.${key}`),{ recursive: true, mode: 0o700 });
   const file = await open(output,"wx",0o600);
   const hash = createHash("sha256");
   let offset = 0;
@@ -117,5 +122,25 @@ export async function assembleDiskUpload(root: string, manifest: DiskManifest): 
     if (offset !== parsed.session.size_bytes) throw new Error("upload_manifest_gap");
     await file.sync(); completed = true;
     return { path: output,sha256: hash.digest("hex"),key };
-  } finally { await file.close(); if (!completed) await unlink(output); }
+  } finally { await file.close(); if (!completed) await removeVerifiedUpload(output,root); }
+}
+
+/** Resolve a historical cache without renaming or replacing its bytes. */
+export async function existingVerifiedUploadPath(root: string, id: string, key: string, fileName: string): Promise<string> {
+  const path = verifiedUploadPath(root, id, key, fileName);
+  try { await stat(path); return path; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const historical = verifiedUploadPath(root, id, key);
+  try { await stat(historical); return historical; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  return path;
+}
+
+export async function removeVerifiedUpload(path: string, root: string): Promise<void> {
+  try { await unlink(path); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  if (dirname(path) !== root) {
+    try { await rmdir(dirname(path)); }
+    catch (error) { if (!["ENOENT", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
+  }
 }

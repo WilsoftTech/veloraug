@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import * as z from "zod";
 import { isFingerprint } from "@/lib/ingestion/fingerprint";
+import { ORIGINAL_MEDIA_POLICY_VERSION, assessOriginalMedia } from "@/lib/ingestion/original-media";
 import { MEDIA_POLICY_VERSION, type MediaClassification, type MediaInspection, type RemuxVerification } from "@/lib/ingestion/media";
 import { initialState } from "@/lib/ingestion/state";
 import type { CatalogueKind } from "@/types/catalogue";
@@ -120,6 +121,7 @@ export const mediaSchema = z.object({
   tools: z.object({ ffprobe: z.string().nullable(), ffmpeg: z.string().nullable() }),
   inspection: z.object({
     formatName: z.string(),
+    matroskaDocType: z.string().nullable().optional(),
     majorBrand: z.string().nullable(),
     durationSeconds: nullableNumber,
     sizeBytes: z.number().int().nonnegative(),
@@ -144,11 +146,13 @@ export const mediaSchema = z.object({
       channelLayout: z.string().nullable(),
       bitRate: nullableNumber,
       attachedPicture: z.boolean(),
+      language: z.string().nullable().optional(), title: z.string().nullable().optional(),
+      defaultTrack: z.boolean().optional(), forced: z.boolean().optional(),
     })),
     layout: z.object({ boxes: z.array(z.string()), fastStart: z.boolean(), fragmented: z.boolean(), complete: z.boolean() }).nullable(),
   }).nullable(),
   classification: z.object({
-    class: z.enum(["canonical", "remux", "audio_normalization", "video_transcode_required", "manual_review"]),
+    class: z.enum(["original", "canonical", "remux", "audio_normalization", "video_transcode_required", "manual_review"]),
     reasons: z.array(z.string()),
     policyVersion: z.number().int().positive(),
   }),
@@ -239,20 +243,17 @@ export function newJournalEntry(fields: Omit<JournalEntry, "version" | "state" |
   return { version: JOURNAL_VERSION, ...fields, state: initialState(), plan: null, attempts: [], telegram: null, dbAcknowledgedAt: null, updatedAt: now.toISOString(), media: null };
 }
 
-/**
- * The upload gate's media condition: this entry's own bytes were classified
- * canonical under the current policy, and a rendition carries a passed
- * stream-copy verification. Anything else (not inspected, another class, an
- * older policy, an unverified rendition) is never uploaded.
- */
-export function mediaAllowsUpload(media: JournalMedia | null): boolean {
+/** Movie originals use metadata acceptance; series and historical renditions use policy 2. */
+export function mediaAllowsUpload(media: JournalMedia | null, kind: CatalogueKind = "series", fileName?: string): boolean {
+  if (kind === "movie" && media?.role === "source" && [MEDIA_POLICY_VERSION, ORIGINAL_MEDIA_POLICY_VERSION].includes(media.classification.policyVersion)) return media.inspection !== null && assessOriginalMedia(media.inspection, media.classification.policyVersion === ORIGINAL_MEDIA_POLICY_VERSION ? fileName : undefined).accepted;
   if (media === null || media.classification.class !== "canonical" || media.classification.policyVersion !== MEDIA_POLICY_VERSION) return false;
   return media.role === "source" || media.derivedFrom?.verification.passed === true;
 }
 
 /** The planner's view of an entry's media. */
-export function mediaVerdict(media: JournalMedia | null): MediaVerdict | null {
-  if (media === null || media.classification.policyVersion !== MEDIA_POLICY_VERSION) return null;
+export function mediaVerdict(media: JournalMedia | null, kind: CatalogueKind = "series"): MediaVerdict | null {
+  if (media === null || ![MEDIA_POLICY_VERSION, ORIGINAL_MEDIA_POLICY_VERSION].includes(media.classification.policyVersion)) return null;
+  if (kind === "movie" && media.role === "source" && media.inspection && assessOriginalMedia(media.inspection).accepted) return { class: "original", reasons: [], renditionRecorded: media.rendition !== null };
   return { class: media.classification.class, reasons: media.classification.reasons, renditionRecorded: media.rendition !== null };
 }
 

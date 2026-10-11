@@ -1,0 +1,34 @@
+ M .env.example
+ M IMPLEMENTATION_ROADMAP.md
+ M app/admin/uploads/new/page.tsx
+ M docs/MP4_MKV_NATIVE_PLAYBACK.md
+ M lib/discovery/media-probe.test.ts
+ M lib/discovery/media-verification.test.ts
+ M lib/discovery/media-verification.ts
+ M lib/ingestion/boundary.test.ts
+ M lib/ingestion/lifecycle.test.ts
+ M lib/ingestion/media.ts
+ M lib/ingestion/plan.ts
+ M lib/uploader/admin-inspection.test.ts
+ M lib/uploader/admin-inspection.ts
+ M lib/uploader/admin-upload.test.ts
+ M lib/uploader/admin-upload.ts
+ M lib/uploader/cli.test.ts
+ M lib/uploader/disk-transfer.test.ts
+ M lib/uploader/disk-transfer.ts
+ M lib/uploader/journal.ts
+ M lib/uploader/media-tools.ts
+ M lib/uploader/r2-worker.ts
+ M lib/uploader/r2.test.ts
+ M lib/uploader/staging.ts
+ M lib/uploader/upload.ts
+ M lib/uploader/uploader.test.ts
+ M scripts/ingest/cli.mts
+ M services/media-gateway/discovery.mts
+ M types/ingestion.ts
+?? .claude/
+?? docs/MP4_MKV_CHECKPOINTS_2_3.md
+?? docs/evidence/
+?? lib/discovery/shutdown.test.ts
+?? lib/ingestion/original-media.test.ts
+?? lib/ingestion/original-media.ts

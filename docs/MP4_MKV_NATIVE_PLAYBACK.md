@@ -17,8 +17,10 @@ Telegram upload or push without separate authorization.
 | Checkpoint | State |
 | --- | --- |
 | 0. Read-only verification and impact map | Done. Gate A approved conditionally (2026-10-11) |
-| 1. Browser test infrastructure and baseline | Done (this record). Awaiting approval for the next checkpoint |
-| 2 to 9 | Not started, not authorized |
+| 1. Browser test infrastructure and baseline | Closed with four transient headed failures and successful reruns; evidence preserved |
+| 2. MP4/MKV ingestion | Implemented locally; see [close-out](MP4_MKV_CHECKPOINTS_2_3.md) |
+| 3. Media verification | Implemented locally; persistence awaits Checkpoint 4 |
+| 4 to 9 | Not implemented; separate approval required |
 
 ## Checkpoint 0: verification against the audit (2026-10-11)
 
@@ -65,7 +67,7 @@ migrations.
 
 ## Checkpoint 1: browser test infrastructure and baseline (2026-10-11)
 
-**Result: PASS.** Durable browser automation exists, and the baseline is
+**Result: PASS with reruns, not flawless.** Durable browser automation exists, and the baseline is
 recorded. No media acceptance rule, product code, database object or published
 movie changed.
 
@@ -492,7 +494,7 @@ uses the library's own exit hook and the worker's signal wiring.
 | `process.on`, library hook installed | Release completed, exit 0 |
 | `process.once`, no library hook | Release completed, exit 0 |
 
-**Proposed fix (not applied).** In `discovery.mts`, register both handlers with
+**Checkpoint 1 proposal (not applied at that checkpoint).** In `discovery.mts`, register both handlers with
 `process.on` in place of `process.once`. The existing `finally` block already
 removes them, and `abort()` is safe to call twice. No other change is needed:
 `admin-upload.mts` and `admin-upload-r2.mts` use the same one-shot pattern but
@@ -502,3 +504,29 @@ never load the MTProto library.
 mode in an isolated environment, send SIGTERM and confirm the lease row is
 released at once. Replacing the running listener is a live operation and needs
 its own approval.
+
+
+## Checkpoint 1 close-out and numbering (2026-10-11)
+
+The complete matrix and measurements above remain preserved. All 141 raw JSON
+records (117 small-fixture records in nine headless/headed projects plus 24
+startup records) are archived in `docs/evidence/checkpoint1-browser-results.zip`,
+with SHA-256 in the adjacent `.sha256` file. Regression runs cannot overwrite
+that archive. The archive contains the saved successful baseline records, not
+missing failure traces.
+
+Four transient headed-test failures occurred: an externally closed page, a
+probe started twice, and two failures whose diagnostic details were not
+captured. All four passed on rerun. Their exact missing traces/test identities
+cannot be reconstructed; this is a limitation of the original evidence.
+Those runs were not flawless. The double-start probe fix remains in place.
+
+**E3.9 is provisional.** Repository numbering was checked against
+`IMPLEMENTATION_ROADMAP.md` and the existing E3/E3.8/E3.8B documents. No competing
+E3.9 entry was found beyond this work's baseline roadmap entry. The external
+numbering/audit reference is not in the repository, so owner confirmation of
+the final label remains pending.
+
+The separately approved local Checkpoints 2?3 and listener signal fix are
+recorded in [the close-out report](MP4_MKV_CHECKPOINTS_2_3.md). The live listener
+was not rebuilt, restarted or replaced.

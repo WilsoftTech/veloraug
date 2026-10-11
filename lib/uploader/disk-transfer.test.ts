@@ -3,7 +3,7 @@ import { mkdtemp,readFile,rm,writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach,describe,expect,it,vi } from "vitest";
-import { assembleDiskUpload,diskChunkPath,storeDiskChunk,type DiskManifest } from "./disk-transfer";
+import { assembleDiskUpload,diskChunkPath,storeDiskChunk,verifiedUploadPath,type DiskManifest } from "./disk-transfer";
 import { emptyUploadMetadata } from "./admin-upload";
 const dirs: string[] = [];
 afterEach(async () => { for (const dir of dirs.splice(0)) await rm(dir,{ recursive: true,force: true }); });
@@ -18,6 +18,18 @@ async function setup() {
   return { root,manifest,ports,input };
 }
 describe("durable disk staging", () => {
+  it("retains the exact MKV basename, extension and bytes in an isolated generated directory", async () => {
+    const { root, manifest, ports, input } = await setup();
+    manifest.session.file_name = "Film VJ Junior.MKV";
+    await storeDiskChunk(root,input,ports);
+    const assembled = await assembleDiskUpload(root,manifest);
+    expect(assembled.path.endsWith("Film VJ Junior.MKV")).toBe(true);
+    expect(assembled.path).not.toContain("verified.mp4");
+    expect(await readFile(assembled.path,"utf8")).toBe("abc");
+    for (const name of ["../movie.mkv", "C:\\movie.mkv", "NUL.mkv", "movie:mkv.mp4"]) {
+      expect(() => verifiedUploadPath(root,manifest.session.id,randomUUID(),name)).toThrow();
+    }
+  });
   it("commits only fsynced complete chunks and reconstructs their full checksum", async () => {
     const { root,manifest,ports,input } = await setup();
     const result = await storeDiskChunk(root,input,ports);

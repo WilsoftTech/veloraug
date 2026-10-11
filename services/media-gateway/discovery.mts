@@ -53,7 +53,7 @@ async function main() {
   if (cfg.TELEGRAM_MOVIES_BOT_ID === cfg.TELEGRAM_MEDIA_BOT_ID || !cfg.TELEGRAM_MOVIES_BOT_TOKEN.startsWith(`${cfg.TELEGRAM_MOVIES_BOT_ID}:`)) throw new Error("discovery_bot_identity_invalid");
   if (process.argv.includes("--check")) { log({ event: "discovery_configuration_valid", inspection: cfg.VELORA_DISCOVERY_INSPECTION }); return; }
   const abort = new AbortController();
-  const stop = () => abort.abort(); process.once("SIGINT", stop); process.once("SIGTERM", stop);
+  const stop = () => abort.abort(); process.on("SIGINT", stop); process.on("SIGTERM", stop);
   const db = createDiscoveryPg(cfg.VELORA_DISCOVERY_DATABASE_URL);
   // Covers bounded media reads/probe, metadata timeouts and database round trips.
   const target = databasePersistence(db.rpc, { channelId: Number(cfg.TELEGRAM_MOVIES_CHANNEL_ID), inspectionLeaseSeconds: 240 });
