@@ -96,6 +96,7 @@ password is entered by the account owner, never in chat, operator scripts or Git
 | `npm run lint` / `npm run typecheck` | Static checks |
 | `npm run gateway:dev` | Runs the media gateway locally for playback (Docker); see "Playback (local)" |
 | `npm test` | Vitest unit tests (`lib/**/*.test.ts`), including the TMDB boundary check |
+| `npm run test:browser` | Playwright: plays the synthetic fixtures in `tests/browser/fixtures/` through the real media gateway core, in the installed Chrome and Edge and in Playwright's Chromium, Firefox and WebKit. Loopback only. Browser builds: `npx playwright install firefox webkit chromium`. Playwright WebKit is not Safari |
 | `npm run test:catalogue` | Resets the **local** database with the development fixtures, then runs the catalogue integration tests (`tests/integration/`) |
 | `npm run test:db` | Rebuilds the **local** Supabase database from `supabase/migrations/`, then runs the pgTAP suite. Needs Docker and a running local stack (`npx supabase@2.117.0 start`). It never touches hosted |
 

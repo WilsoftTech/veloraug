@@ -50,3 +50,8 @@ next-env.d.ts
 
 # example env file is safe to commit
 !.env.example
+
+# browser playback tests (Playwright output and recorded per-browser results)
+/test-results/
+/playwright-report/
+/tests/browser/.results/

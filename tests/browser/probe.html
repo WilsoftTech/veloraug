@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Velora UG playback probe</title>
+<!--
+  Drives one native <video> element through load, play, seek and resume, and
+  reports what the browser actually did. The test clicks the button, so playback
+  starts from a real user gesture, as it does in the product. Measured, never
+  assumed: a frame counts as decoded only if the picture drawn from the element
+  has content, and audio only if the samples the element produces are not silent.
+-->
+<button id="run" type="button">Run probe</button>
+<video id="video" playsinline preload="auto" width="320" height="180"></video>
+<canvas id="canvas" width="320" height="180"></canvas>
+<script>
+  const video = document.getElementById("video");
+  const canvas = document.getElementById("canvas");
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  /** Polls until `done()` is true or the time is up; `each` runs on every tick. */
+  async function until(done, ms, each = () => {}) {
+    const end = performance.now() + ms;
+    while (performance.now() < end) {
+      each();
+      if (done()) return true;
+      await sleep(50);
+    }
+    return done();
+  }
+
+  /** True when the element currently shows a picture with content (the test pattern is never one flat colour). */
+  function hasPicture() {
+    if (!video.videoWidth) return false;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    context.clearRect(0, 0, 320, 180);
+    try {
+      context.drawImage(video, 0, 0, 320, 180);
+    } catch {
+      return false;
+    }
+    const pixels = context.getImageData(0, 0, 320, 180).data;
+    let min = 765;
+    let max = 0;
+    for (let i = 0; i < pixels.length; i += 4 * 53) {
+      const sum = pixels[i] + pixels[i + 1] + pixels[i + 2];
+      if (sum < min) min = sum;
+      if (sum > max) max = sum;
+    }
+    return max - min > 90;
+  }
+
+  async function mediaCapabilities(config) {
+    if (!navigator.mediaCapabilities || !navigator.mediaCapabilities.decodingInfo) return "unavailable";
+    try {
+      const info = await navigator.mediaCapabilities.decodingInfo({
+        type: "file",
+        video: { contentType: config.mime + '; codecs="' + config.videoCodec + '"', width: 320, height: 180, bitrate: 110000, framerate: 12 },
+        audio: { contentType: config.mime.replace("video/", "audio/") + '; codecs="' + config.audioCodec + '"', channels: "2", bitrate: 64000, samplerate: 48000 },
+      });
+      return info.supported ? "supported" : "unsupported";
+    } catch (error) {
+      return "error:" + error.name;
+    }
+  }
+
+  async function probe(config) {
+    const result = {
+      canPlayType: video.canPlayType(config.typeWithCodecs),
+      canPlayContainer: video.canPlayType(config.mime),
+      mediaCapabilities: await mediaCapabilities(config),
+      metadata: false, metadataMs: null, duration: null, width: 0, height: 0,
+      audioTracks: null, videoTracks: null, textTracks: 0,
+      playing: false, playingMs: null, playRejected: null, firstFrame: false, framesDecoded: null,
+      audioMeasured: false, audioRms: 0, audioHz: null, audioDecodedBytes: null, hasAudioHint: null,
+      seeked: false, seekPosition: null, frameAfterSeek: false, resumed: false, audioRmsAfterSeek: 0,
+      errorCode: null, errorMessage: null, events: [],
+    };
+    for (const name of ["loadedmetadata", "loadeddata", "canplay", "playing", "waiting", "stalled", "seeking", "seeked", "error"]) {
+      video.addEventListener(name, () => { if (result.events.length < 40) result.events.push(name); });
+    }
+    const failed = () => video.error !== null;
+
+    // Audio taken from the element itself. Same origin, so the samples are readable.
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    // A build without Web Audio cannot be measured this way: that is recorded, never read as silence.
+    const context = AudioContextClass ? new AudioContextClass() : null;
+    const analyser = context ? context.createAnalyser() : null;
+    if (context && analyser) {
+      await context.resume().catch(() => {});
+      analyser.fftSize = 4096;
+      context.createMediaElementSource(video).connect(analyser);
+      analyser.connect(context.destination);
+      result.audioMeasured = true;
+    }
+    const samples = new Float32Array(analyser ? analyser.fftSize : 0);
+    const spectrum = new Float32Array(analyser ? analyser.frequencyBinCount : 0);
+    const level = () => {
+      if (!analyser) return 0;
+      analyser.getFloatTimeDomainData(samples);
+      let sum = 0;
+      for (const sample of samples) sum += sample * sample;
+      return Math.sqrt(sum / samples.length);
+    };
+    const dominantHz = () => {
+      if (!analyser || !context) return null;
+      analyser.getFloatFrequencyData(spectrum);
+      let best = 1;
+      for (let i = 2; i < spectrum.length; i++) if (spectrum[i] > spectrum[best]) best = i;
+      return Math.round((best * context.sampleRate) / analyser.fftSize);
+    };
+
+    const startedAt = performance.now();
+    video.src = config.url;
+    result.metadata = (await until(() => video.readyState >= 1 || failed(), 15000)) && video.readyState >= 1;
+    if (result.metadata) {
+      result.metadataMs = Math.round(performance.now() - startedAt);
+      result.duration = Number.isFinite(video.duration) ? Number(video.duration.toFixed(2)) : null;
+      result.width = video.videoWidth;
+      result.height = video.videoHeight;
+    }
+
+    if (!failed()) {
+      await Promise.race([video.play().catch((error) => { result.playRejected = error.name; }), sleep(10000)]);
+      // Playing means the clock advances while the element holds decodable data: one engine
+      // advances currentTime for a file it never loaded.
+      const advancing = () => video.readyState >= 2 && video.currentTime >= 1.5;
+      result.playing = (await until(() => advancing() || failed(), 15000, () => {
+        if (result.playingMs === null && video.readyState >= 2 && video.currentTime > 0) result.playingMs = Math.round(performance.now() - startedAt);
+        const now = level();
+        if (now > result.audioRms) { result.audioRms = now; result.audioHz = dominantHz(); }
+      })) && advancing();
+      result.firstFrame = hasPicture();
+      result.audioTracks = video.audioTracks ? video.audioTracks.length : null;
+      result.videoTracks = video.videoTracks ? video.videoTracks.length : null;
+      result.textTracks = video.textTracks.length;
+    }
+
+    if (result.playing && !failed()) {
+      video.currentTime = config.seekTo;
+      result.seeked = (await until(() => (!video.seeking && Math.abs(video.currentTime - config.seekTo) < 1.5) || failed(), 15000)) && !failed();
+      result.seekPosition = Number(video.currentTime.toFixed(2));
+      if (result.seeked) {
+        result.resumed = (await until(() => video.currentTime >= config.seekTo + 1.5 || failed(), 15000, () => {
+          result.audioRmsAfterSeek = Math.max(result.audioRmsAfterSeek, level());
+        })) && video.readyState >= 2 && video.currentTime >= config.seekTo + 1.5;
+        result.frameAfterSeek = hasPicture();
+      }
+    }
+
+    const quality = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality().totalVideoFrames : video.webkitDecodedFrameCount;
+    result.framesDecoded = typeof quality === "number" ? quality : null;
+    result.audioDecodedBytes = typeof video.webkitAudioDecodedByteCount === "number" ? video.webkitAudioDecodedByteCount : null;
+    result.hasAudioHint = typeof video.mozHasAudio === "boolean" ? video.mozHasAudio : null;
+    if (video.error) {
+      result.errorCode = video.error.code;
+      result.errorMessage = String(video.error.message || "").slice(0, 200);
+    }
+    result.audioRms = Number(result.audioRms.toFixed(4));
+    result.audioRmsAfterSeek = Number(result.audioRmsAfterSeek.toFixed(4));
+    video.pause();
+    if (context) await context.close().catch(() => {});
+    return result;
+  }
+
+  // One run per page load: in a headed window a stray key press on the focused button must not start a second.
+  document.getElementById("run").addEventListener("click", () => {
+    probe(window.__probeConfig).then(
+      (result) => { window.__probeResult = result; },
+      (error) => { window.__probeResult = { harnessError: String(error && error.message ? error.message : error) }; },
+    );
+  }, { once: true });
+</script>
+</html>

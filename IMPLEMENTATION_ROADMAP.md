@@ -260,6 +260,18 @@ The first Velora UG task is reconciliation, not feature construction.
   - **Second attempt, then metadata mode again (2026-10-11).** Message 46 is still not inspected. Two more reviewer requests reached the bounded listener on other films: message 49 (Matroska, `container_not_mp4`, 16 bytes read) and message 50 again (`mp4_not_fast_start`). All confirmations were kept; 144 bytes were read from Telegram in total. The listener was returned to metadata mode on `gate-b`, healthy at the same checkpoint. **Defect:** the bounded listener does not release its consumer lease on SIGTERM (the MTProto library's own signal handler ends the process first), so the next start waits for the lease to expire. A read-only fast-start repair plan for In Cold Light is recorded; its original file is not on this machine.
   - **Next (separate approval).** Fix the lease release, then the canary on message 46 through a path that cannot land on another film. No candidate has passed the media check yet.
   - Record and rollout plan: `docs/E3_8_MEDIA_RECOVERY.md`.
+- E3.9 MP4/MKV native playback and download, Checkpoints 0 and 1 (2026-10-11): **PASS (local) — browser baseline recorded; Checkpoints 2 to 9 not started.**
+  - **Direction (Gate A, approved conditionally).** Original MP4 and MKV files are accepted and preserved with no conversion, transcoding or remuxing. Media integrity and streaming readiness are separated from browser compatibility, and an authorized original-file download covers what a browser cannot play. Published versions, series rules, rights clearance, publication approval and one version per VJ are unchanged. This replaces the E3.5 stream-copy normalization for new uploads once implemented; nothing is implemented yet.
+  - **Test infrastructure.** `@playwright/test` 1.64.0, exact pin, development only. `tests/browser/` plays thirteen committed synthetic fixtures (3.6 MB, FFmpeg test pattern and tone) through the real gateway core on loopback. `npm run test:browser`.
+  - **Baseline** (Chrome 154, Edge 155, Chromium 156, Playwright Firefox 157, Windows).
+    - MP4 with H.264 and AAC or MP3 plays everywhere, fast-start or with the index at the end (one extra request to the tail).
+    - MKV with H.264 and AAC plays in the Chromium family from the first 2 MiB. Firefox reported metadata only after the whole 55 MB test file was sent, so it does not stream MKV; MKV with MP3 is silent there.
+    - HEVC depends on the device's hardware decoder. AC-3 is silent in every browser. Neither raises an error, so a player has to observe it.
+    - `canPlayType()` was wrong in both directions in Firefox.
+  - **Not covered.** Safari on macOS and iOS and all Android browsers are **NOT TESTED** (real devices). Playwright WebKit is an approximation and is not Safari.
+  - **Listener defect (read-only).** The bounded listener loses its lease on SIGTERM because its one-shot signal handler is gone when the MTProto library re-raises the signal. Reproduced offline in a disposable container. Proposed fix: `process.on` in `discovery.mts`. Not applied; the running listener was not touched.
+  - **External state.** Telegram 0, hosted 0, no migration, no upload, no reinspection, no product code changed.
+  - Record: `docs/MP4_MKV_NATIVE_PLAYBACK.md`.
 - Database regression suite: `npm run test:db` (local Supabase; resets it). Without touching developer state: `npm run test:db:isolated` (disposable container, every migration and suite) and, with `VELORA_E38_ISOLATED_TESTS=true`, `npm run test:integration:isolated`.
 
 ## 2. Product and data rules

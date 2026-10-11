@@ -9,6 +9,8 @@
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
+    "test:browser": "playwright test",
+    "test:browser:fixtures": "node --env-file-if-exists=.env.local tests/browser/fixtures/generate.mjs",
     "test:catalogue": "npx supabase@2.117.0 db reset --local --sql-paths ./seeds/dev-catalogue.sql && vitest run --config vitest.integration.config.mts",
     "gateway:dev": "node --env-file-if-exists=.env.local scripts/media-gateway-dev.mjs",
     "ingest": "node --env-file-if-exists=.env.local --import ./scripts/ingest/register.mjs scripts/ingest/cli.mts",
@@ -29,6 +31,7 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
+    "@playwright/test": "1.64.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",

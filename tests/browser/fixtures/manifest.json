@@ -1,0 +1,232 @@
+{
+  "generator": "ffmpeg 9.0.2-essentials_build-www.gyan.dev",
+  "fixtures": [
+    {
+      "id": 1,
+      "file": "mp4-h264-aac-faststart.mp4",
+      "container": "mp4",
+      "formatName": "mov,mp4,m4a,3gp,3g2,mj2",
+      "video": "h264",
+      "audio": [
+        "aac"
+      ],
+      "subtitles": [],
+      "fastStart": true,
+      "durationSeconds": 12,
+      "mime": "video/mp4",
+      "typeWithCodecs": "video/mp4; codecs=\"avc1.64001E, mp4a.40.2\"",
+      "sizeBytes": 247792,
+      "sha256": "fb40784abe0b99036cde7ac5ec172527e810f8852ea3bbe5b7c331ea7d65a14c"
+    },
+    {
+      "id": 2,
+      "file": "mp4-h264-aac-moov-at-end.mp4",
+      "container": "mp4",
+      "formatName": "mov,mp4,m4a,3gp,3g2,mj2",
+      "video": "h264",
+      "audio": [
+        "aac"
+      ],
+      "subtitles": [],
+      "fastStart": false,
+      "durationSeconds": 12,
+      "mime": "video/mp4",
+      "typeWithCodecs": "video/mp4; codecs=\"avc1.64001E, mp4a.40.2\"",
+      "sizeBytes": 247792,
+      "sha256": "6414e96ad7b58055e52170d94973c78ea21f3f36265754a3903eae671c9762a9"
+    },
+    {
+      "id": 3,
+      "file": "mp4-h264-mp3-faststart.mp4",
+      "container": "mp4",
+      "formatName": "mov,mp4,m4a,3gp,3g2,mj2",
+      "video": "h264",
+      "audio": [
+        "mp3"
+      ],
+      "subtitles": [],
+      "fastStart": true,
+      "durationSeconds": 12,
+      "mime": "video/mp4",
+      "typeWithCodecs": "video/mp4; codecs=\"avc1.64001E, mp4a.6B\"",
+      "sizeBytes": 271643,
+      "sha256": "4bfb083f8015d51c020d06c5db69484508570092634a9b11dfda7bd0d6e71449"
+    },
+    {
+      "id": 4,
+      "file": "mkv-h264-aac.mkv",
+      "container": "mkv",
+      "formatName": "matroska,webm",
+      "video": "h264",
+      "audio": [
+        "aac"
+      ],
+      "subtitles": [],
+      "fastStart": null,
+      "durationSeconds": 12.02,
+      "mime": "video/x-matroska",
+      "typeWithCodecs": "video/x-matroska; codecs=\"avc1.64001E, mp4a.40.2\"",
+      "sizeBytes": 246981,
+      "sha256": "ad5cc718a2c6ddd6d0b8b762cebb11add9b7d0d06ba7260eea8baa15d5e508d6"
+    },
+    {
+      "id": 5,
+      "file": "mkv-h264-mp3.mkv",
+      "container": "mkv",
+      "formatName": "matroska,webm",
+      "video": "h264",
+      "audio": [
+        "mp3"
+      ],
+      "subtitles": [],
+      "fastStart": null,
+      "durationSeconds": 12.03,
+      "mime": "video/x-matroska",
+      "typeWithCodecs": "video/x-matroska; codecs=\"avc1.64001E, mp4a.6B\"",
+      "sizeBytes": 270338,
+      "sha256": "4a24c3318f75d7085203ff34233954a07df3d54cc5fbfbf3441b0f15dd6fb24c"
+    },
+    {
+      "id": 6,
+      "file": "mkv-hevc-aac.mkv",
+      "container": "mkv",
+      "formatName": "matroska,webm",
+      "video": "hevc",
+      "audio": [
+        "aac"
+      ],
+      "subtitles": [],
+      "fastStart": null,
+      "durationSeconds": 12.02,
+      "mime": "video/x-matroska",
+      "typeWithCodecs": "video/x-matroska; codecs=\"hvc1.1.6.L93.B0, mp4a.40.2\"",
+      "sizeBytes": 261103,
+      "sha256": "bbb944abca40fa1ee31f152221d62dea1517a5eb9e44d2e5630ffa127762f043"
+    },
+    {
+      "id": 7,
+      "file": "mp4-hevc-aac-faststart.mp4",
+      "container": "mp4",
+      "formatName": "mov,mp4,m4a,3gp,3g2,mj2",
+      "video": "hevc",
+      "audio": [
+        "aac"
+      ],
+      "subtitles": [],
+      "fastStart": true,
+      "durationSeconds": 12,
+      "mime": "video/mp4",
+      "typeWithCodecs": "video/mp4; codecs=\"hvc1.1.6.L93.B0, mp4a.40.2\"",
+      "sizeBytes": 262115,
+      "sha256": "cf6b1ae0d36ef7c18ed2ba992480902e0edcc14af5389ea7684196f322bcd454"
+    },
+    {
+      "id": 8,
+      "file": "mp4-h264-aac-two-audio.mp4",
+      "container": "mp4",
+      "formatName": "mov,mp4,m4a,3gp,3g2,mj2",
+      "video": "h264",
+      "audio": [
+        "aac",
+        "aac"
+      ],
+      "subtitles": [],
+      "fastStart": true,
+      "durationSeconds": 12,
+      "mime": "video/mp4",
+      "typeWithCodecs": "video/mp4; codecs=\"avc1.64001E, mp4a.40.2\"",
+      "sizeBytes": 326573,
+      "sha256": "da373c9122b56dce42c6815a9f9c91699758309924acb5612cca3368b64f237a"
+    },
+    {
+      "id": 9,
+      "file": "mkv-h264-aac-two-audio.mkv",
+      "container": "mkv",
+      "formatName": "matroska,webm",
+      "video": "h264",
+      "audio": [
+        "aac",
+        "aac"
+      ],
+      "subtitles": [],
+      "fastStart": null,
+      "durationSeconds": 12.02,
+      "mime": "video/x-matroska",
+      "typeWithCodecs": "video/x-matroska; codecs=\"avc1.64001E, mp4a.40.2\"",
+      "sizeBytes": 323363,
+      "sha256": "e55e972d1b25051d524f2415ded027efc813e0f436e5203cb26024e781840102"
+    },
+    {
+      "id": 10,
+      "file": "mp4-h264-aac-subtitles.mp4",
+      "container": "mp4",
+      "formatName": "mov,mp4,m4a,3gp,3g2,mj2",
+      "video": "h264",
+      "audio": [
+        "aac"
+      ],
+      "subtitles": [
+        "mov_text"
+      ],
+      "fastStart": true,
+      "durationSeconds": 12,
+      "mime": "video/mp4",
+      "typeWithCodecs": "video/mp4; codecs=\"avc1.64001E, mp4a.40.2\"",
+      "sizeBytes": 248493,
+      "sha256": "334bedee0fcb698aeebe1db01ef6a81c428807580b6332918163069d0eee0120"
+    },
+    {
+      "id": 11,
+      "file": "mkv-h264-aac-subtitles.mkv",
+      "container": "mkv",
+      "formatName": "matroska,webm",
+      "video": "h264",
+      "audio": [
+        "aac"
+      ],
+      "subtitles": [
+        "subrip"
+      ],
+      "fastStart": null,
+      "durationSeconds": 12.02,
+      "mime": "video/x-matroska",
+      "typeWithCodecs": "video/x-matroska; codecs=\"avc1.64001E, mp4a.40.2\"",
+      "sizeBytes": 247278,
+      "sha256": "0e5af4c0037b3058b2bea77681270616f6436c57557c46eb00ea9737900374ef"
+    },
+    {
+      "id": 12,
+      "file": "mp4-h264-ac3-faststart.mp4",
+      "container": "mp4",
+      "formatName": "mov,mp4,m4a,3gp,3g2,mj2",
+      "video": "h264",
+      "audio": [
+        "ac3"
+      ],
+      "subtitles": [],
+      "fastStart": true,
+      "durationSeconds": 12,
+      "mime": "video/mp4",
+      "typeWithCodecs": "video/mp4; codecs=\"avc1.64001E, ac-3\"",
+      "sizeBytes": 318119,
+      "sha256": "8e7bb0cb1bc4a5ce72596697abacb66d2bb6574bf5e69f52f93be322c7401b46"
+    },
+    {
+      "id": 13,
+      "file": "mkv-h264-ac3.mkv",
+      "container": "mkv",
+      "formatName": "matroska,webm",
+      "video": "h264",
+      "audio": [
+        "ac3"
+      ],
+      "subtitles": [],
+      "fastStart": null,
+      "durationSeconds": 12,
+      "mime": "video/x-matroska",
+      "typeWithCodecs": "video/x-matroska; codecs=\"avc1.64001E, ac-3\"",
+      "sizeBytes": 317384,
+      "sha256": "c64b1de586541307de2c851ed6f95894e07ff0834b54f7ca040fd9bcc94d7229"
+    }
+  ]
+}
