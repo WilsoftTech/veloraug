@@ -1,7 +1,8 @@
 # E3.8B controlled production rollout preflight
 
 Date: 2026-10-10, Africa/Nairobi. **Gate A production migrations complete.
-Discovery activation is now authorized; host/cursor prerequisites remain pending.
+Gate B metadata-only discovery is live in Docker on the operator's Windows host
+(2026-10-11); the seven backlog candidates await reviewer reinspection.
 Gate C is deferred and blocked pending new authorization.**
 Production identity/history, backup and migration checks are recorded below.
 The existing account has separately authorized review-only dashboard access.
@@ -39,6 +40,187 @@ silently migrate/logout the bot. Provision the dedicated discovery credential
 only into the identified host's protected configuration, with verified database
 TLS. Metadata-only discovery needs no MTProto reader session and cannot clear
 media readiness, rights or publication gates. No live worker has started.
+
+## Gate B activation executed — 2026-10-11
+
+The operator then chose Docker on this Windows computer as the host and approved
+cursor 12922861 ("process these seven and future uploads"). The paragraph above
+about a remote server is superseded.
+
+- **Host.** `infra/discovery/` (Dockerfile, allow-list `.dockerignore`, compose,
+  entrypoint). The container shares the existing Bot API container's network
+  namespace, so the Bot API stays on loopback and gains no port. Read-only root,
+  all capabilities dropped, 512 MiB, bounded logs, `restart: unless-stopped`;
+  exit 78 parks the worker instead of restarting it. Health: `/readyz` on 8790
+  inside the container only.
+- **Credential.** `.velora-ingest/discovery.env` (ignored, owner-only ACL):
+  `VELORA_DISCOVERY_INSPECTION=metadata`, `sslmode=verify-full` with the project
+  CA mounted read-only. No reader session, no service-role key.
+- **Hosted writes (one owner transaction).** `velora_discovery_worker` given
+  LOGIN with a random password; `private.discovery_cursors` row `movie` at
+  12922861. Nothing else. Reviewer capabilities, rights and publication unchanged.
+- **Result.** All seven events were persisted (messages 44–50) and the cursor
+  advanced to 12922868 under the worker's consumer lease.
+
+### Defect found on first run: every inspection failed
+
+All seven candidates went `failed` (`inspection_provider_failed`) and, after five
+attempts in about ten seconds, `blocked` (`inspection_attempts_exhausted`).
+
+- **Cause.** `services/media-gateway/discovery-pg.mts` called
+  `discovery_vjs` and `discovery_catalogue_lookup` as `select * from fn()`. Both
+  return one `jsonb` value, so the result arrived as `[{ discovery_vjs: [...] }]`
+  and validation threw before TMDB was reached. TMDB, TLS and the role were fine.
+- **Why tests missed it.** The isolated transport test asserted
+  `processed: 1, failures: 0`; a failed inspection is still "processed".
+- **Fix.** Only `discovery_acquire_consumer` is read as a row set. The test now
+  calls both ports and asserts the candidate reaches `needs_review` with its
+  parsed title; it fails with the original `ZodError` when the fix is reverted.
+- **Dashboard.** "Reinspect" was disabled for every `blocked` candidate although
+  `discovery_review_retry` accepts `blocked` + `inspection_attempts_exhausted`.
+  It is now enabled for exactly that case (database mode).
+- **Redeploy.** Image rebuilt, container recreated, healthy. From inside the
+  container, with the worker's own credential, the VJ port returns `vj-ice-p`
+  and the catalogue port finds On The Hunt (read-only).
+- **Validation.** Unit 880 passed / 28 skipped; isolated integration 35 passed /
+  1 skipped; typecheck and lint pass. No migration.
+
+**Open.** The seven candidates stay `blocked` until a reviewer presses
+"Reinspect" on each at `/admin/discovery` (the audited `discovery_review_retry`
+path; it resets the attempt count). No owner-side requeue was run. Uploads made
+after the redeploy are inspected normally. The worker runs only while this
+computer and Docker are running. Reconciliation of channel history has not run.
+
+### Matching rules loosened at the operator's request — 2026-10-11
+
+A read-only dry run of the pipeline over the seven stored posts showed that,
+even without the transport defect, five would have reached review with no usable
+TMDB choice. The operator asked for looser rules. Identity is still only ever
+suggested or proposed; a reviewer confirms film and VJ, and every gate is unchanged.
+
+- **VJ by opening characters (discovery only).** `resolveVj(…, { prefix: true })`:
+  when no key is equal, the one active VJ agreeing on the first four characters
+  (or on all three of a three-character name) resolves, and the candidate carries
+  the non-blocking note `vj_prefix_match`. Two such VJs stay ambiguous. The
+  uploader CLI and planner still require an equal key.
+- **Release noise.** A bare resolution (`1080`, `1080HP`, `720hd`) and `HD`/`FHD`
+  no longer enter the title or VJ name. Other numbers (`300`, `1917`) are kept.
+- **VJ-only caption.** A caption that is just `VJ <name>` is a VJ credit, not a
+  title; it no longer raises three false conflict warnings.
+- **Wider choices.** When no result has the exact title, one looser search
+  (articles and a trailing part number dropped) adds its results as choices. The
+  decision still compares the parsed title, so this never proposes a film.
+- **Caption tag.** `tmdb:movie:<id>` on its own caption line is now fetched,
+  offered first and proposed (not confirmed).
+- **Containers.** `wmv`, `flv`, `mpg`, `mpeg`, `ts`, `m2ts` and `3gp` join the
+  accepted list for detection, scanning and review. **The publication gate is
+  unchanged:** `private.media_evidence.verified` (migration 13) still requires a
+  verified H.264 MP4 with AAC or MP3. Relaxing it needs a migration and would
+  publish files browsers cannot play (E3: Firefox silent on MKV, WebKit no load).
+- **Dry run after the change (read-only):** all seven resolve VJ Ice P and list
+  the correct film among their choices; none is proposed automatically, because
+  five filenames carry no year and two titles differ from TMDB's.
+- **Validation.** Unit 888 passed / 28 skipped; isolated integration 35 passed /
+  1 skipped; typecheck and lint pass. No migration. Worker image rebuilt and the
+  container recreated, healthy; previous image kept as
+  `velora-discovery:gate-b-rollback-1011`.
+
+### Admin area — 2026-10-11
+
+`/admin` is now one area with three sections (Overview, Review queue,
+Catalogue), built only on the reviewer functions that already exist. No
+migration, no new permission, no browser approval or publication.
+
+- **Guard.** `app/admin/layout.tsx`, every page and both server actions call
+  `requireReviewAdmin()`; `lib/discovery/security.test.ts` discovers admin
+  routes by walking the folder, so a new one cannot be added without it.
+- **Guidance** (`lib/discovery/guidance.ts`, pure): each state maps to a queue
+  group (Needs you, In progress, Published, Closed), a label and a next step.
+- **Queue.** Group tabs with counts, title search, and "Reinspect all failed",
+  which runs the audited `discovery_review_retry` for each exhausted candidate
+  as the signed-in reviewer.
+- **Candidate page.** A "What happens next" panel with the one useful action;
+  controls that cannot be used are not rendered (previously greyed out with no
+  reason). The film is picked from the validated TMDB choices as poster cards.
+  The year sent is the chosen film's own, which the database compares again;
+  the free-text title and year fields were never used in database mode.
+- **Catalogue.** Published movies and active VJs, read-only.
+- **Validation.** Unit 896 passed / 28 skipped; typecheck and lint pass.
+  Layout checked from rendered previews at 1280 px and 390 px. The operator
+  then used "Reinspect all failed" in a signed-in session: all seven candidates
+  moved from `blocked` to `needs_review`.
+
+### Dashboard approval, publication and catalogue controls — 2026-10-11
+
+The operator asked for Approve and Publish as dashboard buttons and for the
+remaining controls to work. This **reverses E3.8A's placement** of approval and
+publication outside the Data API. It does not change who may act or when.
+
+- **Migration 16,** `20261011081425_admin_dashboard_actions.sql` (**local only,
+  not deployed**; hosted has 15). Seven SECURITY DEFINER functions with an empty
+  `search_path`, EXECUTE for `authenticated` only:
+  - `discovery_review_capabilities()`: the caller's own three capabilities.
+  - `discovery_review_approve` / `discovery_review_publish`: take the account
+    from the session (`auth.uid()`, never an argument), require the review /
+    publish capability, then delegate to the unchanged
+    `catalogue_review.*` functions, which re-check the capability and every
+    gate in the writing transaction.
+  - `catalogue_admin_movies` (any capability): every movie with its state.
+  - `catalogue_admin_set_movie` (publish): withdraw, restore, feature, unfeature.
+    Withdrawal sets `archived`; the public read policies, stream eligibility and
+    the gateway resolver already require `published`.
+  - `catalogue_admin_edit_movie` (publish): title and overview; slug and TMDB
+    identity are untouched.
+  - `catalogue_admin_add_vj` (publish): an active VJ stored as "VJ <name>".
+  - `private.catalogue_admin_audit`: append-only, no API grants.
+- **What this trades away.** Previously a publication needed a database
+  credential. Now a signed-in browser session of an account holding the publish
+  capability is enough. The capability table, the gates and the audit are the
+  remaining controls.
+- **Unchanged.** Media verification, revision-bound rights, the relationship
+  check and `velora_review_service`'s psql path. Tests 007 and 009 now assert
+  that the *only* approval/publication functions in `public` are these two.
+- **Dashboard.** The candidate page offers Approve or Publish only when the
+  database reports the candidate ready for it and the account holds the
+  capability; otherwise it says which permission is missing. The catalogue page
+  lists every movie with Withdraw/Restore, Feature, Edit, and Add VJ. Against a
+  database without migration 16 both fall back to read-only with a notice.
+- **Validation.** Database: 12 suites, 757 assertions (65 new), `db lint`
+  clean. Isolated integration through real PostgREST: 39 passed / 1 skipped
+  (4 new). Unit: 902 passed / 28 skipped. Typecheck and lint pass.
+- **Deployed 2026-10-11 (operator-authorized).**
+  - Backup: `C:/Users/willi/VeloraBackups/M16-utxtqsfelovmhhcrknrz-20261011T082854Z`
+    (EFS-encrypted, pg_dump at an exported snapshot, 61 tables, archive SHA-256
+    `01d3a33c…282bea`).
+  - Rehearsal in a disposable database on an internal network: the archive
+    restored with every table digest equal to the backup; migration 16 applied;
+    existing data unchanged; seven functions with the expected privileges; a
+    replay refused.
+  - Production: one transaction (migration SHA-256 `9bee6c97…e4c9` plus its
+    history row). Hosted now has **16 migrations**, equal to the repository's
+    first 16. The seven functions' definitions, settings and ACLs are identical
+    to the tested chain; non-volatile table digests unchanged; the audit table is
+    empty with RLS on and no API grant. The Data API answers a signed-out call
+    with 42501, not "function not found".
+  - Capabilities: the operator's reviewer row changed from review only to
+    review, rights and publish (one guarded transaction; still the only reviewer).
+- **Media verification prepared, not switched on.** `infra/discovery/Dockerfile`
+  now installs Debian's ffmpeg 5.1.9. A candidate image
+  (`velora-discovery:bounded-candidate`; the running listener is still
+  `gate-b` in `metadata` mode) ran the real `verifyChannelMedia` offline on
+  generated files: fast-start H.264 MP4 with AAC or MP3 verified from about
+  85 KB; a non-fast-start MP4, an MKV and an HEVC MP4 were refused as
+  `mp4_not_fast_start`, `container_not_mp4` and `video_codec_hevc`.
+- **Still required before a movie can be published from the dashboard:**
+  a separate MTProto session for the reader bot (one Telegram login), bounded
+  mode on the listener, then a reinspection of each candidate (which resets a
+  confirmed film to a suggestion); and the three MKV posts must be converted to
+  MP4. Each is a separate authorization.
+- **Working-tree note.** While this ran, a separate session began the admin
+  direct-upload pipeline in the same tree (migrations from
+  `20261011083200_admin_upload_sessions.sql` onward). Those sort after
+  migration 16 and were not applied anywhere by this work; hosted has exactly
+  the 16 migrations above.
 
 ## Authorization gates and stop conditions
 

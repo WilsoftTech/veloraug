@@ -1,0 +1,33 @@
+name: velora-discovery
+services:
+  discovery:
+    image: velora-discovery:gate-b
+    build:
+      context: ../..
+      dockerfile: infra/discovery/Dockerfile
+    container_name: velora-discovery
+    # Share the existing Bot API's loopback; no exposed API or host port changes.
+    network_mode: container:velora-telegram-bot-api
+    env_file: ../../.velora-ingest/discovery.env
+    volumes:
+      - ../../.velora-ingest/gate-a/prod-ca-2021.crt:/run/velora/ca.crt:ro
+    restart: unless-stopped
+    stop_grace_period: 90s
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "3"
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8790/readyz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3

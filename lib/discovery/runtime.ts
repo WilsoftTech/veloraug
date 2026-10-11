@@ -5,8 +5,8 @@ import { notFound } from "next/navigation";
 import { getAuthedClient } from "@/lib/auth";
 import { fixtureSchema, fixturePorts } from "@/lib/discovery/fixtures";
 import { openInbox } from "@/lib/discovery/store";
-import { requireAdmin, type Reviewer } from "@/lib/discovery/model";
-import { createReviewClient, type DiscoveryRpc } from "@/lib/discovery/database";
+import { requireAdmin, type Reviewer, type ReviewCandidate } from "@/lib/discovery/model";
+import { createReviewClient, DiscoveryStoreError, type DiscoveryRpc } from "@/lib/discovery/database";
 
 /**
  * Review modes. Both are off unless VELORA_DISCOVERY_MODE names one:
@@ -45,6 +45,20 @@ export async function offlineReviewRuntime() {
   const fixture = fixtureSchema.parse(JSON.parse(await readFile(path, "utf8")));
   const store = await openInbox(directory, process.cwd(), fixture.channelId);
   return { fixture, store, ports: fixturePorts(fixture) };
+}
+/**
+ * The review candidates for an admin page, in whichever mode is on. A database
+ * refusal becomes a message for the page rather than an error boundary.
+ */
+export async function loadReviewCandidates(query = ""): Promise<{ mode: ReviewMode; candidates: ReviewCandidate[]; error?: string }> {
+  if (reviewMode() !== "database") return { mode: "fixture", candidates: Object.values((await (await offlineReviewRuntime()).store.read()).candidates) };
+  try {
+    return { mode: "database", candidates: await (await databaseReviewClient()).list({ query: query || null, limit: 200 }) };
+  } catch (failure) {
+    const code = failure instanceof DiscoveryStoreError ? failure.code : "store_error";
+    console.warn(JSON.stringify({ event: "review_queue_unavailable", code }));
+    return { mode: "database", candidates: [], error: code === "review_not_authorized" ? "This account has no review permission." : "The review queue is unavailable. Try again shortly." };
+  }
 }
 /** The reviewer's own-session client (no service-role key, no elevated identity). */
 export async function databaseReviewClient() {

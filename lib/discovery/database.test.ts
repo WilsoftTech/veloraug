@@ -154,8 +154,23 @@ describe("reviewer client mapping", () => {
     await client.correct("a".repeat(64), 3, { tmdbId: 9800001, year: 2024, vjId: 3 });
     await client.clearRights("a".repeat(64), 4, "contract E38A-001");
     expect(seen[0]).toContain("discovery_review_correct"); expect(seen[1]).toContain("discovery_review_clear_rights");
-    expect(Object.keys(client)).not.toEqual(expect.arrayContaining(["approve"]));
-    expect(Object.keys(client)).not.toEqual(expect.arrayContaining(["publish"]));
+  });
+  it("approves and publishes as the session: no reviewer id is ever sent", async () => {
+    const seen: { fn: string; args: Record<string, unknown> }[] = [];
+    const client = createReviewClient(async (fn, args) => { seen.push({ fn, args }); return ok(fn === "discovery_review_publish" ? { result: "published", movie_slug: "example-movie-2024", version_id: 4, vj_slug: "vj-test" } : view("matched", [])); });
+    expect((await client.approve("a".repeat(64), 3)).status).toBe("approved");
+    expect(await client.publish("a".repeat(64), 3)).toMatchObject({ result: "published", movie_slug: "example-movie-2024" });
+    expect(seen).toEqual([{ fn: "discovery_review_approve", args: { p_key: "a".repeat(64), p_revision: 3 } }, { fn: "discovery_review_publish", args: { p_key: "a".repeat(64), p_revision: 3 } }]);
+    await expect(createReviewClient(async () => ({ data: null, error: { message: "review_gates_not_met", code: "P0001", details: "media_verification_required" } })).approve("a".repeat(64), 3))
+      .rejects.toMatchObject({ code: "review_gates_not_met", detail: "media_verification_required" });
+  });
+  it("reports a database without the dashboard commands as unavailable, not as an error", async () => {
+    const missing = createReviewClient(async () => ({ data: null, error: { code: "PGRST202", message: "Could not find the function public.discovery_review_capabilities" } }));
+    expect(await missing.capabilities()).toBeNull(); expect(await missing.movies()).toBeNull();
+    await expect(missing.approve("a".repeat(64), 1)).rejects.toMatchObject({ code: "command_unavailable" });
+    // Any other refusal is still a refusal.
+    await expect(createReviewClient(async () => ({ data: null, error: { code: "42501", message: "permission denied" } })).movies()).rejects.toMatchObject({ code: "review_not_authorized" });
+    expect(await createReviewClient(async () => ok({ review: true, rights: false, publish: false })).capabilities()).toEqual({ review: true, rights: false, publish: false });
   });
 });
 

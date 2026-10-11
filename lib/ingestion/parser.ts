@@ -9,10 +9,15 @@ import type { KindDecision, ParseConfidence, ParsedFilename, ParseIssue, ParseIs
  * VJ identity (see vj.ts).
  */
 
-export const SUPPORTED_EXTENSIONS: readonly string[] = ["mp4", "mkv", "avi", "mov", "m4v", "webm"];
+/**
+ * Video containers accepted for detection, scanning and review. Accepting a
+ * container says nothing about playback: media inspection classifies the
+ * streams, and only a verified browser-ready MP4 passes the publication gate.
+ */
+export const SUPPORTED_EXTENSIONS: readonly string[] = ["mp4", "mkv", "avi", "mov", "m4v", "webm", "wmv", "flv", "mpg", "mpeg", "ts", "m2ts", "3gp"];
 
-/** Release/encoding tokens that are never part of a title or VJ name. */
-const NOISE = /^(?:\d{3,4}p|4k|uhd|x26[45]|h26[45]|hevc|avc|aac\d*|ac3|dts|web|webdl|web-dl|webrip|bluray|blu-ray|brrip|bdrip|hdrip|dvdrip|hdtv|hdcam|camrip|luganda|translated)$/i;
+/** Release/encoding tokens that are never part of a title or VJ name. A bare resolution ("1080", "1080HP") counts; other numbers do not. */
+const NOISE = /^(?:\d{3,4}p|(?:480|720|1080|2160)(?:i|hp|hd)?|4k|hd|fhd|uhd|x26[45]|h26[45]|hevc|avc|aac\d*|ac3|dts|web|webdl|web-dl|webrip|bluray|blu-ray|brrip|bdrip|hdrip|dvdrip|hdtv|hdcam|camrip|luganda|translated)$/i;
 
 const BOUNDARY = "-";
 /** A VJ name longer than this is not trusted as one name. */

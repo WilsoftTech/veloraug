@@ -31,7 +31,8 @@ export function createDiscoveryPg(databaseUrl: string) {
     try {
       const values = spec.map(([name, cast]) => args[name] === null ? null : cast === "jsonb" ? sql.json(args[name] as postgres.JSONValue) : String(args[name]));
       const parameters = spec.map(([name, cast], index) => `${name} => $${index + 1}::${cast}`).join(", ");
-      const table = fn === "discovery_acquire_consumer" || fn === "discovery_catalogue_lookup" || fn === "discovery_vjs";
+      // Only the consumer lease returns a row set; every other command returns one value (jsonb or text).
+      const table = fn === "discovery_acquire_consumer";
       const rows = await sql.unsafe(`select ${table ? "* from" : ""} public.${fn}(${parameters})${table ? "" : " as result"}`, values);
       return { data: table ? rows : rows[0]?.result ?? null, error: null };
     } catch (error) {

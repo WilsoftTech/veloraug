@@ -84,9 +84,10 @@ select is((select array_agg(f::text) from owner_functions w join pg_proc p on p.
   null, 'owner commands: SECURITY INVOKER (no elevation), owned by postgres, search_path empty');
 select is((select array_agg(f::text) from owner_functions w join pg_proc p on p.oid = w.f where p.prosrc ~* '\mexecute\M|format\s*\('),
   null, 'owner commands: no dynamic SQL');
-select is((select count(*)::int from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-           where n.nspname = 'public' and p.proname ~ 'approve|publish'), 0,
-  'no approval or publication function is exposed through the Data API schema');
+-- The admin dashboard migration (20261011081425) deliberately exposes two session-bound wrappers; nothing else, and no uploader publisher.
+select is((select array_agg(p.proname::text order by p.proname) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+           where n.nspname = 'public' and p.proname ~ 'approve|publish'), array['discovery_review_approve', 'discovery_review_publish'],
+  'the only approval or publication functions in the Data API schema are the reviewer''s session-bound channel commands');
 
 -- ---------------------------------------------------------------------------
 -- Evaluation (service_role)

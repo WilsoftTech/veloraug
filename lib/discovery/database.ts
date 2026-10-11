@@ -18,8 +18,11 @@ import type { KnownVj } from "@/types/ingestion";
  * - createReviewClient: a signed-in reviewer's own session. The database checks
  *   the account's capability on every call (private.catalogue_reviewers).
  *
- * Approval and publication are not reachable from either: they run through
- * psql (lib/discovery/owner-commands.ts). Errors carry fixed database codes only.
+ * Approval, publication and catalogue management run as the reviewer's own
+ * session too (migration 20261011081425): the database takes the account from
+ * the session, checks its capability and re-evaluates every gate. The psql
+ * owner commands (lib/discovery/owner-commands.ts) remain for operators.
+ * Errors carry fixed database codes only.
  */
 
 export type DiscoveryRpc = (fn: string, args: Record<string, unknown>) => Promise<{ data: unknown; error: { message?: string; code?: string; details?: string | null } | null }>;
@@ -37,7 +40,8 @@ const DB_DETAIL = /^[a-z0-9_,:]{1,300}$/;
 /** Maps a database refusal to its fixed code; anything else is a transport failure. */
 export function storeError(error: { message?: string; code?: string; details?: string | null }): DiscoveryStoreError {
   const message = error.message ?? "";
-  const code = DB_CODE.test(message) ? message : error.code === "42501" ? "review_not_authorized" : "store_error";
+  // PGRST202: the function does not exist in this database (a migration that is not deployed yet).
+  const code = error.code === "PGRST202" ? "command_unavailable" : DB_CODE.test(message) ? message : error.code === "42501" ? "review_not_authorized" : "store_error";
   return new DiscoveryStoreError(code, typeof error.details === "string" && DB_DETAIL.test(error.details) ? error.details : null);
 }
 
@@ -299,6 +303,18 @@ export function toCandidate(input: unknown): ReviewCandidate {
 
 export interface ReviewDetailView { candidate: ReviewCandidate; vjs: ReviewVj[]; vjSlug: string | null }
 
+const capabilitySchema = z.object({ review: z.boolean(), rights: z.boolean(), publish: z.boolean() });
+export type ReviewCapabilities = z.infer<typeof capabilitySchema>;
+const publishedSchema = z.object({ result: z.enum(["published", "already_published"]), movie_slug: z.string(), version_id: z.number(), vj_slug: z.string().nullable() });
+export const movieActions = ["withdraw", "restore", "feature", "unfeature"] as const;
+export type MovieAction = (typeof movieActions)[number];
+const adminMovieSchema = z.object({
+  id: z.number().int().positive(), slug: z.string(), title: z.string(), overview: z.string().nullable(), release_year: z.number().nullable(), poster_path: z.string().nullable(),
+  publication_status: z.enum(["draft", "published", "archived"]), is_featured: z.boolean(), published_at: z.string().nullable(),
+  versions: z.array(z.object({ id: z.number(), vj: z.string(), availability_status: z.string(), rights_status: z.string() })),
+});
+export type AdminMovie = z.infer<typeof adminMovieSchema>;
+
 export function createReviewClient(rpc: DiscoveryRpc) {
   const views = z.array(z.unknown()).max(200);
   return {
@@ -321,6 +337,31 @@ export function createReviewClient(rpc: DiscoveryRpc) {
     async revokeRights(key: string, revision: number) { return toCandidate(await call(rpc, "discovery_review_revoke_rights", { p_key: key, p_revision: revision })); },
     async reject(key: string, revision: number) { return toCandidate(await call(rpc, "discovery_review_reject", { p_key: key, p_revision: revision })); },
     async retry(key: string, revision: number) { return toCandidate(await call(rpc, "discovery_review_retry", { p_key: key, p_revision: revision })); },
+    /** What this account may do. Null: the database does not have the dashboard commands yet. */
+    async capabilities(): Promise<ReviewCapabilities | null> {
+      try {
+        return capabilitySchema.parse(await call(rpc, "discovery_review_capabilities", {}));
+      } catch (failure) {
+        if (failure instanceof DiscoveryStoreError && failure.code === "command_unavailable") return null;
+        throw failure;
+      }
+    },
+    /** Review capability. The database refuses unless every gate passes at this revision. */
+    async approve(key: string, revision: number) { return toCandidate(await call(rpc, "discovery_review_approve", { p_key: key, p_revision: revision })); },
+    /** Publish capability. One transaction: movie, VJ version and Telegram media together; a replay returns already_published. */
+    async publish(key: string, revision: number) { return publishedSchema.parse(await call(rpc, "discovery_review_publish", { p_key: key, p_revision: revision })); },
+    /** Every movie with its state, including withdrawn ones. Null: the dashboard commands are not deployed. */
+    async movies(limit = 100): Promise<AdminMovie[] | null> {
+      try {
+        return z.array(adminMovieSchema).max(200).parse(await call(rpc, "catalogue_admin_movies", { p_limit: limit }));
+      } catch (failure) {
+        if (failure instanceof DiscoveryStoreError && failure.code === "command_unavailable") return null;
+        throw failure;
+      }
+    },
+    async setMovie(movieId: number, action: MovieAction) { await call(rpc, "catalogue_admin_set_movie", { p_movie_id: movieId, p_action: action }); },
+    async editMovie(movieId: number, title: string, overview: string | null) { await call(rpc, "catalogue_admin_edit_movie", { p_movie_id: movieId, p_title: title, p_overview: overview }); },
+    async addVj(name: string) { return z.object({ id: z.number(), slug: z.string(), name: z.string() }).parse(await call(rpc, "catalogue_admin_add_vj", { p_name: name })); },
   };
 }
 export type ReviewClient = ReturnType<typeof createReviewClient>;

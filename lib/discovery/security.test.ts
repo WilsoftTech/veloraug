@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ auth: vi.fn(), user: vi.fn() }));
 vi.mock("@/lib/auth", () => ({ getAuthedClient: mocks.auth }));
@@ -29,7 +29,15 @@ describe("offline review server authorization", () => {
     vi.stubEnv("NODE_ENV", "test"); vi.stubEnv("VELORA_DISCOVERY_MODE", "live"); expect(() => assertOfflineReviewMode()).toThrow("offline_review_disabled");
   });
   it("every admin page and server action calls the authorization guard", () => {
-    for (const path of ["app/admin/discovery/page.tsx", "app/admin/discovery/[id]/page.tsx", "app/admin/discovery/actions.ts"]) expect(readFileSync(path, "utf8")).toContain("await requireReviewAdmin()");
+    // Found, not listed: a new admin page cannot be added without the guard.
+    const guarded = (readdirSync("app/admin", { recursive: true }) as string[]).map((path) => path.replaceAll("\\", "/")).filter((path) => /(?:^|\/)(?:page|layout|actions)\.tsx?$/.test(path));
+    expect(guarded.sort()).toEqual(["catalogue/actions.ts", "catalogue/page.tsx", "discovery/[id]/page.tsx", "discovery/actions.ts", "discovery/page.tsx", "layout.tsx", "page.tsx"]);
+    for (const path of guarded) expect(readFileSync(`app/admin/${path}`, "utf8"), path).toContain("await requireReviewAdmin()");
+    // Every exported server action checks for itself.
+    for (const path of guarded.filter((file) => file.endsWith("actions.ts"))) {
+      const actions = readFileSync(`app/admin/${path}`, "utf8");
+      expect(actions.match(/^export async function /gm), path).toHaveLength(actions.match(/await requireReviewAdmin\(\)/g)!.length);
+    }
   });
   it("worker and runtime have no live Telegram or hosted publication adapter", () => {
     for (const path of ["lib/discovery/runtime.ts", "lib/discovery/worker.ts", "lib/discovery/fixtures.ts", "scripts/discovery/replay.mts"]) {

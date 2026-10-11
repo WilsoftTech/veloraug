@@ -56,6 +56,20 @@ describe("parseFilename: movies", () => {
     expect(parse("Avatar.2009.VJ.Junior.MKV").extension).toBe("mkv");
   });
 
+  it("drops a bare resolution but keeps other numbers in a title", () => {
+    expect(facts("BITTER HARVEST.1080HP.VJ ICE.P.mp4")).toMatchObject({ title: "BITTER HARVEST", vjText: "ICE P", year: null });
+    expect(facts("ECHO BOOMERS.1080.VJ ICE.P.mkv")).toMatchObject({ title: "ECHO BOOMERS", vjText: "ICE P" });
+    expect(facts("In Cold Light 2026 VJ Ice P HD.mp4")).toMatchObject({ title: "In Cold Light", vjText: "Ice P", year: 2026 });
+    expect(facts("300 VJ Junior.mp4")).toMatchObject({ title: "300" });
+    expect(facts("GASLIGHT 1.VJ ICE.P.mp4")).toMatchObject({ title: "GASLIGHT 1", vjText: "ICE P" });
+  });
+
+  it("accepts the common video containers", () => {
+    for (const extension of ["mp4", "mkv", "avi", "mov", "m4v", "webm", "wmv", "flv", "mpg", "mpeg", "ts", "m2ts", "3gp"]) {
+      expect(codes(`John Wick VJ Junior.${extension}`)).toEqual([]);
+    }
+  });
+
   it("uses only the file name of a Windows or POSIX path", () => {
     expect(facts(String.raw`D:\Library\VJ Emmy\Titanic.1997.VJ.Emmy.mp4`)).toMatchObject({ title: "Titanic", vjText: "Emmy", year: 1997 });
     expect(parse("/srv/library/Titanic.1997.VJ.Emmy.mp4").fileName).toBe("Titanic.1997.VJ.Emmy.mp4");

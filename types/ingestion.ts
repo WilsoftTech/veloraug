@@ -114,7 +114,8 @@ export interface KnownVj {
 }
 
 export type VjResolution =
-  | { status: "resolved"; vjId: number; slug: string }
+  /** `match: "prefix"`: resolved by opening characters, not an equal key (channel discovery only). */
+  | { status: "resolved"; vjId: number; slug: string; match?: "prefix" }
   | { status: "missing" }
   /** Matches only an inactive VJ. Blocks approval; never reactivates it. */
   | { status: "inactive"; vjId: number; slug: string }

@@ -133,6 +133,38 @@ describe("parsing, matching, VJs and readiness", () => {
     delete (update.channel_post.document as { file_name?: string }).file_name;
     expect(parseDocument(detectDocument(update, channel).event!)).toMatchObject({ title: "Movie Title", year: 2016, vjText: "Ice P", claimedFingerprint: source, externalId: "123" });
   });
+  it("a caption that is only a VJ credit names the VJ and raises no conflict", () => {
+    const parsed = (name: string, caption: string) => parseDocument(detectDocument(post(1, 10, "doc", name, caption), channel).event!);
+    expect(parsed("IN THE COLD LIGHT___VJ ICE P.2026.mp4", "VJ ICE P")).toMatchObject({ title: "IN THE COLD LIGHT", year: 2026, vjText: "ICE P", warnings: [] });
+    expect(parsed("HUNTING GROUNDS 2026 VJ ICE P 1080p (NO'S).mkv", "VJ ICE P")).toMatchObject({ title: "HUNTING GROUNDS", year: 2026, warnings: [] });
+    expect(parsed("Example 2024.mp4", "VJ Test")).toMatchObject({ title: "Example", vjText: "Test" });
+    expect(parsed("Example.Movie.2024.VJ.Test.mp4", "VJ Other").warnings).toContain("caption_vj_conflict");
+    // A longer line is still read as a title line, not a credit.
+    expect(parsed("clip.mp4", "VJ Test - Example Movie 2024")).toMatchObject({ year: 2024, vjText: "Test" });
+  });
+  it("the opening characters of a VJ name suggest that VJ, with a visible note", async () => {
+    await detect([post(1, 10, "doc", "Example.Movie.2024.VJ.Tes.mp4")]); await inspectNext(store, ports, now);
+    expect(await candidate()).toMatchObject({ vjId: 9001, warnings: ["vj_prefix_match"], identity: "proposed" });
+  });
+  it("offers a looser search's results when no title is exact, without proposing one", async () => {
+    const search = vi.fn(async (query: { title: string }) => query.title === "Example Movie" ? [{ tmdbId: 900001, title: "Example Movie", originalTitle: null, year: 2024, mediaType: "movie" as const }] : []);
+    ports.search = search;
+    await detect([post(1, 10, "doc", "The.Example.Movie.2024.VJ.Test.mp4")]); await inspectNext(store, ports, now);
+    expect(search.mock.calls.map(([query]) => query.title)).toEqual(["The Example Movie", "Example Movie"]);
+    const item = await candidate();
+    expect(item).toMatchObject({ identity: "ambiguous", tmdbId: null, status: "awaiting_identity" }); expect(item.choices.map((choice) => choice.tmdb_id)).toEqual([900001]);
+  });
+  it("a caption tmdb tag is offered and proposed, never confirmed", async () => {
+    ports.search = async () => [];
+    await detect([post(1, 10, "doc", "Wrong.Name.2024.VJ.Test.mp4", "tmdb:movie:900001")]); await inspectNext(store, ports, now);
+    const item = await candidate();
+    expect(item).toMatchObject({ tmdbId: 900001, identity: "proposed", status: "awaiting_identity", approval: null }); expect(blockers(item)).toContain("identity_unconfirmed");
+  });
+  it("other video containers are accepted for review; readiness stays a separate gate", async () => {
+    await detect([post(1, 10, "doc", "Example.Movie.2024.VJ.Test.wmv")]); await inspectNext(store, ports, now);
+    const item = await candidate();
+    expect(item.status).toBe("awaiting_identity"); expect(blockers(item)).toContain("media_verification_required");
+  });
   it("exact title/year and active VJ are proposed, never approved or ready automatically", async () => {
     const item = await inspected(); expect(item).toMatchObject({ tmdbId: 900001, vjId: 9001, identity: "proposed", status: "awaiting_identity", evidence: null, rights: null, approval: null });
   });

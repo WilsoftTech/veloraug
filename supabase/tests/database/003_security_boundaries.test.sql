@@ -16,7 +16,7 @@ select plan(30);
 select is(
   (select count(*)::int from pg_class c join pg_namespace n on n.oid = c.relnamespace
    where n.nspname in ('public', 'private') and c.relkind = 'r'),
-  25, '25 application tables in public/private (C2A.1 adds private.telegram_channels; E3.8A adds 7 private review tables)');
+  26, '26 application tables in public/private (C2A.1 adds private.telegram_channels; E3.8A adds 7 private review tables; the admin dashboard adds its audit)');
 select is(
   (select array_agg(n.nspname || '.' || c.relname) from pg_class c
    join pg_namespace n on n.oid = c.relnamespace
@@ -123,11 +123,13 @@ select is(
         'catalogue_review.approve_channel_candidate', 'catalogue_review.inspect_channel_candidate',
         'catalogue_review.publish_channel_candidate', 'catalogue_review.reviewer_capabilities',
         'private.enforce_watchlist_limit', 'private.handle_new_user',
+        'public.catalogue_admin_add_vj', 'public.catalogue_admin_edit_movie', 'public.catalogue_admin_movies', 'public.catalogue_admin_set_movie',
         'public.discovery_acquire_consumer', 'public.discovery_catalogue_lookup', 'public.discovery_claim',
         'public.discovery_complete', 'public.discovery_fail', 'public.discovery_health', 'public.discovery_receive',
         'public.discovery_release_consumer',
+        'public.discovery_review_approve', 'public.discovery_review_capabilities',
         'public.discovery_review_clear_rights', 'public.discovery_review_correct', 'public.discovery_review_get',
-        'public.discovery_review_list', 'public.discovery_review_reject', 'public.discovery_review_retry',
+        'public.discovery_review_list', 'public.discovery_review_publish', 'public.discovery_review_reject', 'public.discovery_review_retry',
         'public.discovery_review_revoke_rights', 'public.discovery_vjs',
         'public.ingest_channel_checkpoint', 'public.ingest_record_evaluation', 'public.ingest_upload_fail', 'public.ingest_upload_record',
         'public.ingest_upload_start', 'public.ingest_upload_status',

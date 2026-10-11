@@ -57,9 +57,11 @@ function importsOf(file: string): string[] {
 
 const files = SOURCE_DIRS.flatMap((dir) => sourceFiles(join(ROOT, dir)));
 const graph = new Map(files.map((file) => [rel(file), importsOf(file)]));
-// Only these two guarded offline admin pages may reach ingestion snapshot validation.
-// New routes under the same folder remain covered unless separately reviewed.
-const OFFLINE_ADMIN_ROUTES = new Set(["app/admin/discovery/page.tsx", "app/admin/discovery/[id]/page.tsx"]);
+// Only these guarded admin routes may reach ingestion snapshot validation (through
+// lib/discovery/runtime.ts, which every one of them needs for requireReviewAdmin;
+// lib/discovery/security.test.ts checks that guard on each). They are not public
+// routes. A new admin route remains covered until it is reviewed and listed here.
+const OFFLINE_ADMIN_ROUTES = new Set(["app/admin/layout.tsx", "app/admin/page.tsx", "app/admin/catalogue/page.tsx", "app/admin/discovery/page.tsx", "app/admin/discovery/[id]/page.tsx"]);
 const routes = [...graph.keys()].filter((file) => file.startsWith("app/") && !OFFLINE_ADMIN_ROUTES.has(file) && ROUTE_FILES.test(file));
 
 /** Every TMDB module reachable from a route, and the edge that entered it. */

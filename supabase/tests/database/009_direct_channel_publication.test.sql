@@ -136,8 +136,9 @@ select is((select array_agg(format('%s %s', r, f) order by format('%s %s', r, f)
   'approval and publication: velora_review_service only');
 select is((select array_agg(r order by r) from unnest(array['anon', 'authenticated', 'service_role', 'velora_review_service']) r
            where has_schema_privilege(r, 'catalogue_review', 'USAGE')), array['velora_review_service'], 'catalogue_review schema: review service only');
-select is((select count(*)::int from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-           where n.nspname = 'public' and p.proname ~ 'approve|publish'), 0, 'still no approval or publication function in the Data API schema');
+select is((select array_agg(p.proname::text order by p.proname) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+           where n.nspname = 'public' and p.proname ~ 'approve|publish'), array['discovery_review_approve', 'discovery_review_publish'],
+  'only the session-bound reviewer wrappers (20261011081425) exist in the Data API schema; they delegate to catalogue_review');
 select is((select array_agg(format('%s %s', r, f)) from
              unnest(array['private.catalogue_materialize_movie_version(integer,bigint,bigint,jsonb)', 'private.catalogue_publish_channel_movie(bigint,integer,uuid)',
                           'private.catalogue_publish_movie(text,jsonb,boolean)', 'private.channel_review_blockers(bigint)',

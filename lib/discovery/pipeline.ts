@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { parseDocument, mediaKey } from "@/lib/discovery/events";
 import { evidenceSchema, type InboxStore, type ReviewCandidate, type DiscoveryEvent, type MediaEvidence } from "@/lib/discovery/model";
 import { resolveVj } from "@/lib/ingestion/vj";
-import { decideMatch } from "@/lib/ingestion/match";
+import { decideMatch, scoreCandidate } from "@/lib/ingestion/match";
+import { SUPPORTED_EXTENSIONS } from "@/lib/ingestion/parser";
 import { movieSnapshotSchema, type MovieSnapshot } from "@/lib/tmdb/ingestion-search";
 import type { KnownVj, MatchQuery, TmdbCandidate } from "@/types/ingestion";
 import type { ChannelMediaEvidence } from "@/lib/discovery/media-verification";
@@ -71,12 +72,16 @@ export async function inspectNext(store: InboxStore, ports: InspectionPorts, now
   return true;
 }
 
+/** The title without articles or a trailing part number: "In The Cold Light" gives "In Cold Light", "Gaslight 1" gives "Gaslight". */
+const looseTitle = (title: string): string =>
+  title.split(" ").filter((word, index, all) => !/^(?:the|a|an)$/i.test(word) && !(index > 0 && index === all.length - 1 && /^\d{1,2}$/.test(word))).join(" ") || title;
+
 /** One inspection of one candidate (pure apart from the ports). Shared by the JSON and database adapters. */
 export async function inspectCandidate(candidate: ReviewCandidate, ports: InspectionPorts): Promise<ReviewCandidate> {
   const parsed = parseDocument(candidate.event);
   const next = { ...candidate, title: parsed.title?.slice(0, 300) ?? null, year: parsed.year, vjText: parsed.vjText?.slice(0, 100) ?? null, warnings: parsed.warnings, error: null };
   if (parsed.kind !== "movie") return { ...next, status: "blocked", error: "series_out_of_scope", warnings: [...next.warnings, "series_out_of_scope"] };
-  if (!next.event.media.size || !next.event.media.name || !/\.(mp4|mkv|webm|mov|avi|m4v)$/i.test(next.event.media.name)) return { ...next, status: "blocked", error: "unsupported_media_metadata" };
+  if (!next.event.media.size || !next.event.media.name || !SUPPORTED_EXTENSIONS.includes(next.event.media.name.split(".").pop()!.toLowerCase())) return { ...next, status: "blocked", error: "unsupported_media_metadata" };
   const media = await ports.media(next.event);
   const known = media.duplicateOf ?? null;
   next.duplicateOf = known;
@@ -84,8 +89,10 @@ export async function inspectCandidate(candidate: ReviewCandidate, ports: Inspec
   next.evidence = media.evidence ? evidenceSchema.parse(media.evidence) : null;
   if (next.evidence?.mediaKey !== mediaKey(next.event)) next.evidence = null;
   if (known) return { ...next, status: "duplicate" };
-  const vj = resolveVj(next.vjText, await ports.vjs());
+  // The reviewer confirms the VJ, so its opening characters are enough to suggest one here.
+  const vj = resolveVj(next.vjText, await ports.vjs(), { prefix: true });
   next.vjId = vj.status === "resolved" ? vj.vjId : null;
+  if (vj.status === "resolved" && vj.match === "prefix") next.warnings = [...next.warnings, "vj_prefix_match"];
   if (!next.title) return { ...next, status: "awaiting_identity" };
   const query: MatchQuery = { kind: "movie", title: next.title, year: next.year };
   const local = await ports.catalogue(query);
@@ -93,7 +100,15 @@ export async function inspectCandidate(candidate: ReviewCandidate, ports: Inspec
   let found: TmdbCandidate[];
   if (localMatch.outcome === "matched" && localMatch.confidence === "high") found = local;
   else if (localMatch.outcome === "ambiguous" && localMatch.reason === "multiple_exact") found = local;
-  else found = await ports.search(query);
+  else {
+    found = await ports.search(query);
+    // No exact title: also offer what a looser query finds. Choices only; the decision below still compares the parsed title.
+    const loose = looseTitle(query.title);
+    if (loose !== query.title && !found.some((item) => scoreCandidate(query, item).reasons.title === "exact")) {
+      const more = await ports.search({ ...query, title: loose });
+      found = [...found, ...more.filter((item) => !found.some((known) => known.tmdbId === item.tmdbId && known.mediaType === item.mediaType))];
+    }
+  }
   const matched = decideMatch(query, found);
   const snapshots = await Promise.all(found.slice(0, 20).filter((item) => item.mediaType === "movie").map(async (item) => {
     const raw = await ports.snapshot(item.tmdbId);
@@ -103,8 +118,16 @@ export async function inspectCandidate(candidate: ReviewCandidate, ports: Inspec
     return snapshot;
   }));
   next.choices = snapshots.filter((item): item is MovieSnapshot => item !== null);
-  if (matched.outcome !== "matched" || matched.confidence !== "high") return { ...next, identity: matched.outcome === "ambiguous" ? "ambiguous" : "unknown", status: "awaiting_identity" };
-  next.tmdbId = matched.best.candidate.tmdbId;
+  // The uploader's caption tag (tmdb:movie:<id>) names the film: offered first and proposed, still never an approval.
+  const tagged = parsed.externalId && Number(parsed.externalId) <= 2147483647 ? Number(parsed.externalId) : null;
+  if (tagged && !next.choices.some((item) => item.tmdb_id === tagged)) {
+    const raw = await ports.snapshot(tagged);
+    if (raw && raw.tmdb_id === tagged) next.choices = [movieSnapshotSchema.parse(raw), ...next.choices].slice(0, 20);
+  }
+  const proposed = tagged && next.choices.some((item) => item.tmdb_id === tagged) ? tagged
+    : matched.outcome === "matched" && matched.confidence === "high" ? matched.best.candidate.tmdbId : null;
+  if (proposed === null) return { ...next, identity: matched.outcome === "ambiguous" ? "ambiguous" : "unknown", status: "awaiting_identity" };
+  next.tmdbId = proposed;
   next.snapshot = next.choices.find((item) => item.tmdb_id === next.tmdbId) ?? null;
   next.identity = "proposed"; // Exact matching is a suggestion, never an administrator's approval.
   const existing = local.find((item) => item.tmdbId === next.tmdbId);

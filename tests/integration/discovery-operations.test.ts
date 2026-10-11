@@ -21,6 +21,10 @@ describe("E3.8B direct restricted worker transport", () => {
       const ports = { ...databaseCataloguePorts(db.rpc), search: async () => [], snapshot: async () => null, media: async () => ({ duplicateOf: null, source: null, evidence: null }) };
       const metrics = await runReplay(target, replayProvider([event, event]), ports, { signal: new AbortController().signal, now: () => new Date(), paceMs: 0 });
       expect(metrics).toMatchObject({ updates: 2, duplicates: 1, processed: 1, failures: 0 });
+      // The inspection itself must succeed: a failed one is still "processed" with no service failure.
+      expect(await ports.vjs()).toEqual(expect.arrayContaining([expect.objectContaining({ id: expect.any(Number), slug: expect.any(String), isActive: true })]));
+      expect(Array.isArray(await ports.catalogue({ kind: "movie", title: "Worker Test", year: 2025 }))).toBe(true);
+      expect(isolatedSql("select e.status || ':' || coalesce(e.error_code, '') || ':' || r.title from private.ingestion_events e join private.channel_reviews r on r.ingestion_event_id = e.id join private.telegram_media m on m.id = e.telegram_media_id where m.message_id = 777")).toBe("needs_review::Worker Test");
       const second = databasePersistence(db.rpc, { channelId: -1005555555555 });
       await expect(second.checkpoint()).rejects.toMatchObject({ code: "discovery_consumer_busy" });
       await target.release(); expect(await second.checkpoint()).toBe(988); await second.release();

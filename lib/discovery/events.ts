@@ -3,6 +3,7 @@ import { z } from "zod";
 import { telegramMediaMessageSchema, fingerprintFromCaption } from "@/lib/ingestion/telegram";
 import { parseFilename } from "@/lib/ingestion/parser";
 import { normalizeTitle, vjKey } from "@/lib/ingestion/normalize";
+import { vjKeysAgree } from "@/lib/ingestion/vj";
 import { RECOVERY_MARKER_PREFIX } from "@/lib/ingestion/recovery";
 import type { DiscoveryEvent, Inbox, ReviewCandidate } from "@/lib/discovery/model";
 
@@ -46,20 +47,24 @@ export const channelIdentity = (event: DiscoveryEvent): string | null =>
 export function parseDocument(event: DiscoveryEvent) {
   const file = parseFilename(event.media.name ?? "");
   const lines = (event.media.caption ?? "").split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !/^(?:Movie$|velora-src:|tmdb:)/i.test(line));
-  const captionText = lines.join(" - ").replace(/\|/g, " - ");
+  // A caption that is only a VJ credit ("VJ Ice P") names the VJ; it is not a title.
+  const credit = lines.length === 1 ? /^vj[\s._:-]+([^\s\d-]+(?:\s+[^\s\d-]+){0,2})$/i.exec(lines[0])?.[1] ?? null : null;
+  const captionText = credit ? "" : lines.join(" - ").replace(/\|/g, " - ");
   const caption = captionText ? parseFilename(`${captionText}.mp4`) : null;
+  const captionVj = credit ?? caption?.vjText ?? null;
   const warnings = file.issues.map((issue) => issue.code as string);
   if (caption && file.title && caption.title && normalizeTitle(file.title) !== normalizeTitle(caption.title)) warnings.push("caption_title_conflict");
   if (caption?.year && file.year && caption.year !== file.year) warnings.push("caption_year_conflict");
-  if (caption?.vjText && file.vjText && vjKey(caption.vjText) !== vjKey(file.vjText)) warnings.push("caption_vj_conflict");
+  // The same opening characters name the same VJ (lib/ingestion/vj.ts), so a trailing remark is not a conflict.
+  if (captionVj && file.vjText && vjKey(captionVj) !== vjKey(file.vjText) && !vjKeysAgree(vjKey(captionVj), vjKey(file.vjText))) warnings.push("caption_vj_conflict");
   if (caption) warnings.push(...caption.issues.filter((issue) => issue.code !== "unsupported_extension").map((issue) => issue.code));
-  return { title: file.title ?? caption?.title ?? null, year: file.year ?? caption?.year ?? null, vjText: file.vjText ?? caption?.vjText ?? null,
+  return { title: file.title ?? caption?.title ?? null, year: file.year ?? caption?.year ?? null, vjText: file.vjText ?? captionVj,
     kind: file.inferredKind === "series" || caption?.inferredKind === "series" ? "series" : "movie",
     warnings: [...new Set(warnings)], confidence: file.confidence,
     // A claim is evidence for lookup only; it never becomes uploaderSource.
     claimedFingerprint: fingerprintFromCaption(event.media.caption),
     externalId: /(?:^|\s)tmdb:movie:(\d+)(?=\s|$)/.exec(event.media.caption ?? "")?.[1] ?? null,
-    references: ["document.file_name", ...(caption ? ["message.caption"] : [])] };
+    references: ["document.file_name", ...(caption || credit ? ["message.caption"] : [])] };
 }
 
 export function initialInbox(channelId: number): Inbox {

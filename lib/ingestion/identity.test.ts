@@ -43,6 +43,22 @@ describe("resolveVj: parsed text is not identity", () => {
     expect(resolveVj("Kevo", VJS)).toEqual({ status: "unresolved", suggestionIds: [] });
   });
 
+  it("resolves by opening characters only when asked (channel discovery), and says so", () => {
+    const prefix = { prefix: true };
+    for (const text of ["Ice", "ICE P NO'S", "Ice P HD"]) {
+      expect(resolveVj(text, VJS, prefix)).toEqual({ status: "resolved", vjId: 4, slug: "vj-ice-p", match: "prefix" });
+    }
+    expect(resolveVj("Juniorr", VJS, prefix)).toEqual({ status: "resolved", vjId: 1, slug: "vj-junior", match: "prefix" });
+    // An equal key is not a prefix match.
+    expect(resolveVj("Ice P", VJS, prefix)).toEqual({ status: "resolved", vjId: 4, slug: "vj-ice-p" });
+    // Three shared characters are enough only when that is the whole of the shorter name.
+    expect(resolveVj("Iceman", VJS, prefix)).toEqual({ status: "unresolved", suggestionIds: [] });
+    expect(resolveVj("Ic", VJS, prefix)).toEqual({ status: "unresolved", suggestionIds: [4] });
+    expect(resolveVj("Reti", VJS, prefix)).toEqual({ status: "unresolved", suggestionIds: [3] });
+    const clash = [...VJS, { id: 6, slug: "vj-ice-man", name: "VJ Ice Man", isActive: true }];
+    expect(resolveVj("Ice", clash, prefix)).toEqual({ status: "ambiguous", candidateIds: [4, 6] });
+  });
+
   it("does not mutate or extend the VJ list", () => {
     const before = structuredClone(VJS);
     resolveVj("Brand New VJ", VJS);

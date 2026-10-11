@@ -1,0 +1,13 @@
+*
+!package.json
+!package-lock.json
+!lib/
+lib/**/*.test.ts
+lib/**/*.test.tsx
+lib/**/test-fakes.ts
+!types/
+!scripts/ingest/register.mjs
+!services/media-gateway/package.json
+!services/media-gateway/package-lock.json
+!services/media-gateway/*.mts
+!infra/discovery/entrypoint.sh
