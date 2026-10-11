@@ -182,9 +182,10 @@ fast-start H.264 with AAC or MP3 inside the existing policy.
 
 1. Deploy migration `20261011112745` to hosted. It depends on nothing in the six
    undeployed admin-upload migrations (`20261011083200` to `20261011095632`),
-   which sort before it. Decide whether to deploy it alone, out of order, or all
-   seven in order.
-2. Rebuild the listener image from this tree.
+   which sort before it. The plan below deploys it alone and proves that the
+   order does not matter.
+2. Rebuild the listener image from this tree. **Done** (built and tested
+   offline, not started; see "Listener image" below).
 3. Provision the reader bot's own session file for discovery, separate from the
    gateway's, and add `TELEGRAM_MEDIA_API_ID`, `TELEGRAM_MEDIA_API_HASH`,
    `TELEGRAM_MEDIA_BOT_ID` and `TELEGRAM_MEDIA_BOT_USERNAME` to the worker's
@@ -204,3 +205,104 @@ decision remain separate gates. The five functions can be restored from
 
 **Sequencing note.** Run the media check before clearing rights. A request is a
 new revision, and a clearance belongs to the revision it was recorded at.
+
+## Listener image (2026-10-11): built and tested offline, not started
+
+`velora-discovery:media-recovery` (image `1218b772c5c0`, built from commit
+`99e1a34`). The running listener is unchanged: still `velora-discovery:gate-b`,
+metadata mode, same container, no restart. No container was created from the new
+image except the disposable test runs below.
+
+Every test ran with no network, a read-only root filesystem, a 32 MiB tmpfs, all
+capabilities dropped and synthetic configuration values.
+
+| Check | Result |
+| --- | --- |
+| Bounded mode with a complete reader configuration (`--check`) | Valid, exit 0 |
+| Bounded mode without reader configuration, or without a session path | Refused, names the missing variables, exit 78 |
+| Reader bot equal to the Movies bot | Refused (`discovery_bot_identity_invalid`), exit 78 |
+| Database login other than the worker role | Refused (`discovery_wrong_database_identity`) |
+| Start without live authorization (unset or `false`) | Refused (`discovery_gate_b_required`), exit 78 |
+| Reader started with no session file | Refuses (`media reader session missing`); no login, no network call |
+| Image contents | User `node`, ffprobe and ffmpeg 5.1.9, no test files, root not writable |
+| Real ffprobe on generated files | H.264 with AAC and with MP3: canonical, playback-ready, about 74 KB read each |
+| | Non-fast-start MP4: `mp4_not_fast_start` (64 bytes read). MKV: `container_not_mp4` (16 bytes). HEVC: `video_codec_hevc` |
+| The gateway's real error class through the verifier | `flood_wait` is transient; `document_resolution_failed` is not |
+| A probe cut off after 1 ms | `probe_timeout`, transient |
+| Worker media-only path with a fake database | Verified file: claim then complete, evidence canonical, confirmed film and VJ sent back unchanged, no metadata lookup |
+| | MKV: complete with `container_not_mp4`. Reader outage: `discovery_fail` with `media_read_mtproto_disconnected`, no evidence |
+
+**Isolation from other Telegram consumers.** The listener consumes Bot API
+updates as the Movies bot. The reader is a different bot (the local
+configuration's reader ID differs from the Movies bot's) on MTProto,
+with updates disabled, and the worker refuses a reader that is the Movies bot.
+It needs its own session file, separate from the Media Gateway's.
+
+**Still unproven.** A real MTProto read. The listener's environment file has
+none of the four reader variables and no discovery session file exists, so
+bounded mode cannot start today. Creating that session is one Telegram login of
+the reader bot and needs its own authorization. The only code that performs such
+a login is the gateway's explicit `MEDIA_GATEWAY_ALLOW_BOT_LOGIN` path.
+
+## Production migration plan (2026-10-11): prepared, not executed
+
+No production connection was opened for this plan. It follows the procedure used
+for migration 16 (snapshot backup, restore rehearsal, one guarded transaction),
+in an operator-only driver outside Git:
+`.velora-ingest/e3.8-recovery/media-recovery-migration.mjs`. Its production
+stages refuse to run unless `VELORA_PRODUCTION_MIGRATION_AUTHORIZED` is exactly
+`20261011112745` and `MEDIA_RECOVERY_SHA256` equals the file's hash.
+
+**Exact change.** Migration file SHA-256 `b7222eeb…0bc3c1`. It replaces five
+functions and nothing else: `public.discovery_claim`, `discovery_complete`,
+`discovery_fail`, `discovery_review_retry` and `private.channel_view`. No table,
+column, index, constraint, policy, trigger, role or grant changes, and no row is
+written except the history row.
+
+**Ordering.** Production has 16 migrations. Six admin-upload migrations sort
+before this one and are not deployed. This migration is applied alone, ahead of
+them. Later, those six must go through the same explicit driver path:
+`supabase db push` would need `--include-all` for them, which the runbook forbids.
+
+**Verified offline (`--offline`, disposable databases only).**
+
+| Check | Result |
+| --- | --- |
+| Hosted-equivalent chain (16) plus this migration: functions changed | Exactly the five; 0 other objects; owners, security modes, settings and ACLs unchanged |
+| Suites on that chain | 009 to 012: 275 of 275. 017: 66 of 66 |
+| Order independence | 16, this one, then the six: 86 functions and the whole table shape identical to repository order |
+| Replay of the deployment transaction | Refused by the history row's key; nothing changes |
+| Generated rollback (`rollback.sql`, SHA-256 `83035080…7e24a8`) | Restores the five definitions exactly and removes the history row; reapplying afterwards gives the tested state again |
+| Last production archive (taken before migration 16, 15 migrations) | Hash verified; 61 tables restore to the recorded digests |
+| Its five functions, after migration 16 | Identical to the tested chain before and after this migration |
+| Data after this migration on the restored copy | Unchanged in all 61 tables |
+| New review view over the restored candidates | All 7 render with `inspection` |
+
+**Sequence, once authorized.**
+
+1. `--backup`: read-only. Requires the history to be exactly the first 16.
+   Writes a snapshot-consistent, EFS-encrypted archive outside the repository.
+2. `--rehearse`: restores that archive in a disposable database on an internal
+   network and repeats the checks above against current data.
+3. `--apply`: the one write. It first requires the history to be exactly 16,
+   the archive hash and rehearsal to match, and production's five functions to be
+   identical to the tested ones. Then one transaction with a 5 s lock timeout:
+   the migration and its history row. Then verification: history is the 16 plus
+   this one, the five functions equal the tested chain including owner and ACL,
+   no other function changed, and non-volatile data is unchanged.
+4. `--rollback`, if needed inside the change window: requires production's five
+   functions to be this migration's, restores the previous definitions and
+   removes the history row in one transaction. Afterwards, use a new migration.
+
+**Effect on what is running.** Replacing a function takes no table lock. The
+current listener keeps working against the new functions and cannot lose a
+confirmation. The dashboard starts showing **Run media check** as soon as the
+migration is live. Pressing it before the bounded listener runs is harmless but
+useless: it is audited as `no_evidence`, keeps the confirmation and uses one
+revision.
+
+**Not covered.** The archive is from this morning: it holds 7 candidates with 1
+confirmed, while the audit above found all 7 confirmed. The fresh backup in step
+1 is what the real rehearsal runs on. A channel post arriving between the
+driver's two reads shows up as data drift and stops verification after the
+commit; apply while the channel is quiet.
