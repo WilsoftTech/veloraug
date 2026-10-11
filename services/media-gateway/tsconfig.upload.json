@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.discovery.json",
+  "include": ["admin-upload.mts", "../../next-env.d.ts"]
+}

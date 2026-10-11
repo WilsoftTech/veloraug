@@ -31,13 +31,20 @@ describe("offline review server authorization", () => {
   it("every admin page and server action calls the authorization guard", () => {
     // Found, not listed: a new admin page cannot be added without the guard.
     const guarded = (readdirSync("app/admin", { recursive: true }) as string[]).map((path) => path.replaceAll("\\", "/")).filter((path) => /(?:^|\/)(?:page|layout|actions)\.tsx?$/.test(path));
-    expect(guarded.sort()).toEqual(["catalogue/actions.ts", "catalogue/page.tsx", "discovery/[id]/page.tsx", "discovery/actions.ts", "discovery/page.tsx", "layout.tsx", "page.tsx"]);
-    for (const path of guarded) expect(readFileSync(`app/admin/${path}`, "utf8"), path).toContain("await requireReviewAdmin()");
+    expect(guarded.sort()).toEqual(["catalogue/actions.ts", "catalogue/page.tsx", "discovery/[id]/page.tsx", "discovery/actions.ts", "discovery/page.tsx", "layout.tsx", "page.tsx", "uploads/[id]/page.tsx", "uploads/actions.ts", "uploads/new/page.tsx", "uploads/page.tsx"]);
+    for (const path of guarded) {
+      const text = readFileSync(`app/admin/${path}`, "utf8");
+      expect(text, path).toContain(path.startsWith("uploads/") && path !== "uploads/new/page.tsx" ? "await uploadClient()" : "await requireReviewAdmin()");
+    }
     // Every exported server action checks for itself.
     for (const path of guarded.filter((file) => file.endsWith("actions.ts"))) {
       const actions = readFileSync(`app/admin/${path}`, "utf8");
-      expect(actions.match(/^export async function /gm), path).toHaveLength(actions.match(/await requireReviewAdmin\(\)/g)!.length);
+      expect(actions.match(/^export async function /gm), path).toHaveLength(actions.match(path === "uploads/actions.ts" ? /await uploadClient\(\)/g : /await requireReviewAdmin\(\)/g)!.length);
     }
+    const uploadRuntime = readFileSync("lib/uploader/admin-runtime.ts", "utf8");
+    expect(uploadRuntime).toContain('import "server-only"');
+    expect(uploadRuntime).toContain("await requireReviewAdmin()");
+    expect(readFileSync("app/api/admin/uploads/[id]/transfer/route.ts", "utf8")).toContain("await uploadClient()");
   });
   it("worker and runtime have no live Telegram or hosted publication adapter", () => {
     for (const path of ["lib/discovery/runtime.ts", "lib/discovery/worker.ts", "lib/discovery/fixtures.ts", "scripts/discovery/replay.mts"]) {

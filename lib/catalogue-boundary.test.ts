@@ -61,7 +61,7 @@ const graph = new Map(files.map((file) => [rel(file), importsOf(file)]));
 // lib/discovery/runtime.ts, which every one of them needs for requireReviewAdmin;
 // lib/discovery/security.test.ts checks that guard on each). They are not public
 // routes. A new admin route remains covered until it is reviewed and listed here.
-const OFFLINE_ADMIN_ROUTES = new Set(["app/admin/layout.tsx", "app/admin/page.tsx", "app/admin/catalogue/page.tsx", "app/admin/discovery/page.tsx", "app/admin/discovery/[id]/page.tsx"]);
+const OFFLINE_ADMIN_ROUTES = new Set(["app/admin/layout.tsx", "app/admin/page.tsx", "app/admin/catalogue/page.tsx", "app/admin/discovery/page.tsx", "app/admin/discovery/[id]/page.tsx", "app/admin/uploads/page.tsx", "app/admin/uploads/new/page.tsx", "app/admin/uploads/[id]/page.tsx", "app/api/admin/uploads/[id]/transfer/route.ts"]);
 const routes = [...graph.keys()].filter((file) => file.startsWith("app/") && !OFFLINE_ADMIN_ROUTES.has(file) && ROUTE_FILES.test(file));
 
 /** Every TMDB module reachable from a route, and the edge that entered it. */
@@ -110,7 +110,7 @@ describe("TMDB boundary (B5)", () => {
 
   it("the ingestion TMDB module has only the uploader and offline discovery importers", () => {
     const importers = [...graph].filter(([, targets]) => targets.includes("lib/tmdb/ingestion-search.ts")).map(([file]) => file);
-    expect(importers.sort()).toEqual(["lib/discovery/fixtures.ts", "lib/discovery/model.ts", "lib/discovery/pipeline.ts", "lib/uploader/publication.ts"]);
+    expect(importers.sort()).toEqual(["lib/discovery/fixtures.ts", "lib/discovery/model.ts", "lib/discovery/pipeline.ts", "lib/uploader/admin-inspection.ts", "lib/uploader/admin-upload.ts", "lib/uploader/publication.ts"]);
   });
 
   it("the TMDB API host appears only in the TMDB transport", () => {

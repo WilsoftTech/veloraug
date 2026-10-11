@@ -4,6 +4,7 @@ const SECTIONS = [
   { href: "/admin", label: "Overview", exact: true },
   { href: "/admin/discovery", label: "Review queue" },
   { href: "/admin/catalogue", label: "Catalogue" },
+  ...(process.env.VELORA_ADMIN_UPLOADS_ENABLED === "true" ? [{ href: "/admin/uploads", label: "Uploads" }] : []),
 ];
 
 /** Section tabs shared by every admin page (the same underline tabs as TabLinks, driven by the path). */

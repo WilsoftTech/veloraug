@@ -42,6 +42,11 @@ describe("ingestion boundary (C1)", () => {
   it("is not imported by app code, components or the public data layer (nor are the C2 Telegram and uploader modules)", () => {
     const importers = ["app", "components"].flatMap(filesUnder).concat(["lib/catalogue.ts", "lib/browse.ts", "lib/utils.ts"])
       .filter((file) => specifiers(readFileSync(join(ROOT, file), "utf8")).some((specifier) => /ingestion|lib\/telegram|lib\/uploader/.test(specifier)));
-    expect(importers).toEqual([]);
+    // Explicit guarded server entry points for the additive admin pipeline.
+    // Client components and every public route remain outside this allowlist.
+    expect(importers.map((file) => file.replaceAll("\\", "/")).sort()).toEqual([
+      "app/admin/uploads/[id]/page.tsx", "app/admin/uploads/actions.ts", "app/admin/uploads/new/page.tsx",
+      "app/admin/uploads/page.tsx", "app/api/admin/uploads/[id]/transfer/route.ts",
+    ]);
   });
 });
