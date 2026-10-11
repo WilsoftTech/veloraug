@@ -3,7 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { channelIdentity, detectDocument } from "@/lib/discovery/events";
 import { createReviewClient, databaseCataloguePorts, databasePersistence, type DiscoveryRpc } from "@/lib/discovery/database";
-import { verifyChannelMedia } from "@/lib/discovery/media-verification";
+import { verifyChannelMedia, type ChannelMediaEvidence } from "@/lib/discovery/media-verification";
 import { approvalCommand, publicationCommand, publicationState } from "@/lib/discovery/owner-commands";
 import { probeOf, virtualMp4 } from "@/lib/discovery/synthetic-media";
 import { reconcile, replayProvider, runReplay } from "@/lib/discovery/worker";
@@ -20,7 +20,8 @@ import { ISOLATED_REST, isolatedJwt, isolatedSql } from "./isolated-env";
 /**
  * E3.8A end to end, isolated: a document posted directly to the Movies channel
  * becomes a published, playable catalogue title only through detection,
- * bounded verification, review, explicit rights, approval and publication.
+ * historical policy 2 evidence, review, explicit rights, approval and publication.
+ * Policy 3 bounded inspection is tested separately below and stays unverified.
  *
  * Real modules throughout (worker, persistence, verifier, reviewer client,
  * owner commands, lib/catalogue, entitlement and capability issuing) over the
@@ -57,12 +58,14 @@ const ports: InspectionPorts = {
   ...databaseCataloguePorts(service),
   async search() { tmdbSearches++; return [{ tmdbId: TMDB, mediaType: "movie", title: FILM.title, originalTitle: FILM.original_title, year: 2025 }]; },
   async snapshot(id) { return id === TMDB ? FILM : null; },
-  // Bounded verification of the exact document over a byte reader (the gateway's MediaReader in production).
+  // Explicit synthetic legacy contract. Do not turn a policy 3 result into
+  // policy 2 evidence: bounded originals cannot prove the new verified gates.
   async media(event) {
     verifications++;
     const identity = channelIdentity(event)!;
-    const file = virtualMp4({ size: event.media.size! });
-    const verification = await verifyChannelMedia({ identity, sizeBytes: event.media.size! }, { read: file.read, probe: async (head) => probeOf(undefined, head.length), gatewayCompatible: true });
+    const verification: ChannelMediaEvidence = { identity,method:"bounded_mtproto_v1",policy_version:2,
+      media_class:"canonical",reasons:[],container:"mp4",video_codec:"h264",audio_codec:"aac",
+      accessible:true,gateway_compatible:true,playback_ready:true,bytes_read:4096 };
     return { duplicateOf: null, source: null, evidence: null, verification };
   },
 };
@@ -111,7 +114,7 @@ describe.skipIf(process.env.VELORA_E38_ISOLATED_TESTS !== "true" || process.env.
     expect(tmdbSearches).toBe(searches);
   });
 
-  it("proposes identity and VJ, verifies the exact document, and starts with rights missing", async () => {
+  it("retains legacy verification while proposing identity/VJ and keeping rights separate", async () => {
     const detail = (await reviewer(REVIEW).get(key(900)))!;
     const event = detectDocument(post(501, 900, "AgADdirect900"), CHANNEL).event!;
     expect(detail.candidate).toMatchObject({ status: "awaiting_identity", identity: "proposed", tmdbId: TMDB, title: "Direct Channel Film", year: 2025, vjText: "Direct", relation: "new_movie" });
@@ -248,17 +251,20 @@ describe.skipIf(process.env.VELORA_E38_ISOLATED_TESTS !== "true" || process.env.
     expect(evidenceRows()).toBe("0");
     expect(await worker.inspectNext(limited, () => new Date())).toBe(false); // waiting for its backoff
 
-    // 3. The retry reads the document: verified evidence, and still exactly what the reviewer confirmed.
+    // 3. The current policy 3 retry reads the document: metadata is consistent,
+    // but neither integrity nor streaming is verified. Confirmed identity stays.
     isolatedSql(`update private.channel_reviews set retry_at = now() - interval '1 second' where discovery_key = '${key(910)}'`);
     expect(await worker.inspectNext(reading((file) => file.read), () => new Date())).toBe(true);
     const checked = (await reviewer(REVIEW).get(key(910)))!.candidate;
-    expect(checked).toMatchObject({ status: "awaiting_rights", revision: 3, attempts: 2, identity: "confirmed", tmdbId: TMDB2, vjId: vj, title: "Recovered Film", year: 2025, gates: ["rights_clearance_required"],
-      evidence: { mediaClass: "canonical", video: "h264", audio: "aac", browser: true, gateway: true, accessible: true }, lastInspection: { action: "media_inspected", detail: "verified", revision: 3 } });
+    expect(checked).toMatchObject({ status: "awaiting_media", revision: 3, attempts: 2, identity: "confirmed", tmdbId: TMDB2, vjId: vj, title: "Recovered Film", year: 2025, gates: ["media_verification_required","rights_clearance_required"],
+      evidence: { mediaClass: "original", video: "h264", audio: "aac", browser: false, gateway: true, accessible: true }, lastInspection: { action: "media_inspected", detail: "unverified:original", revision: 3 } });
+    expect(isolatedSql(`select integrity_status||':'||streaming_status||':'||verified from private.media_evidence ev join private.telegram_media m on m.id=ev.telegram_media_id where m.chat_id=${CHANNEL} and m.message_id=910`))
+      .toBe("metadata_consistent:potentially_playable:false");
     expect(checked.choices.map((choice) => choice.tmdb_id)).toEqual([TMDB2]);
     expect(lookups).toBe(before);
     expect(evidenceRows()).toBe("1");
     expect(isolatedSql(`select string_agg(a.action || coalesce(':' || a.detail, ''), ',' order by a.id) from private.channel_review_audit a join private.channel_reviews r on r.ingestion_event_id = a.ingestion_event_id where r.discovery_key = '${key(910)}'`))
-      .toBe(`detected,inspected:proposed,identity_confirmed:tmdb:${TMDB2},vj:${vj},reinspection_requested:media_only,inspection_failed:media_read_flood_wait,media_inspected:verified`);
+      .toBe(`detected,inspected:proposed,identity_confirmed:tmdb:${TMDB2},vj:${vj},reinspection_requested:media_only,inspection_failed:media_read_flood_wait,media_inspected:unverified:original`);
     // A media check is never a rights decision, an approval or a publication.
     expect(isolatedSql(`select count(*) from public.movies where tmdb_id = ${TMDB2}`)).toBe("0");
     expect(refused(() => owner(approvalCommand(key(910), 3, REVIEW)))).toMatch(/review_gates_not_met/);

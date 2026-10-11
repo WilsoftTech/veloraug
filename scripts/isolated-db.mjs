@@ -74,7 +74,8 @@ export function down() {
   useContainerSql = false;
 }
 
-export function up({ rest = true, seed = false, stopBefore = null, internalNetwork = false } = {}) {
+/** @param {{rest?: boolean, seed?: boolean, stopBefore?: string|null, internalNetwork?: boolean, excludeMigrations?: string[]}} [options] */
+export function up({ rest = true, seed = false, stopBefore = null, internalNetwork = false, excludeMigrations = [] } = {}) {
   down();
   useContainerSql = internalNetwork;
   docker("network", "create", ...(internalNetwork ? ["--internal"] : []), ISOLATED.network);
@@ -90,12 +91,15 @@ export function up({ rest = true, seed = false, stopBefore = null, internalNetwo
     create or replace function auth.jwt() returns jsonb language sql stable as $$
       select coalesce(nullif(current_setting('request.jwt.claim', true), ''), nullif(current_setting('request.jwt.claims', true), ''))::jsonb $$;
     alter table auth.users add column if not exists is_anonymous boolean not null default false;
+    alter table auth.users add column if not exists banned_until timestamptz;
+    alter table auth.users add column if not exists deleted_at timestamptz;
     grant execute on function auth.uid(), auth.jwt() to anon, authenticated, service_role;`, { user: "supabase_admin" });
   if (setup.code !== 0) throw new Error(`harness setup failed: ${setup.err}`);
   const migrations = readdirSync(join(root, "supabase/migrations")).filter((f) => f.endsWith(".sql")).sort();
   let applied = 0;
   for (const name of migrations) {
     if (name === stopBefore) break;
+    if (excludeMigrations.includes(name)) continue;
     const result = psql(null, { file: join(root, "supabase/migrations", name) });
     if (result.code !== 0) throw new Error(`migration ${name} failed:\n${result.err}`);
     applied++;

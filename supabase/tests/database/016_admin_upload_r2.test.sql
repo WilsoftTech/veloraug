@@ -112,9 +112,21 @@ select is(tests.review('clear_rights','contract-renewed',now()+interval '1 month
 update private.admin_upload_r2 set next_attempt_at=now() where upload_id=tests.id();
 select is(tests.claim(8427,array['publish']),'publish','renewed rights allow existing publication lifecycle');
 select is(tests.finish(8427,'publish','{"outcome":"publish"}'),'published','existing catalogue materializer publishes verified stored movie');
+-- Safe additive facts, using a synthetic legacy snapshot. No private upload
+-- reference or new full-file verification claim reaches the public profile.
+insert into private.admin_upload_media_evidence(upload_id,lease_token,verified_sha256,file_key,size_bytes,inspection,policy_version)
+select id,'00000000-0000-4000-8000-000000008499',verified_sha256,verified_file_key,size_bytes,inspection,2
+from private.admin_upload_sessions where id=tests.id();
+update private.admin_upload_sessions set media_evidence_id=(select id from private.admin_upload_media_evidence where upload_id=tests.id() order by id desc limit 1) where id=tests.id();
+select is((select public.movie_media_profile(mv.id)->>'integrity_status' from public.movie_versions mv join public.movies m on m.id=mv.movie_id where m.tmdb_id=98401),
+ 'legacy_unassessed','public profile does not reinterpret legacy verification');
+select ok((select public.movie_media_profile(mv.id) is not null and not (public.movie_media_profile(mv.id) ?| array['identity','chat_id','message_id','file_key','verified_sha256','rights_reference','owner_id','tracks','inspection'])
+ from public.movie_versions mv join public.movies m on m.id=mv.movie_id where m.tmdb_id=98401),'public profile excludes private provenance and raw track titles');
+select is((select count(*)::int from media_gateway.resolve_movie_version((select mv.id from public.movie_versions mv join public.movies m on m.id=mv.movie_id where m.tmdb_id=98401))),1,'published legacy MP4 resolver unchanged');
 select is((select count(*)::int from public.movie_versions mv join public.movies m on m.id=mv.movie_id where m.tmdb_id=98401),1,'exactly one catalogue version created');
 select ok(catalogue_access.admin_upload_rights_valid((select telegram_media_id from private.ingestion_events where id=(select ingestion_event_id from private.admin_upload_sessions where id=tests.id()))),'published attestation is valid');
 select is(tests.review('revoke_rights'),'published','published rights can be revoked');
+select is((select public.movie_media_profile(mv.id)::text from public.movie_versions mv join public.movies m on m.id=mv.movie_id where m.tmdb_id=98401),null,'revoked selected-version rights suppress public profile');
 select is((select count(*)::int from media_gateway.resolve_movie_version((select mv.id from public.movie_versions mv join public.movies m on m.id=mv.movie_id where m.tmdb_id=98401))),0,'playback resolver blocks revoked rights');
 select ok(not catalogue_access.movie_is_public((select id from public.movies where tmdb_id=98401)),'catalogue hides revoked R2 publication');
 select is(tests.review('clear_rights','contract-renewed',now()+interval '1 month'),'published','rights restoration needs authorized attestation');

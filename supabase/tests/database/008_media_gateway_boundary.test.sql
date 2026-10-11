@@ -72,8 +72,8 @@ select is(
     where n.nspname not in ('pg_catalog', 'information_schema') and n.nspname not like 'pg\_%'
       and has_schema_privilege('velora_media_gateway', n.oid, 'USAGE')
       and has_function_privilege('velora_media_gateway', p.oid, 'EXECUTE')),
-  array['media_gateway.resolve_movie_version'],
-  'the resolver is the only callable function outside the system catalogs');
+  array['media_gateway.resolve_movie_download','media_gateway.resolve_movie_version'],
+  'only the two reviewed resolvers are callable outside the system catalogs');
 select is(
   (select count(*)::int from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where n.nspname not in ('pg_catalog', 'information_schema') and n.nspname not like 'pg\_%' and c.relkind in ('r', 'p', 'v', 'm', 'f')

@@ -139,10 +139,10 @@ describe("media gateway HTTP: authorization and publication", () => {
     expect(h.resolver.calls + h.reader.calls).toBe(0);
   });
 
-  it("keeps the download endpoint closed: a stream token is forbidden, a download token gets no bytes", async () => {
+  it("fails closed on older adapters: a stream token is forbidden, missing download resolver serves no bytes", async () => {
     const h = await start();
     await denied(h, streamUrl(h, token("stream"), 1, "download"), 403);
-    expect(await denied(h, streamUrl(h, token("download"), 1, "download"), 501)).toBe('{"error":"not_implemented"}');
+    expect(await denied(h, streamUrl(h, token("download"), 1, "download"), 503)).toBe('{"error":"temporarily_unavailable"}');
     expect(h.resolver.calls + h.reader.calls).toBe(0);
   });
 
@@ -197,7 +197,8 @@ describe("media gateway HTTP: failures and limits", () => {
       expect(res.status).toBe(status);
       expect(body).not.toMatch(/FLOOD|-100|998877|chat/);
       if (error instanceof GatewayError && error.code === "flood_wait") expect(res.headers.get("retry-after")).toBe("12");
-      for (const line of h.logs) expect(line).not.toMatch(/-100|998877|FLOOD_WAIT_12/);
+      // Random request UUIDs can contain "-100"; check complete private values.
+      for (const line of h.logs) expect(line).not.toMatch(/-1001234567890|\b998877\b|FLOOD_WAIT_12/);
       current!.server.closeAllConnections();
       await new Promise((resolve) => current!.server.close(resolve));
       current = null;

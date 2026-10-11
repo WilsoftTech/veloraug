@@ -19,6 +19,8 @@ export interface MediaLocator {
   fileUniqueId: string;
   fileSize: number;
   mimeType: string | null;
+  /** Original ingestion filename, available only through the download resolver. */
+  fileName?: string | null;
 }
 
 /**
@@ -39,6 +41,8 @@ export interface CatalogueMediaResolver {
    * `catalogue_unavailable` when the catalogue cannot be read.
    */
   resolveMovieVersion(movieVersionId: number, signal: AbortSignal): Promise<MediaLocator | null>;
+  /** Optional until its additive migration is installed. Never fall back to the stream resolver. */
+  resolveDownload?(movieVersionId: number, subject: string, signal: AbortSignal): Promise<MediaLocator | null>;
 }
 
 export interface ReaderReadiness {

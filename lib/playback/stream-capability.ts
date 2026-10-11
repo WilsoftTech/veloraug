@@ -74,15 +74,25 @@ export function streamCapabilityConfigFromEnv(env: Env = process.env): StreamCap
 }
 
 export function issueStreamCapability(config: StreamCapabilityConfig, grant: { movieVersionId: number; subject: string }, nowMs: number): StreamCapability {
+  return issueCapability(config, grant, nowMs, "stream");
+}
+
+/** Same lifetime and fresh-session renewal as streaming; never exchange an old token. */
+export function issueDownloadCapability(config: StreamCapabilityConfig, grant: { movieVersionId: number; subject: string }, nowMs: number) {
+  const capability = issueCapability(config, grant, nowMs, "download");
+  return { downloadUrl: capability.streamUrl, expiresAt: capability.expiresAt };
+}
+
+function issueCapability(config: StreamCapabilityConfig, grant: { movieVersionId: number; subject: string }, nowMs: number, op: "stream" | "download"): StreamCapability {
   const nowSeconds = Math.floor(nowMs / 1000);
   const token = signMediaToken(config.secret, {
-    op: "stream",
+    op,
     movieVersionId: grant.movieVersionId,
     subject: grant.subject,
     ttlSeconds: STREAM_TOKEN_TTL_SECONDS,
     nowSeconds,
   });
-  const url = new URL(`/v1/movie-versions/${grant.movieVersionId}/stream`, config.gatewayOrigin);
+  const url = new URL(`/v1/movie-versions/${grant.movieVersionId}/${op}`, config.gatewayOrigin);
   url.searchParams.set("token", token);
   return { streamUrl: url.toString(), expiresAt: new Date((nowSeconds + STREAM_TOKEN_TTL_SECONDS) * 1000).toISOString() };
 }

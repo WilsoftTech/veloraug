@@ -20,7 +20,7 @@
 import postgres from "postgres";
 import { GatewayError } from "@/lib/media-gateway/errors";
 import type { CatalogueMediaResolver, MediaLocator } from "@/lib/media-gateway/ports";
-import { GATEWAY_DATABASE_ROLE, RESOLVE_MOVIE_VERSION_SQL, locatorFromRow, type ResolverRow } from "@/lib/media-gateway/resolver-sql";
+import { GATEWAY_DATABASE_ROLE, RESOLVE_MOVIE_VERSION_SQL, RESOLVE_DOWNLOAD_SQL, locatorFromRow, type ResolverRow } from "@/lib/media-gateway/resolver-sql";
 
 export type CatalogueState = "reachable" | "unreachable" | "wrong_identity";
 
@@ -67,8 +67,17 @@ export function createPgResolver(databaseUrl: string, options: { statementTimeou
    * SET TRANSACTION READ ONLY and SET LOCAL apply to the statement and end with it
    * (verified on the hosted pooler: writes refused with 25006, nothing carries over).
    */
-  async function readOnly<T>(statement: string): Promise<T[]> {
-    const results = (await sql.unsafe(`set transaction read only; set local statement_timeout = ${timeout}; ${statement}`)) as unknown as (T[] & { columns?: unknown[] })[];
+  async function readOnly<T>(statement: string, signal?: AbortSignal): Promise<T[]> {
+    if (signal?.aborted) throw new GatewayError("catalogue_unavailable");
+    const query = sql.unsafe(`set transaction read only; set local statement_timeout = ${timeout}; ${statement}`);
+    const onAbort = () => query.cancel();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    let results: (T[] & { columns?: unknown[] })[];
+    try {
+      results = await query as unknown as (T[] & { columns?: unknown[] })[];
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
     // postgres.js tags batch results unreliably (the SELECT's rows arrive labelled COMMIT), but only a
     // row-returning statement carries a column description, even with zero rows.
     const selected = results.filter((result) => (result.columns?.length ?? 0) > 0);
@@ -77,6 +86,20 @@ export function createPgResolver(databaseUrl: string, options: { statementTimeou
   }
 
   const resolver: PgResolver = {
+    async resolveDownload(movieVersionId, subject, signal) {
+      if (!Number.isSafeInteger(movieVersionId) || movieVersionId <= 0 || !/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(subject)) return null;
+      if (signal.aborted) throw new GatewayError("catalogue_unavailable");
+      try {
+        // The validated UUID cannot contain SQL syntax; the restricted role still owns no table grant.
+        const rows = await readOnly<ResolverRow>(RESOLVE_DOWNLOAD_SQL.replace("$1", String(movieVersionId)).replace("$2", `'${subject}'`), signal);
+        if (signal.aborted) throw new GatewayError("catalogue_unavailable");
+        if (rows.length > 1) throw new GatewayError("internal_error");
+        return locatorFromRow(movieVersionId, rows[0]);
+      } catch (error) {
+        if (error instanceof GatewayError) throw error;
+        throw new GatewayError("catalogue_unavailable");
+      }
+    },
     async resolveMovieVersion(movieVersionId: number, signal: AbortSignal): Promise<MediaLocator | null> {
       // The id is interpolated into the batch, so it must be exactly a positive safe integer.
       if (!Number.isSafeInteger(movieVersionId) || movieVersionId <= 0) return null;

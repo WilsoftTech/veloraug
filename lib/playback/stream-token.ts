@@ -2,7 +2,7 @@ import "server-only";
 import type { CurrentUser } from "@/lib/auth";
 import { WindowRateLimiter } from "@/lib/media-gateway/limits";
 import type { StreamDecision } from "@/lib/playback/entitlement";
-import { StreamCapabilityConfigError, issueStreamCapability, type StreamCapabilityConfig } from "@/lib/playback/stream-capability";
+import { StreamCapabilityConfigError, issueStreamCapability, issueDownloadCapability, type StreamCapabilityConfig } from "@/lib/playback/stream-capability";
 import { streamTokenRequestSchema } from "@/lib/schemas";
 
 /**
@@ -63,7 +63,7 @@ function fail(error: StreamTokenError, extra: Record<string, string> = {}) {
   return Response.json({ error }, { status: STATUS[error], headers: { ...NO_STORE, ...extra } });
 }
 
-export function createStreamTokenHandler(deps: StreamTokenDeps) {
+export function createStreamTokenHandler(deps: StreamTokenDeps, operation: "stream" | "download" = "stream") {
   const now = deps.now ?? Date.now;
   const limiter = deps.limiter ?? new WindowRateLimiter(STREAM_TOKEN_REQUESTS_PER_WINDOW, STREAM_TOKEN_WINDOW_MS);
 
@@ -110,7 +110,7 @@ export function createStreamTokenHandler(deps: StreamTokenDeps) {
     }
     if (!decision.allowed) return fail(decision.reason === "invalid_version" ? "invalid_request" : decision.reason);
 
-    const capability = issueStreamCapability(config, decision, now());
+    const capability = (operation === "download" ? issueDownloadCapability : issueStreamCapability)(config, decision, now());
     return Response.json(capability, { status: 200, headers: NO_STORE });
   };
 }

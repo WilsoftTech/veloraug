@@ -21,6 +21,11 @@ select r.chat_id::text as chat_id, r.message_id, r.file_unique_id, r.file_size_b
 
 /** The only database identity the gateway accepts (created by the E1.2A migration). */
 export const GATEWAY_DATABASE_ROLE = "velora_media_gateway";
+/** Separate additive RPC: legacy stream fields/signature remain unchanged. $2 is a verified token UUID. */
+export const RESOLVE_DOWNLOAD_SQL = `
+select r.chat_id::text as chat_id, r.message_id, r.file_unique_id, r.file_size_bytes, r.mime_type, r.file_name
+  from media_gateway.resolve_movie_download($1::bigint, $2::uuid) as r
+`;
 
 /** The resolver's exact output columns; anything more would be a boundary change. */
 export const RESOLVER_COLUMNS = ["chat_id", "message_id", "file_unique_id", "file_size_bytes", "mime_type"] as const;
@@ -31,6 +36,7 @@ export interface ResolverRow {
   file_unique_id: string;
   file_size_bytes: number | string;
   mime_type: string | null;
+  file_name?: string | null;
 }
 
 /** Validates a resolver row into a MediaLocator for the given version, or null if any field is out of shape. */
@@ -43,5 +49,6 @@ export function locatorFromRow(movieVersionId: number, row: ResolverRow | undefi
   if (!Number.isSafeInteger(fileSize) || fileSize <= 0) return null;
   if (typeof row.chat_id !== "string" || !/^-100\d{1,16}$/.test(row.chat_id)) return null;
   if (typeof row.file_unique_id !== "string" || row.file_unique_id.length === 0) return null;
-  return { movieVersionId, chatId: row.chat_id, messageId, fileUniqueId: row.file_unique_id, fileSize, mimeType: row.mime_type ?? null };
+  return { movieVersionId, chatId: row.chat_id, messageId, fileUniqueId: row.file_unique_id, fileSize, mimeType: row.mime_type ?? null,
+    ...(row.file_name === undefined ? {} : { fileName: row.file_name }) };
 }

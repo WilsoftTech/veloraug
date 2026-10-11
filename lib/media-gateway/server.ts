@@ -4,7 +4,7 @@
  *   GET /healthz                                   process liveness; no dependency is called
  *   GET /readyz                                    503 unless the media reader can serve now
  *   GET /v1/movie-versions/{id}/stream?token=…     206 byte ranges of a published version
- *   GET /v1/movie-versions/{id}/download?token=…   not implemented; proves operation separation
+ *   GET /v1/movie-versions/{id}/download?token=…   original attachment, full or ranged
  *   OPTIONS on the media routes                    CORS preflight, allow-listed origins only
  *
  * Order per stream request (each step fails closed before the next runs):
@@ -14,7 +14,9 @@
  * and a client can name only an internal version id, never Telegram media.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { DOWNLOAD_LIMITS, DOWNLOAD_MAX_FILE_BYTES, downloadHeaders, type DownloadLimits } from "@/lib/media-gateway/download";
+import { locatorIdentity } from "@/lib/media-gateway/ports";
 import { GatewayError, gatewayCodeOf, publicError, type GatewayErrorCode } from "@/lib/media-gateway/errors";
 import { Semaphore, StreamAdmission, WindowRateLimiter, type GatewayLimits } from "@/lib/media-gateway/limits";
 import type { GatewayLogFields, GatewayLogger } from "@/lib/media-gateway/log";
@@ -36,6 +38,8 @@ export interface MediaGatewayDeps {
   requestId?: () => string;
   /** Client address for per-IP limits. Defaults to the socket peer (no proxy header is trusted). */
   clientIp?: (request: IncomingMessage) => string;
+  /** Download-only profile; configurable for offline deadline tests, never stream limits. */
+  downloadLimits?: Partial<DownloadLimits>;
 }
 
 export interface MediaGateway {
@@ -60,6 +64,13 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
   const clientIp = deps.clientIp ?? ((request: IncomingMessage) => request.socket.remoteAddress ?? "unknown");
   const semaphore = new Semaphore(limits.maxReadsInFlight);
   const admission = new StreamAdmission(limits);
+  const downloadLimits = { ...DOWNLOAD_LIMITS, ...deps.downloadLimits };
+  for (const key of Object.keys(DOWNLOAD_LIMITS) as (keyof DownloadLimits)[]) {
+    if (!Number.isSafeInteger(downloadLimits[key]) || downloadLimits[key] < 1 || downloadLimits[key] > DOWNLOAD_LIMITS[key]) {
+      throw new Error(`download limit ${key} must tighten the default`);
+    }
+  }
+  const downloads = new StreamAdmission(downloadLimits);
   const bySubject = new WindowRateLimiter(limits.requestsPerSubjectPerWindow, limits.rateWindowMs);
   const byIp = new WindowRateLimiter(limits.requestsPerIpPerWindow, limits.rateWindowMs);
   const origins = new Set(deps.allowedOrigins ?? []);
@@ -70,7 +81,7 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
     if (typeof origin !== "string" || !origins.has(origin)) return {};
     return {
       "Access-Control-Allow-Origin": origin,
-      "Access-Control-Expose-Headers": "Accept-Ranges, Content-Length, Content-Range, Content-Type",
+      "Access-Control-Expose-Headers": "Accept-Ranges, Content-Length, Content-Range, Content-Type" + (request.url?.split("?")[0].endsWith("/download") ? ", Content-Disposition, ETag" : ""),
       Vary: "Origin",
     };
   }
@@ -122,11 +133,11 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
       op,
       movieVersionId: versionId,
       nowSeconds: Math.floor(now() / 1000),
-      maxLifetimeSeconds: limits.maxTokenLifetimeSeconds,
+      maxLifetimeSeconds: op === "download" ? Math.min(limits.maxTokenLifetimeSeconds, downloadLimits.maxTokenLifetimeSeconds) : limits.maxTokenLifetimeSeconds,
     });
     if (!verified.ok) return deny(verified.code);
-    // The download endpoint is reserved: a download token is recognised, and still no bytes are served.
-    if (op === "download") return deny("not_implemented");
+    // Older gateway adapters remain streaming-compatible and fail closed for downloads.
+    if (op === "download" && !deps.resolver.resolveDownload) return deny("not_ready");
 
     // 3. Abuse and resource limits.
     const subject = verified.claims.sub;
@@ -136,7 +147,7 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
     if (shuttingDown) return deny("not_ready");
     let release: () => void;
     try {
-      release = admission.admit(subject, ip);
+      release = (op === "download" ? downloads : admission).admit(subject, ip);
     } catch (error) {
       return deny(gatewayCodeOf(error));
     }
@@ -149,7 +160,31 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
       if (!response.writableFinished) abort("client_closed");
     };
     response.on("close", onClose);
-    const requestTimer = setTimeout(() => abort(new GatewayError("upstream_timeout")), limits.requestTimeoutMs);
+    const requestTimer = setTimeout(() => abort(new GatewayError("upstream_timeout")), op === "download" ? downloadLimits.requestTimeoutMs : limits.requestTimeoutMs);
+    const expiryTimer = op === "download" ? setTimeout(() => abort(new GatewayError("authorization_expired")), Math.max(0, verified.claims.exp * 1000 - now())) : undefined;
+    let recheckTimer: ReturnType<typeof setInterval> | undefined;
+    let checking = false;
+    // Race even adapters without cancellation against a bounded authorization deadline.
+    const resolve = async () => {
+      if (op === "stream") return deps.resolver.resolveMovieVersion(versionId, controller.signal);
+      const deadline = new AbortController();
+      const signal = AbortSignal.any([controller.signal, deadline.signal]);
+      const timer = setTimeout(() => deadline.abort(new GatewayError("catalogue_unavailable")), downloadLimits.authorizationTimeoutMs);
+      let onAbort: () => void = () => {};
+      try {
+        return await Promise.race([
+          deps.resolver.resolveDownload!(versionId, subject, signal),
+          new Promise<never>((_, reject) => {
+            onAbort = () => reject(signal.reason);
+            if (signal.aborted) onAbort();
+            else signal.addEventListener("abort", onAbort, { once: true });
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+      }
+    };
     let idleTimer = setTimeout(() => abort(new GatewayError("upstream_timeout")), limits.idleTimeoutMs);
     const touch = () => {
       clearTimeout(idleTimer);
@@ -161,12 +196,25 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
       if (!deps.reader.readiness().ready) return deny("not_ready");
 
       // 5. Publication is rechecked on every request, whatever the token says.
-      const locator = await deps.resolver.resolveMovieVersion(versionId, controller.signal);
+      const locator = await resolve();
       if (controller.signal.aborted) return finish({ outcome: "client_closed", code: "client_closed" });
       if (!locator) return deny("version_unavailable");
+      const attachment = op === "download" ? downloadHeaders(locator) : {};
+      const etag = op === "download" ? `"${createHash("sha256").update(locatorIdentity(locator)).digest("hex")}"` : undefined;
+      if (op === "download") {
+        recheckTimer = setInterval(() => {
+          if (checking || controller.signal.aborted) return;
+          checking = true;
+          void resolve().then(current => {
+            if (!current || locatorIdentity(current) !== locatorIdentity(locator) || current.fileName !== locator.fileName) abort(new GatewayError("version_unavailable"));
+          }, () => abort(new GatewayError("catalogue_unavailable"))).finally(() => { checking = false; });
+        }, downloadLimits.recheckMs);
+      }
 
       // 6. Range, against the catalogue's recorded size.
-      const parsed = parseRangeHeader(request.headers.range, locator.fileSize, limits.maxResponseBytes);
+      const fullDownload = op === "download" && (request.headers.range === undefined || (request.headers["if-range"] !== undefined && request.headers["if-range"] !== etag));
+      const status = fullDownload ? 200 : 206;
+      const parsed = parseRangeHeader(fullDownload ? "bytes=0-" : request.headers.range, locator.fileSize, op === "download" ? DOWNLOAD_MAX_FILE_BYTES : limits.maxResponseBytes);
       if (!parsed.ok) {
         const extra: Record<string, string> =
           parsed.code === "range_not_satisfiable" ? { "Content-Range": unsatisfiedContentRange(locator.fileSize), "Accept-Ranges": "bytes" } : {};
@@ -183,19 +231,21 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
         locator,
         reader: deps.reader,
         semaphore,
-        readAhead: limits.readAheadPerStream,
+        readAhead: op === "download" ? downloadLimits.readAhead : limits.readAheadPerStream,
         readTimeoutMs: limits.readTimeoutMs,
         signal: controller.signal,
         onProgress: touch,
         beforeFirstWrite: () => {
           firstByteMs = now() - startedAt;
-          response.writeHead(206, {
+          response.writeHead(status, {
             ...COMMON_HEADERS,
             ...corsHeaders(request),
             "Accept-Ranges": "bytes",
-            "Content-Range": contentRange(parsed.range, locator.fileSize),
+            ...(fullDownload ? {} : { "Content-Range": contentRange(parsed.range, locator.fileSize) }),
             "Content-Length": String(parsed.range.length),
             "Content-Type": locator.mimeType && SAFE_MIME.test(locator.mimeType) ? locator.mimeType : "application/octet-stream",
+            ...attachment,
+            ...(etag ? { ETag: etag } : {}),
           });
         },
         sink: {
@@ -211,20 +261,30 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
                 reject(signal.reason);
               };
               response.once("drain", done);
-              signal.addEventListener("abort", aborted, { once: true });
+              if (signal.aborted) aborted();
+              else signal.addEventListener("abort", aborted, { once: true });
             }),
         },
       });
-      const fields = { servedBytes: result.bytesWritten, rpcCount: result.rpcCount, readsIssued: result.readsIssued, firstByteMs, status: response.headersSent ? 206 : undefined };
-      if (result.outcome === "complete") {
-        response.end();
+      const fields = { servedBytes: result.bytesWritten, rpcCount: result.rpcCount, readsIssued: result.readsIssued, firstByteMs, status: response.headersSent ? status : undefined };
+      if (result.outcome === "complete" && !controller.signal.aborted) {
+        if (op === "download") {
+          // Hold admission, expiry and idle checks until the socket accepts the final bytes.
+          await new Promise<void>((resolve, reject) => {
+            const done = () => { controller.signal.removeEventListener("abort", aborted); resolve(); };
+            const aborted = () => { response.off("finish", done); response.destroy(); reject(controller.signal.reason); };
+            response.once("finish", done);
+            controller.signal.addEventListener("abort", aborted, { once: true });
+            response.end();
+          });
+        } else response.end();
         return finish({ ...fields, outcome: "complete" });
       }
       const reason = controller.signal.reason;
       if (reason instanceof GatewayError) {
         if (!response.headersSent) return deny(reason.code);
         response.destroy();
-        return finish({ ...fields, outcome: "timeout", code: reason.code }, "warn");
+        return finish({ ...fields, outcome: reason.code === "upstream_timeout" ? "timeout" : "failed", code: reason.code }, "warn");
       }
       response.destroy();
       return finish({ ...fields, outcome: "client_closed", code: "client_closed" });
@@ -237,9 +297,11 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
       }
       // Mid-body failure: the status is already sent, so the only honest signal is a cut connection.
       response.destroy();
-      return finish({ status: 206, code, outcome: "failed" }, "error");
+      return finish({ status: response.statusCode, code, outcome: "failed" }, "error");
     } finally {
       clearTimeout(requestTimer);
+      clearTimeout(expiryTimer);
+      clearInterval(recheckTimer);
       clearTimeout(idleTimer);
       response.off("close", onClose);
       release();
@@ -252,14 +314,14 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
    * allow-listed origins, only for GET with the Range/Authorization headers, and
    * never touches the catalogue or Telegram (preflights carry no credentials).
    */
-  function handlePreflight(request: IncomingMessage, response: ServerResponse) {
+  function handlePreflight(request: IncomingMessage, response: ServerResponse, download: boolean) {
     const origin = request.headers.origin;
     const method = request.headers["access-control-request-method"];
     const requested = String(request.headers["access-control-request-headers"] ?? "")
       .split(",")
       .map((name) => name.trim().toLowerCase())
       .filter(Boolean);
-    const allowed = typeof origin === "string" && origins.has(origin) && method === "GET" && requested.every((name) => name === "range" || name === "authorization");
+    const allowed = typeof origin === "string" && origins.has(origin) && method === "GET" && requested.every((name) => name === "range" || name === "authorization" || (download && name === "if-range"));
     if (!allowed) {
       sendError(request, response, "method_not_allowed", { Allow: "GET" });
       return;
@@ -267,7 +329,7 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
     response.writeHead(204, {
       "Access-Control-Allow-Origin": origin,
       "Access-Control-Allow-Methods": "GET",
-      "Access-Control-Allow-Headers": "Range, Authorization",
+      "Access-Control-Allow-Headers": "Range, Authorization" + (download ? ", If-Range" : ""),
       "Access-Control-Max-Age": "600",
       Vary: "Origin",
       "Cache-Control": "no-store",
@@ -284,7 +346,7 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
       return;
     }
     if (request.method === "OPTIONS" && ROUTE.test(url.pathname)) {
-      handlePreflight(request, response);
+      handlePreflight(request, response, url.pathname.endsWith("/download"));
       return;
     }
     if (request.method !== "GET") {
@@ -320,7 +382,7 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
       shuttingDown = true;
     },
     get activeStreams() {
-      return admission.activeStreams;
+      return admission.activeStreams + downloads.activeStreams;
     },
   };
 }
