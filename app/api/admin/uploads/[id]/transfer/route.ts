@@ -2,6 +2,7 @@ import { z } from "zod";
 import { getAuthedClient } from "@/lib/auth";
 import { parseGatewayOrigin } from "@/lib/playback/stream-capability";
 import { uploadClient } from "@/lib/uploader/admin-runtime";
+import { r2UploadResponse } from "@/lib/uploader/r2-route";
 
 /** Control and credentials only; movie bytes go directly to the disk service. */
 export async function POST(request: Request,{ params }: { params: Promise<{ id: string }> }) {
@@ -10,10 +11,11 @@ export async function POST(request: Request,{ params }: { params: Promise<{ id: 
   const { id } = await params;
   if (!z.uuid().safeParse(id).success) return Response.json({ error: "upload_not_found" },{ status: 404,headers });
   try {
-    const origin = parseGatewayOrigin(process.env.VELORA_UPLOAD_PUBLIC_ORIGIN,process.env.NODE_ENV === "production");
-    if (!origin) return Response.json({ error: "upload_service_unconfigured" },{ status: 503,headers });
     const client = await uploadClient();
     const session = await client.get(id);
+    if(session.storage==="r2") return r2UploadResponse(request,id);
+    const origin = parseGatewayOrigin(process.env.VELORA_UPLOAD_PUBLIC_ORIGIN,process.env.NODE_ENV === "production");
+    if (!origin) return Response.json({ error: "upload_service_unconfigured" },{ status: 503,headers });
     if (request.headers.get("Upload-Command") === "verify") {
       await client.control(id,session.revision,"verify");
       return Response.json({ stage: "verifying" },{ headers });

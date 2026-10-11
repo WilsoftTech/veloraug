@@ -1,5 +1,8 @@
 # Admin direct uploads
 
+The disk foundation below is retained for existing sessions. New cloud staging,
+review, Telegram transfer, and cleanup are documented in [R2 upload pipeline](R2_UPLOAD_PIPELINE.md).
+
 The approved design adds `admin_upload` sessions beside Telegram discovery.
 Telegram remains final media storage. Private disk staging provides resumable
 browser transfer while files await verification and review. No complete movie

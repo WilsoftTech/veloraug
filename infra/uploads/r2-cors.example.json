@@ -1,0 +1,11 @@
+{
+  "CORSRules": [
+    {
+      "AllowedOrigins": ["https://REPLACE-WITH-YOUR-VELORA-DOMAIN.example"],
+      "AllowedMethods": ["PUT"],
+      "AllowedHeaders": ["content-type"],
+      "ExposeHeaders": ["ETag"],
+      "MaxAgeSeconds": 300
+    }
+  ]
+}

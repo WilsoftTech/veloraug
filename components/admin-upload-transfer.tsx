@@ -3,9 +3,10 @@ import { useEffect,useRef,useState } from "react";
 import { useRouter } from "next/navigation";
 import { Field } from "@/components/form-field";
 import { buttonClass } from "@/components/button";
+import { uploadR2FromBrowser } from "@/lib/uploader/r2-browser";
 
 const CHUNK_BYTES = 8 * 1024 * 1024;
-export function AdminUploadTransfer({ id,fileName,sizeBytes }: { id: string; fileName: string; sizeBytes: number }) {
+export function AdminUploadTransfer({ id,fileName,sizeBytes,storage="disk",parallelism=3 }: { id: string; fileName: string; sizeBytes: number;storage?: "disk"|"r2";parallelism?: number }) {
   const router = useRouter();
   const [file,setFile] = useState<File | null>(null);
   const [running,setRunning] = useState(false);
@@ -20,6 +21,10 @@ export function AdminUploadTransfer({ id,fileName,sizeBytes }: { id: string; fil
     setRunning(true); setError("");
     const abort = new AbortController(); controller.current = abort;
     try {
+      if(storage==="r2") {
+        await uploadR2FromBrowser(file,`/api/admin/uploads/${id}/transfer`,{signal:abort.signal,parallelism,progress:(bytes,rate)=>{setOffset(bytes);setSpeed(rate);}});
+        router.refresh(); return;
+      }
       const credentials = await fetch(`/api/admin/uploads/${id}/transfer`,{ method: "POST",signal: abort.signal });
       if (!credentials.ok) throw new Error("Upload service unavailable or access refused.");
       const { url,token } = await credentials.json() as { url: string; token: string };
@@ -59,9 +64,9 @@ export function AdminUploadTransfer({ id,fileName,sizeBytes }: { id: string; fil
   }
   const remaining = speed > 0 ? Math.ceil((sizeBytes-offset)/speed) : null;
   return <section aria-label="File transfer" className="mt-6 max-w-xl rounded-lg border border-border bg-surface p-4">
-    <Field id="resume-upload-file" label="Select the file to upload or resume" hint="Previously completed chunks are kept on the staging service.">{(props) => <input {...props} type="file" accept="video/*,.mkv,.m4v,.ts,.m2ts" disabled={running} onChange={(event) => setFile(event.target.files?.[0] ?? null)} />}</Field>
+    <Field id="resume-upload-file" label="Select the file to upload or resume" hint={storage==="r2" ? "Completed parts remain in private R2 staging. Reselect the original file after a refresh." : "Previously completed chunks are kept on the staging service."}>{(props) => <input {...props} type="file" accept="video/*,.mkv,.m4v,.ts,.m2ts" disabled={running} onChange={(event) => setFile(event.target.files?.[0] ?? null)} />}</Field>
     <progress className="mt-4 w-full" value={offset} max={sizeBytes} aria-label="File transfer progress" />
-    <p className="mt-2 text-body-sm text-muted" aria-live="polite">{Math.floor(offset/sizeBytes*100)}%{speed > 0 ? ` · ${(speed/1_000_000).toFixed(1)} MB/s` : ""}{remaining !== null ? ` · about ${Math.ceil(remaining/60)} min remaining` : ""}</p>
+    <p className="mt-2 text-body-sm text-muted" aria-live="polite">{Math.floor(offset/sizeBytes*100)}% · {(offset/1_000_000).toFixed(1)} / {(sizeBytes/1_000_000).toFixed(1)} MB{speed > 0 ? ` · ${(speed/1_000_000).toFixed(1)} MB/s` : ""}{remaining !== null ? ` · about ${Math.ceil(remaining/60)} min remaining` : ""}</p>
     {error && <p role="status" className="mt-3 text-body-sm">{error}</p>}
     <div className="mt-4 flex flex-wrap gap-3"><button type="button" disabled={!file || running} onClick={() => void transfer()} className={buttonClass()}>{offset ? "Resume transfer" : "Start or resume transfer"}</button>{running && <button type="button" onClick={() => controller.current?.abort()} className={buttonClass("secondary")}>Pause</button>}</div>
   </section>;

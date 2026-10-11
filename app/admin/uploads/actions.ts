@@ -10,7 +10,9 @@ import { uploadClient } from "@/lib/uploader/admin-runtime";
 export async function createUploadAction(_previous: { error: string }, data: FormData): Promise<{ error: string }> {
   let id: string;
   try {
-    const session = await (await uploadClient()).create({ fileName: String(data.get("fileName") ?? ""), sizeBytes: Number(data.get("sizeBytes")) });
+    const client=await uploadClient();
+    const input={ fileName: String(data.get("fileName") ?? ""), sizeBytes: Number(data.get("sizeBytes")) };
+    const session = process.env.VELORA_UPLOAD_STORAGE === "r2" ? await client.createR2(input,String(data.get("requestId") ?? ""),Number(process.env.VELORA_UPLOAD_RETENTION_DAYS??7)) : await client.create(input);
     id = session.id;
   } catch (error) {
     const code = error instanceof DiscoveryStoreError ? error.code : "upload_invalid_file";
@@ -54,8 +56,18 @@ export async function cancelUploadAction(data: FormData): Promise<void> {
 export async function retryUploadAction(data: FormData): Promise<void> {
   const id = z.uuid().parse(data.get("id"));
   let result="retrying";
-  try { await (await uploadClient()).control(id,Number(data.get("revision")),"retry"); }
+  try { const client=await uploadClient();const session=await client.get(id);if(session.storage==="r2")await client.review(id,Number(data.get("revision")),"retry");else await client.control(id,Number(data.get("revision")),"retry"); }
   catch { result="blocked"; }
   revalidatePath("/admin/uploads");
   redirect(`/admin/uploads/${id}?result=${result}`);
+}
+
+export async function reviewUploadAction(data:FormData):Promise<void> {
+  const id=z.uuid().parse(data.get("id"));let result="saved";
+  try {
+    const client=await uploadClient();
+    const expires=String(data.get("expiresAt")??"");
+    await client.review(id,Number(data.get("revision")),String(data.get("action")),String(data.get("reference")??"")||null,expires?new Date(expires).toISOString():null);
+  } catch {result="blocked";}
+  revalidatePath("/admin/uploads");redirect(`/admin/uploads/${id}?result=${result}`);
 }

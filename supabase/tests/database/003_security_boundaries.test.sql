@@ -16,7 +16,7 @@ select plan(30);
 select is(
   (select count(*)::int from pg_class c join pg_namespace n on n.oid = c.relnamespace
    where n.nspname in ('public', 'private') and c.relkind = 'r'),
-  30, '30 application tables in public/private (including admin upload tables and chunk manifest)');
+  32, '32 application tables in public/private (including admin upload tables and chunk manifest)');
 select is(
   (select array_agg(n.nspname || '.' || c.relname) from pg_class c
    join pg_namespace n on n.oid = c.relnamespace
@@ -118,12 +118,13 @@ select is(
   (select array_agg(n.nspname || '.' || p.proname order by n.nspname, p.proname) from pg_proc p
    join pg_namespace n on n.oid = p.pronamespace
    where n.nspname in ('public', 'private', 'catalogue_access', 'catalogue_review') and p.prosecdef),
-  array['catalogue_access.episode_is_public', 'catalogue_access.movie_is_public',
+  array['catalogue_access.admin_upload_rights_valid', 'catalogue_access.episode_is_public', 'catalogue_access.movie_is_public',
         'catalogue_access.season_is_public', 'catalogue_access.series_is_public',
         'catalogue_review.approve_channel_candidate', 'catalogue_review.inspect_channel_candidate',
         'catalogue_review.publish_channel_candidate', 'catalogue_review.reviewer_capabilities',
         'private.enforce_watchlist_limit', 'private.handle_new_user',
         'public.admin_upload_control', 'public.admin_upload_create', 'public.admin_upload_edit', 'public.admin_upload_get', 'public.admin_upload_list',
+        'public.admin_upload_r2_command', 'public.admin_upload_r2_create', 'public.admin_upload_r2_housekeeping', 'public.admin_upload_r2_review', 'public.admin_upload_r2_worker_claim', 'public.admin_upload_r2_worker_finish', 'public.admin_upload_r2_worker_ingest',
         'public.admin_upload_worker_chunk', 'public.admin_upload_worker_claim', 'public.admin_upload_worker_finish', 'public.admin_upload_worker_manifest',
         'public.catalogue_admin_add_vj', 'public.catalogue_admin_edit_movie', 'public.catalogue_admin_movies', 'public.catalogue_admin_set_movie',
         'public.discovery_acquire_consumer', 'public.discovery_catalogue_lookup', 'public.discovery_claim',

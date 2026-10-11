@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Private uploader journals and generated staging reports are runtime data.
+    ".velora-ingest/**",
   ]),
 ]);
 

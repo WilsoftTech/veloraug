@@ -1,0 +1,12 @@
+*
+!package.json
+!package-lock.json
+!lib/
+lib/**/*.test.ts
+lib/**/*.test.tsx
+lib/**/test-media.ts
+!types/
+!scripts/ingest/register.mjs
+!services/media-gateway/package.json
+!services/media-gateway/package-lock.json
+!services/media-gateway/admin-upload-r2.mts

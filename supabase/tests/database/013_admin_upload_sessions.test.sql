@@ -35,9 +35,9 @@ select is((select count(*)::int from pg_class c cross join unnest(array['anon','
   where c.oid in ('private.admin_upload_sessions'::regclass,'private.admin_upload_attempts'::regclass,'private.admin_upload_audit'::regclass)
     and has_table_privilege(r,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')),0,'no application identity has direct upload table privileges');
 select is((select count(*)::int from pg_proc p where p.proname like 'admin_upload_%' and p.pronamespace='public'::regnamespace
-  and p.prosecdef and p.proconfig @> array['search_path=""'] and has_function_privilege('authenticated',p.oid,'EXECUTE')),5,'five pinned session-bound RPCs');
+  and p.prosecdef and p.proconfig @> array['search_path=""'] and has_function_privilege('authenticated',p.oid,'EXECUTE')),8,'eight pinned session-bound RPCs');
 select is((select count(*)::int from pg_proc p cross join unnest(array['anon','service_role','velora_discovery_worker','velora_upload_worker']) r
-  where p.proname like 'admin_upload_%' and p.proname not like 'admin_upload_worker_%' and p.pronamespace='public'::regnamespace and has_function_privilege(r,p.oid,'EXECUTE')),0,'other roles cannot invoke browser commands');
+  where p.proname like 'admin_upload_%' and p.proname not like 'admin_upload_worker_%' and p.proname not like 'admin_upload_r2_worker_%' and p.proname<>'admin_upload_r2_housekeeping' and p.pronamespace='public'::regnamespace and has_function_privilege(r,p.oid,'EXECUTE')),0,'other roles cannot invoke browser commands');
 select ok((select not (rolcanlogin or rolsuper or rolbypassrls or rolcreatedb or rolcreaterole or rolreplication or rolinherit) from pg_roles where rolname='velora_upload_worker'),'worker ships disabled and unprivileged');
 select ok(not pg_has_role('velora_upload_worker','postgres','MEMBER') and not pg_has_role('velora_upload_worker','service_role','MEMBER'),'worker has no elevated memberships');
 select is(tests.upload_call(8103,$$select public.admin_upload_create('Movie.mp4',100)::text$$),'upload_not_authorized','user metadata cannot grant admin');

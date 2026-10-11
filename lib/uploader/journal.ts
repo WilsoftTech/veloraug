@@ -114,7 +114,7 @@ const fingerprint = z.string().refine(isFingerprint);
 const nullableNumber = z.number().nullable();
 const streamDigest = z.object({ packets: z.number().int().nonnegative(), bytes: z.number().int().nonnegative(), sha256: z.string().regex(/^[0-9a-f]{64}$/) });
 const packetDigest = z.object({ video: streamDigest, audio: streamDigest });
-const mediaSchema = z.object({
+export const mediaSchema = z.object({
   role: z.enum(["source", "rendition"]),
   inspectedAt: z.string(),
   tools: z.object({ ffprobe: z.string().nullable(), ffmpeg: z.string().nullable() }),

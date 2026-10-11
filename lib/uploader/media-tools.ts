@@ -199,6 +199,13 @@ export async function digestPackets(ffmpeg: MediaTool, path: string, selection: 
   return result.code === 0 ? digest.result() : null;
 }
 
+/** Decode the entire primary video/audio, without producing a rendition. */
+export async function validatePlayback(ffmpeg: MediaTool,path: string,run: Runner=runProcess): Promise<void> {
+  const result=await run(ffmpeg.path,["-hide_banner","-v","error","-nostdin","-protocol_whitelist","file,pipe","-err_detect","explode","-xerror","-threads","2","-i",path,"-map","0:v:0","-map","0:a:0","-f","null","-"],{timeoutMs:60*60*1000,maxStdoutBytes:64*1024});
+  if(result.timedOut)throw new Error("upload_decode_timeout");
+  if(result.code!==0 || result.stderrTail.trim())throw new Error("upload_media_corrupt");
+}
+
 /**
  * The Class 2 repackage: stream copy into a new file. The output must not
  * exist: FFmpeg's `-n` refuses to overwrite but still exits 0 (FFmpeg 9.0.2),

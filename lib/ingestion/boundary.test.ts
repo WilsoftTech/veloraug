@@ -43,10 +43,13 @@ describe("ingestion boundary (C1)", () => {
     const importers = ["app", "components"].flatMap(filesUnder).concat(["lib/catalogue.ts", "lib/browse.ts", "lib/utils.ts"])
       .filter((file) => specifiers(readFileSync(join(ROOT, file), "utf8")).some((specifier) => /ingestion|lib\/telegram|lib\/uploader/.test(specifier)));
     // Explicit guarded server entry points for the additive admin pipeline.
-    // Client components and every public route remain outside this allowlist.
+    // Only the pure browser transfer module may cross the client boundary.
     expect(importers.map((file) => file.replaceAll("\\", "/")).sort()).toEqual([
       "app/admin/uploads/[id]/page.tsx", "app/admin/uploads/actions.ts", "app/admin/uploads/new/page.tsx",
       "app/admin/uploads/page.tsx", "app/api/admin/uploads/[id]/transfer/route.ts",
+        "components/admin-upload-transfer.tsx",
     ]);
+    expect(specifiers(readFileSync(join(ROOT,"lib/uploader/r2-browser.ts"),"utf8"))).toEqual([]);
+    expect(readFileSync(join(ROOT,"lib/uploader/r2-browser.ts"),"utf8")).not.toMatch(/process\.env|@aws-sdk|server-only|node:/);
   });
 });

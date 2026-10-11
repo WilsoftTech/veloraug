@@ -3,13 +3,14 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { assembleDiskUpload,diskManifestSchema,verifiedUploadPath } from "@/lib/uploader/disk-transfer";
 import { fingerprintFile,hashFile } from "@/lib/uploader/scan";
-import { probeMedia,resolveMediaTools } from "@/lib/uploader/media-tools";
+import { probeMedia,resolveMediaTools,validatePlayback } from "@/lib/uploader/media-tools";
 import { classifyMedia } from "@/lib/ingestion/media";
 import { parseFilename } from "@/lib/ingestion/parser";
 import { decideMatch } from "@/lib/ingestion/match";
 import { resolveVj } from "@/lib/ingestion/vj";
 import { fetchMovieSnapshot,searchTmdbForIngestion } from "@/lib/tmdb/ingestion-search";
 import { errorCode } from "@/lib/discovery/service";
+import { evaluationPayload } from "@/lib/uploader/store";
 
 export const uploadInspectionClaimSchema = z.strictObject({ manifest: diskManifestSchema,token: z.uuid(),operation: z.enum(["verify","inspect"]),verified_file_key: z.uuid().nullable(),
   vjs: z.array(z.strictObject({ id: z.number().int().positive(),slug: z.string(),name: z.string(),active: z.boolean() })).max(1000).default([]),
@@ -39,16 +40,19 @@ export async function inspectAdminUpload(root: string,ports: UploadInspectionPor
       const probe = await probeMedia(tools.tools.ffprobe,path);
       if (!probe.ok) throw new Error(probe.code);
       const classification = classifyMedia(probe.inspection);
+      if(session.storage==="r2" && classification.class==="canonical") await validatePlayback(tools.tools.ffmpeg,path);
       const parsed = parseFilename(session.file_name);
       const vj = resolveVj(parsed.vjText,claim.vjs.map(({ active,...record }) => ({ ...record,isActive: active })));
       const query = { kind: session.metadata.kind,title: session.metadata.title || parsed.title || "",year: session.metadata.year ?? parsed.year };
       let choices: Awaited<ReturnType<typeof searchTmdbForIngestion>>;
       try { choices = query.title && query.kind==="movie" ? await searchTmdbForIngestion(query) : []; }
       catch { throw new Error("inspection_provider_failed"); }
+      choices=choices.slice(0,20);
       const decision = decideMatch(query,choices);
       const snapshots = (await Promise.all(choices.slice(0,20).filter((choice) => choice.mediaType==="movie").map((choice) => fetchMovieSnapshot(choice.tmdbId)))).filter((snapshot) => snapshot!==null);
       const stage = await ports.finish(session.id,claim.token,{ outcome: "inspected",inspection: {
-        choices: snapshots,parsed,classification,media: probe.inspection,vj,
+        choices: snapshots,parsed,query,classification,media: probe.inspection,vj,decoded:session.storage==="r2" && classification.class==="canonical",
+        evaluation: evaluationPayload({ kind: {status: "confirmed",kind: query.kind},title: query.title,year: query.year,vjText: parsed.vjText,vj,season: session.metadata.season ?? parsed.season,episode: session.metadata.episode ?? parsed.episode,match: decision }),
         proposed_vj_id: vj.status==="resolved" ? vj.vjId : null,
         proposed_tmdb_id: decision.outcome==="matched" && decision.confidence==="high" ? decision.best.candidate.tmdbId : null,
         tools: { ffprobe: tools.tools.ffprobe.version,ffmpeg: tools.tools.ffmpeg.version },

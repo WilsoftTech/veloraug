@@ -31,11 +31,13 @@ export const emptyUploadMetadata: UploadMetadata = { kind: "movie", title: "", y
 
 export const uploadSessionSchema = z.object({
   id: z.uuid(), source: z.literal("admin_upload"), owner_id: z.uuid(),
+  storage: z.enum(["disk","r2"]).optional(),
   file_name: z.string(), size_bytes: z.number().int().positive().max(ADMIN_UPLOAD_MAX_BYTES),
   stage: z.enum(adminUploadStages), revision: z.number().int().positive(),
   metadata: uploadMetadataSchema, verified_sha256: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
   bytes_received: z.number().int().nonnegative(), error_code: z.string().nullable(),
   retryable: z.boolean(), created_at: z.string(), updated_at: z.string(), expires_at: z.string(),
+  pipeline:z.object({media_verified:z.boolean(),telegram_status:z.string(),rights_cleared:z.boolean(),rights_rejected:z.boolean(),rights_expires_at:z.string().nullable(),rights_reference:z.string().nullable(),approved:z.boolean(),cleanup_state:z.string().nullable(),cleanup_error:z.string().nullable(),publication_slug:z.string().nullable(),stored:z.boolean(),audit:z.array(z.object({action:z.string(),at:z.string(),revision:z.number().int()})).max(100)}).optional(),
   inspection: z.object({ choices: z.array(movieSnapshotSchema).max(20),proposed_tmdb_id: z.number().int().positive().nullable(),proposed_vj_id: z.number().int().positive().nullable().optional(),
     classification: z.object({ class: z.string(),reasons: z.array(z.string()),policyVersion: z.number().int() }),
   }).nullable().optional(),
@@ -93,6 +95,16 @@ export function createUploadClient(rpc: DiscoveryRpc) {
     async create(input: z.infer<typeof uploadFileSchema>) {
       const file = uploadFileSchema.parse(input);
       return uploadSessionSchema.parse(await call("admin_upload_create", { p_file_name: file.fileName, p_size_bytes: file.sizeBytes }));
+    },
+    async createR2(input: z.infer<typeof uploadFileSchema>,requestId: string,retentionDays=7) {
+      const file=uploadFileSchema.parse(input);
+      return uploadSessionSchema.parse(await call("admin_upload_r2_create",{ p_file_name: file.fileName,p_size_bytes: file.sizeBytes,p_request_id: z.uuid().parse(requestId),p_retention_days:z.number().int().min(1).max(30).parse(retentionDays) }));
+    },
+    async r2(id: string,command: string,input: Record<string,unknown> = {}) {
+      return call("admin_upload_r2_command",{ p_id: z.uuid().parse(id),p_command: command,p_input: input });
+    },
+    async review(id:string,revision:number,action:string,reference:string|null=null,expiresAt:string|null=null) {
+      return uploadSessionSchema.parse(await call("admin_upload_r2_review",{p_id:z.uuid().parse(id),p_revision:z.number().int().positive().parse(revision),p_action:z.enum(["submit","reinspect","clear_rights","reject_rights","revoke_rights","approve","retry"]).parse(action),p_reference:reference,p_expires_at:expiresAt}));
     },
     async list() { return z.array(uploadSessionSchema).max(200).parse(await call("admin_upload_list", { p_limit: 200 })); },
     async get(id: string) { return uploadSessionSchema.parse(await call("admin_upload_get", { p_id: z.uuid().parse(id) })); },

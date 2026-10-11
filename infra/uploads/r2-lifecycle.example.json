@@ -1,0 +1,10 @@
+{
+  "Rules": [
+    {
+      "ID": "protect-unresolved-staging-multipart",
+      "Status": "Disabled",
+      "Filter": {"Prefix": "admin-uploads/"},
+      "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 32}
+    }
+  ]
+}

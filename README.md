@@ -102,3 +102,5 @@ password is entered by the account owner, never in chat, operator scripts or Git
 Release gate from a fresh clone: `npm ci` → `npm run lint` → `npm run typecheck` → `npm run build` → `npm test` → `npm run test:db` → `npm run test:catalogue`.
 
 Attribution: this product uses TMDB and the TMDB APIs but is not endorsed or certified by TMDB. The footer carries TMDB's required notice and logo; keep both wherever TMDB metadata or artwork is shown.
+
+Admin direct uploads: [R2 staging, cloud Telegram worker, deployment and recovery](docs/R2_UPLOAD_PIPELINE.md). The pipeline ships disabled; production activation requires separate approval.

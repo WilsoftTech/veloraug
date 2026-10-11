@@ -12,9 +12,11 @@ interface Props {
 export function AdminUploadForm({ maxBytes, extensions, action }: Props) {
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState("");
+  const [requestId,setRequestId] = useState("");
   const [state, submit, pending] = useActionState(action, { error: "" });
   function select(picked: File | undefined) {
     if (!picked) return;
+    setRequestId(crypto.randomUUID());
     if (!picked.size || picked.size > maxBytes) { setFile(null); setError("Choose a nonempty video no larger than 2 GB."); return; }
     if (!extensions.includes(picked.name.split(".").pop()?.toLowerCase() ?? "") || /[\\/\x00-\x1f\x7f]/.test(picked.name)) { setFile(null); setError("Choose a supported video container with a plain filename."); return; }
     setFile(picked); setError("");
@@ -29,6 +31,7 @@ export function AdminUploadForm({ maxBytes, extensions, action }: Props) {
       </div>
       {/* The file input has no name: only file facts reach the Server Action. */}
       <input type="hidden" name="fileName" value={file?.name ?? ""} />
+      <input type="hidden" name="requestId" value={requestId} />
       <input type="hidden" name="sizeBytes" value={file?.size ?? 0} />
       {state.error && <p role="alert" className="text-body-sm text-destructive">{state.error}</p>}
       <button className={buttonClass()} disabled={!file || pending}>{pending ? "Creating draft…" : "Create upload draft"}</button>

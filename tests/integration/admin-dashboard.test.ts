@@ -2,6 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createReviewClient, type DiscoveryRpc } from "@/lib/discovery/database";
 import { getMovie, isMovieVersionPlayable, listMovies, listVjs } from "@/lib/catalogue";
+import { createUploadClient } from "@/lib/uploader/admin-upload";
 import { ISOLATED_REST, isolatedJwt, isolatedSql } from "./isolated-env";
 
 /**
@@ -80,5 +81,48 @@ describe.skipIf(process.env.VELORA_E38_ISOLATED_TESTS !== "true" || process.env.
     await expect(reviewer(PUBLISH).addVj("VJ Dashboard")).rejects.toMatchObject({ code: "catalogue_vj_exists" });
     expect((await listVjs()).map((vj) => vj.slug)).toContain("vj-dashboard");
     expect(isolatedSql("select string_agg(action, ',' order by id) from private.catalogue_admin_audit")).toBe("movie_withdraw,movie_restore,movie_edited,movie_edited,vj_added");
+  });
+});
+
+describe.skipIf(process.env.VELORA_E38_ISOLATED_TESTS !== "true" || process.env.NEXT_PUBLIC_SUPABASE_URL !== ISOLATED_REST)("R2 upload Data API (isolated)", () => {
+  const owner = "00000000-0000-4000-8000-00000000e3b1";
+  const other = "00000000-0000-4000-8000-00000000e3b2";
+  const request = "00000000-0000-4000-8000-00000000e3b3";
+  const token = "00000000-0000-4000-8000-00000000e3b4";
+  const client = (sub: string) => createUploadClient(rpcAs({role:"authenticated",sub,aud:"authenticated",is_anonymous:false}));
+  let id: string;
+  beforeAll(() => {
+    isolatedSql(`insert into auth.users(id,raw_app_meta_data,is_anonymous) values ('${owner}','{"role":"admin"}',false),('${other}','{"role":"admin"}',false);
+      insert into private.catalogue_reviewers(user_id,can_review) values ('${owner}',true),('${other}',true);`);
+  });
+  afterAll(() => { isolatedSql(`delete from private.catalogue_reviewers where user_id in ('${owner}','${other}')`); });
+  it("creates a typed private session idempotently through PostgREST", async () => {
+    const file={fileName:"fixture.mp4",sizeBytes:3};
+    const session=await client(owner).createR2(file,request,7);
+    id=session.id;
+    expect(session).toMatchObject({storage:"r2",stage:"draft",owner_id:owner,verified_sha256:null});
+    expect((await client(owner).createR2(file,request,7)).id).toBe(id);
+    await expect(client(owner).createR2({...file,fileName:"changed.mp4"},request,7)).rejects.toMatchObject({code:"upload_request_conflict"});
+  });
+  it("recovers durable multipart progress without granting verification or rights", async () => {
+    await client(owner).r2(id,"begin",{token});
+    await client(owner).r2(id,"attach",{token,upload_id:"synthetic-multipart"});
+    await client(owner).r2(id,"reserve_part",{number:1,sha256:"a".repeat(64)});
+    await client(owner).r2(id,"observe",{parts:[{number:1,size:3,etag:"opaque"}]});
+    const session=await client(owner).get(id);
+    expect(session).toMatchObject({storage:"r2",bytes_received:3,verified_sha256:null,pipeline:{media_verified:false,rights_cleared:false,approved:false,stored:false}});
+    await client(owner).r2(id,"complete_requested");
+    await client(owner).r2(id,"completed",{etag:"opaque-final"});
+    expect((await client(owner).get(id)).stage).toBe("verifying");
+  });
+  it("refuses cross-owner and anonymous operations", async () => {
+    await expect(client(other).get(id)).rejects.toMatchObject({code:"upload_not_found"});
+    await expect(client(other).r2(id,"state")).rejects.toMatchObject({code:"upload_not_found"});
+    await expect(createUploadClient(rpcAs({role:"anon"})).get(id)).rejects.toThrow();
+  });
+  it("keeps worker completion inaccessible to browser sessions", async () => {
+    const reply=await rpcAs({role:"authenticated",sub:owner,aud:"authenticated",is_anonymous:false})("admin_upload_r2_worker_finish",{p_id:id,p_token:token,p_operation:"verify",p_result:{}});
+    expect(reply.error).toBeTruthy();
+    expect((await client(owner).get(id)).verified_sha256).toBeNull();
   });
 });
