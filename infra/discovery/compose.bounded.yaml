@@ -14,8 +14,13 @@
 # file, then rename); Docker never creates it, so a missing directory fails this
 # override instead of starting with an empty one. The reader is not the Movies
 # bot: the worker refuses a session that belongs to it.
+#
+# The image is the one validated for bounded mode (media-only reinspection that
+# keeps a confirmed film and VJ, and retryable reader outages). The base file
+# alone returns the listener to metadata mode on its own image.
 services:
   discovery:
+    image: velora-discovery:media-recovery
     environment:
       VELORA_DISCOVERY_INSPECTION: bounded
       VELORA_DISCOVERY_SESSION_FILE: /var/lib/velora-discovery/reader.session

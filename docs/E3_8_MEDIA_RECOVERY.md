@@ -371,3 +371,58 @@ Each needs authorization; none was done.
    mode on `gate-b`.
 4. Press **Run media check** on one MP4 candidate (event 8, message 46), then
    read back its evidence, confirmation and audit entries.
+
+## Bounded listener and first live inspection (2026-10-11)
+
+Operator-authorized. **The listener runs in bounded mode. One live inspection
+ran, on message 50 ("In Cold Light"), not on the intended canary, message 46
+("Brave: Gunjyou Senki"), which is untouched.** Further inspection stopped there.
+
+**Listener switch.** The four reader settings were added to the listener's
+private environment file (backed up first; no token, since the listener never
+logs in). The metadata listener stopped cleanly: exit 0, consumer lease released,
+checkpoint unchanged. It was recreated from `velora-discovery:media-recovery`
+(image `1218b772c5c0`) with the bounded override, which now pins that image.
+
+| Check | Result |
+| --- | --- |
+| Reader session | Reconnected on first use; `ready` (expected reader bot, not an ingestion bot, channel visible) |
+| Health | `healthz` and `readyz` 200, state `running`, 0 restarts, 0 failures |
+| Update consumer | One listener container; it holds the single consumer lease; no conflict event; checkpoint unchanged |
+| At startup | Nothing claimed: all 7 in review, 0 evidence rows |
+
+**What was inspected.** At 14:36:17Z a reviewer session requested the media
+check for message 50. The same candidate had been requested once earlier, at
+14:32:59Z under the metadata listener, which recorded `no_evidence` and kept the
+confirmation. Message 46 was never requested.
+
+| Message 50, "In Cold Light" | Before | After |
+| --- | --- | --- |
+| Status | `needs_review` | `needs_review` |
+| Revision | 6 | 7 |
+| Film, year, VJ, match candidates | confirmed, TMDB 1128377, 2026, VJ Ice P, 3 candidates | identical |
+| Evidence | none | 1 row: `unverified`, reason `mp4_not_fast_start`, container `mp4`, scope `bounded`, policy 2, not playback-ready |
+| Bytes read from Telegram | 0 | **64** of 1,549,155,053 (box headers only) |
+| Audit | | `reinspection_requested: media_only`, then `media_inspected: unverified:unverified`, both at revision 7 |
+| Gates | media, rights | media, rights |
+
+The other six candidates are byte-for-byte unchanged, including message 46.
+Counts are unchanged except one evidence row: 7 candidates, 11 media rows,
+2 movies, 2 versions, 0 rights clearances, 17 migrations.
+
+**Root cause of the failed check.** The file is an MP4 whose index (`moov`) sits
+after the media data. A browser cannot start playing it progressively, so the
+existing policy refuses it. It is a property of the file: not a reader, session
+or listener fault, and a retry will not change it. It needs a fast-start
+version, which is a stream-copy remux and a new upload, each needing
+authorization.
+
+**What this proves and does not.** Proven live: the reader session, a real
+bounded MTProto read, evidence bound to the document, the exact reason recorded,
+and a confirmed film and VJ surviving two reinspections. Not proven: a passing
+verification, and the full read of an index plus sample that a fast-start file
+needs (up to about 16 MiB).
+
+**State left running.** Bounded mode. Every press of **Run media check** is now
+a real Telegram read, and a new post to the channel is media-checked by itself.
+The base compose file returns the listener to metadata mode.
