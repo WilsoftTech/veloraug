@@ -1,5 +1,41 @@
 # R2 temporary staging and Telegram final storage
 
+## Configuration-only activation checkpoint — 2026-10-11
+
+The local configuration selects R2 with three parallel parts and seven-day browser
+session retention. The approved development origin is `http://localhost:3000`;
+`NEXT_PUBLIC_SITE_URL` and `VELORA_UPLOAD_WEB_ORIGIN` both match it.
+`VELORA_DISCOVERY_MODE=database` was already configured and is preserved.
+`VELORA_ADMIN_UPLOADS_ENABLED`, `VELORA_R2_WORKER_ENABLED`, and
+`REAL_TELEGRAM_UPLOADS_AUTHORIZED` are explicitly `false`. Existing secrets are
+unchanged, and `.env.local` remains ignored by Git.
+
+The checkpoint's read-only bucket audit confirmed authenticated access, no CORS
+policy, one overlapping seven-day multipart-abort lifecycle rule, and no completed
+object expiration. Before any bucket changes, the existing configuration was saved
+privately under the ignored `.velora-ingest/` directory for rollback.
+
+Applied and verified configuration:
+
+- `infra/uploads/r2-cors.local.json`: exact local origin, PUT, content-type, exposed
+  ETag, five-minute preflight cache. No wildcard or public-access change.
+- `infra/uploads/r2-lifecycle.checkpoint.json`: preserve the current rules and
+  disable only the overlapping multipart-abort rule.
+
+Both bucket settings were applied after the local origin was confirmed. Fresh
+S3 readback matched the configuration files. An OPTIONS-only preflight from
+`http://localhost:3000` passed for PUT/content-type; `http://localhost:3001` was
+denied. Verification sent no movie bytes or multipart initialization requests.
+Private before/after snapshots are retained in the ignored `.velora-ingest/`
+directory. Bucket public-access settings were not changed.
+
+No production origin has been supplied. Cloud worker credentials and paths are
+not configured, hosted migration status is unverified, and bucket public access
+settings still need an operator check. No migration, deployment, upload, Telegram
+send, publication, object deletion, or paid provisioning occurred. Runtime
+activation remains a separate approval checkpoint. This checkpoint and its
+configuration artifacts are not automatically committed.
+
 This implementation is additive to the committed disk upload foundation and
 Telegram discovery listener. Production activation, hosted migrations, bucket
 changes, bot migration, and paid provisioning require separate approval. The
@@ -272,7 +308,8 @@ worker restart/fencing, uncertain Telegram outcomes, missing/lost DB receipts,
 cleanup retry/idempotency, orphan authorization, mandatory rights and publication,
 and post-publication revocation. Existing discovery/publication tests remain intact.
 
-Verification completed on 2026-10-11:
+Implementation verification completed on 2026-10-11 before the configuration-only
+checkpoint above; its bucket observations record the pre-checkpoint state:
 
 | Check | Actual result |
 | --- | --- |
@@ -302,10 +339,12 @@ Production dependencies have no reported vulnerabilities. Existing filesystem
 tracing warnings and the parent-directory bun lockfile warning remain in the
 successful build output.
 
-No hosted migrations, CORS/lifecycle changes, cloud deployment, bot migration,
-or real Telegram sends were performed. Apply the exact-origin CORS example only
-after confirming the approved website origin and authorization to modify the
-bucket. The worker and upload feature remain disabled by default.
+The implementation verification performed no hosted migrations, CORS/lifecycle
+changes, cloud deployment, bot migration, or real Telegram sends. The subsequent
+configuration-only checkpoint above applied the approved local-origin CORS and
+lifecycle settings. Any production-origin additions, hosted migrations, deployment,
+bot migration or real sends still require approval. The worker and upload feature
+remain disabled.
 
 Maximum-size browser upload, visual checks on a live authenticated mobile/desktop
 session, real channel transfer, cloud restart recovery and operational monitoring
