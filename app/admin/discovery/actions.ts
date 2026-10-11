@@ -11,6 +11,7 @@ import { inspectNext } from "@/lib/discovery/pipeline";
 import { DiscoveryStoreError } from "@/lib/discovery/database";
 import { inspectionExhausted } from "@/lib/discovery/guidance";
 import type { Reviewer } from "@/lib/discovery/model";
+import { publishedMoviePaths } from "@/lib/utils";
 
 const commands = ["correct", "rights", "approve", "publish", "reject", "retry", "prepare", "refresh"] as const;
 type Command = (typeof commands)[number];
@@ -106,7 +107,7 @@ async function databaseAction(_actor: Reviewer, id: string, revision: number, ki
 }
 
 function refreshPublicPages(movieSlug: string, vjSlug: string | null) {
-  for (const path of ["/", "/movies", "/vjs", "/search", `/movies/${movieSlug}`, ...(vjSlug ? [`/vjs/${vjSlug}`] : [])]) revalidatePath(path);
+  for (const path of publishedMoviePaths(movieSlug, vjSlug)) revalidatePath(path);
 }
 
 /**

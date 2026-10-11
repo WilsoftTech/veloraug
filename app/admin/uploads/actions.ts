@@ -6,6 +6,8 @@ import { revalidatePath } from "next/cache";
 import { DiscoveryStoreError } from "@/lib/discovery/database";
 import { emptyUploadMetadata } from "@/lib/uploader/admin-upload";
 import { uploadClient } from "@/lib/uploader/admin-runtime";
+import { listVjs } from "@/lib/catalogue";
+import { publishedMoviePaths } from "@/lib/utils";
 
 export async function createUploadAction(_previous: { error: string }, data: FormData): Promise<{ error: string }> {
   let id: string;
@@ -70,4 +72,26 @@ export async function reviewUploadAction(data:FormData):Promise<void> {
     await client.review(id,Number(data.get("revision")),String(data.get("action")),String(data.get("reference")??"")||null,expires?new Date(expires).toISOString():null);
   } catch {result="blocked";}
   revalidatePath("/admin/uploads");redirect(`/admin/uploads/${id}?result=${result}`);
+}
+
+/**
+ * Refreshes the cached public pages that list or show the movie this session
+ * published (they otherwise refresh within five minutes). The slug is read back
+ * from the catalogue through the owner's own session, and the VJ from the public
+ * read: an unpublished, unapproved or foreign session refreshes nothing.
+ */
+export async function refreshUploadPagesAction(data: FormData): Promise<void> {
+  const id = z.uuid().parse(data.get("id"));
+  let result = "blocked";
+  try {
+    const session = await (await uploadClient()).get(id);
+    const slug = session.stage === "published" && session.pipeline?.approved ? session.pipeline.publication_slug : null;
+    if (slug) {
+      const vj = (await listVjs()).find((item) => item.id === session.metadata.vjId);
+      for (const path of publishedMoviePaths(slug, vj?.slug ?? null)) revalidatePath(path);
+      result = "refreshed";
+    }
+  } catch { result = "blocked"; }
+  revalidatePath("/admin/uploads");
+  redirect(`/admin/uploads/${id}?result=${result}`);
 }

@@ -5,6 +5,7 @@ import {
   parseSearchScope,
   parseSlug,
   rankByTitleMatch,
+  publishedMoviePaths,
   searchHref,
   titleHref,
   titleWatchlistItem,
@@ -48,6 +49,8 @@ describe("search scope URLs", () => {
     expect(searchHref("pearl", "tv")).toBe("/search?q=pearl&type=series");
     expect(searchHref("pearl", "movie")).toBe("/search?q=pearl&type=movie");
     expect(searchHref("pearl")).toBe("/search?q=pearl");
+    expect(publishedMoviePaths("on-the-hunt-2026", "vj-ice-p")).toEqual(["/", "/movies", "/vjs", "/search", "/movies/on-the-hunt-2026", "/vjs/vj-ice-p"]);
+    expect(publishedMoviePaths("on-the-hunt-2026", null)).toEqual(["/", "/movies", "/vjs", "/search", "/movies/on-the-hunt-2026"]);
     expect(parseSearchScope("series")).toBe("tv");
     expect(parseSearchScope("tv")).toBe("tv");
     expect(parseSearchScope("people")).toBe("all");

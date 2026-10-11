@@ -135,17 +135,60 @@ its own validated storage reference and catalogue rendering support. Series
 publication likewise needs an explicit tested extension to the existing
 movie-only publication boundary. Neither invariant is silently bypassed.
 
-## Pending checkpoints
+## Checkpoint status (2026-10-11)
 
-2. Complete rich metadata, artwork and review presentation on the draft UI.
-3. Complete cleanup, remux and browser transfer acceptance on the implemented
-   disk transport and inspection foundation.
-4. Existing Local Bot API adapter, journal/attempt recovery and Telegram receipts.
-5. Approval and rights rechecks through existing publication functions; verify
-   persisted catalogue records and refresh caches.
-6. Disposable database/integration tests and browser/mobile acceptance.
-7. Operational runbook and approved rollout. No commit, deployment, live
-   transfer or production migration is implied by implementation approval.
+The original plan's eight checkpoints, against what the repository holds after
+the R2 pipeline commit (`393a9ed`) and the follow-up below. "Local" means
+implemented and tested with injected adapters and disposable databases only.
+
+| # | Deliverable | Status |
+| --- | --- | --- |
+| 0 | Audit, convergence design, storage choice, episode scope | Approved. Storage is R2 staging with Telegram as final storage. Episodes stay draft-only |
+| 1 | Sessions and state model, privileges, ownership, leases, revision-bound decisions | Done, local. Migrations `20261011083200` to `20261011095632`; pgTAP 013 to 016 |
+| 2 | List, new and detail UI, metadata editing, draft persistence | Done, local. Custom artwork is not built (see below) |
+| 3 | Resumable transfer, checksum, probing, normalization, artwork | Transfer is R2 multipart, replacing the planned TUS; checksum and probing done, local. Normalization and artwork are not built (see below) |
+| 4 | Existing Telegram adapter, ambiguity, duplicates, restart, receipts | Done, local, with injected Telegram. No real send |
+| 5 | Existing publication, revocation, retry, persistent readback, cache refresh | Done, local. Cache refresh added in the follow-up below |
+| 6 | Both ingestion paths, catalogue and playback regressions, mobile and desktop acceptance | Automated regressions pass. Layout checked from rendered markup at 360 to 1440 px. A signed-in browser session and a real transfer are not tested |
+| 7 | Runbooks, capacity, cleanup and recovery procedures, rollout evidence | Runbook and cost model in the R2 document. The configuration-only checkpoint ran (local-origin CORS and lifecycle). **Stopped here for approval** |
+
+### Follow-up, 2026-10-11
+
+- **Cache refresh (checkpoint 5).** A movie published from an upload session
+  reached the public pages only on their five-minute timer. The detail page of a
+  published session now offers **Refresh public pages**, the same step the
+  discovery review has. It reads the slug back from the catalogue through the
+  owner's own session, so an unpublished, unapproved or foreign session refreshes
+  nothing. Both paths share one path list (`publishedMoviePaths`, `lib/utils.ts`).
+- **Detail page tests.** `components/admin-upload-page.test.tsx` renders the real
+  page for the published, approval, review and transfer states. It had no test.
+- **Layout.** Those four states were rendered at 360, 390, 768 and 1440 px with
+  the built stylesheet: no horizontal overflow, controls at least 44 px, every
+  input labelled.
+
+### Not built, and why each needs a decision
+
+- **Custom artwork.** The image loader treats poster and backdrop fields as TMDB
+  paths, and the R2 bucket is private staging. Artwork needs a public storage
+  location, a catalogue column and rendering support. Where published artwork
+  lives is a product decision.
+- **Normalization on this path.** The cloud worker accepts only canonical media
+  (fast-start MP4, H.264, AAC or MP3) and refuses the rest with its reason. The
+  stream-copy remux exists for the local uploader (`ingest normalize`); running
+  it on the cloud worker is a capacity and cost decision.
+- **Episodes.** The materializer publishes exact movie matches only. Series need
+  a reviewed publication and playback extension first.
+- **VJ entry.** The detail page takes a numeric VJ ID. A picker of active VJs
+  would be a small improvement and is not built.
+
+### Gates before activation, each a separate approval
+
+Hosted migrations (the six admin-upload migrations are undeployed; hosted has
+16), a production web origin in the bucket CORS, the cloud worker host and its
+restricted credentials, the upload worker login, the Local Bot API on that host,
+`VELORA_ADMIN_UPLOADS_ENABLED`, `VELORA_R2_WORKER_ENABLED` and finally
+`REAL_TELEGRAM_UPLOADS_AUTHORIZED`. All three flags are `false`. No commit,
+deployment, live transfer or production migration is implied by this status.
 
 Series metadata can be drafted, but publication stays explicitly blocked until
 an episode publication/playback extension is reviewed and tested. Existing

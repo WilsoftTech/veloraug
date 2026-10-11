@@ -11,6 +11,11 @@ export function titleHref(kind: CatalogueKind, slug: string) {
   return `/${kind === "movie" ? "movies" : "series"}/${slug}`;
 }
 
+/** The cached public pages that list or show one published movie (they otherwise refresh within five minutes). */
+export function publishedMoviePaths(movieSlug: string, vjSlug: string | null) {
+  return ["/", "/movies", "/vjs", "/search", titleHref("movie", movieSlug), ...(vjSlug ? [`/vjs/${vjSlug}`] : [])];
+}
+
 export function mediaTypeLabel(mediaType: MediaType) {
   return mediaType === "movie" ? "Movie" : "Series";
 }

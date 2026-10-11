@@ -5,7 +5,7 @@ import { Field } from "@/components/form-field";
 import { buttonClass } from "@/components/button";
 import { AdminUploadTransfer } from "@/components/admin-upload-transfer";
 import { canEditUpload } from "@/lib/uploader/admin-upload";
-import { cancelUploadAction, retryUploadAction, saveUploadAction,reviewUploadAction } from "../actions";
+import { cancelUploadAction, refreshUploadPagesAction, retryUploadAction, saveUploadAction,reviewUploadAction } from "../actions";
 import { uploadClient } from "@/lib/uploader/admin-runtime";
 
 export default async function UploadPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ result?: string }> }) {
@@ -27,7 +27,7 @@ export default async function UploadPage({ params, searchParams }: { params: Pro
     <h1 id="upload-title" className="mt-4 break-all text-headline-lg">{session.metadata.title || session.file_name}</h1>
     <p className="mt-2 text-body-md text-muted">{session.stage.replaceAll("_"," ")} · {(session.size_bytes / 1_000_000).toFixed(1)} MB</p>
     {session.storage==="r2" && <dl className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">{statuses.map(([label,status])=><div key={label} className="rounded-lg border border-border p-3"><dt className="text-label-md">{label}</dt><dd className="mt-1 text-body-sm text-muted">{status}</dd></div>)}</dl>}
-    {result && <p role="status" className="mt-4 text-body-sm">{result === "blocked" ? "The change was blocked. Refresh and check your permissions and current status." : result === "cancelled" ? "Upload cancelled. Staging cleanup is pending." : result==="retrying" ? "Processing retry queued." : "Draft saved."}</p>}
+    {result && <p role="status" className="mt-4 text-body-sm">{result === "blocked" ? "The change was blocked. Refresh and check your permissions and current status." : result === "cancelled" ? "Upload cancelled. Staging cleanup is pending." : result==="retrying" ? "Processing retry queued." : result==="refreshed" ? "Public catalogue pages were refreshed." : "Draft saved."}</p>}
     {session.error_code && <p role="alert" className="mt-4 text-body-sm text-destructive">{session.error_code.replaceAll("_"," ")}</p>}
     {["draft","uploading"].includes(session.stage) && <AdminUploadTransfer id={id} fileName={session.file_name} sizeBytes={session.size_bytes} storage={session.storage} parallelism={Number(process.env.VELORA_UPLOAD_PARALLEL_PARTS ?? 3)} />}
     {session.inspection && <p className="mt-4 text-body-sm text-muted">Media inspection: {session.inspection.classification.class.replaceAll("_"," ")}{session.inspection.classification.reasons.length ? ` (${session.inspection.classification.reasons.join(", ")})` : ""}</p>}
@@ -57,6 +57,7 @@ export default async function UploadPage({ params, searchParams }: { params: Pro
         </>}
       </form>}
       {flow && <p className="text-body-sm text-muted">Temporary storage: {flow.cleanup_state==="cleaned"?"cleaned up":"retained"}{flow.cleanup_error?` — cleanup retry: ${flow.cleanup_error.replaceAll("_"," ")}`:""}. {flow.publication_slug && flow.approved && <Link href={`/movies/${flow.publication_slug}`} className="underline">View published movie</Link>}</p>}
+      {session.stage==="published" && flow?.approved && flow.publication_slug && <form action={refreshUploadPagesAction}><input type="hidden" name="id" value={id} /><button className={buttonClass("secondary")}>Refresh public pages</button></form>}
       {!!flow?.audit.length && <details className="text-body-sm"><summary className="cursor-pointer py-3">Inspect operation history</summary><ol className="space-y-2">{flow.audit.map((entry,index)=><li key={index}>{entry.action.replaceAll("_"," ")} · revision {entry.revision} · {entry.at}</li>)}</ol></details>}
       <Link href={`/admin/uploads/${id}`} className="inline-block py-3 text-body-sm underline">Refresh processing status</Link>
     </section>}
