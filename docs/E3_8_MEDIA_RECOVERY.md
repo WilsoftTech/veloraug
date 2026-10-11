@@ -50,10 +50,14 @@ clearance. MIME labels are not actual container verification: three reported MKV
 may remain incompatible with the MP4/H.264/AAC-or-MP3 policy. No conversion,
 replacement, upload, rights decision or publication is authorized here.
 
-## Local repair (implemented 2026-10-11, not deployed)
+## Local repair (implemented 2026-10-11)
 
-Status: **implemented and validated locally. Nothing live changed.** Hosted still
-has 16 migrations, the listener still runs `velora-discovery:gate-b` in metadata
+> Later the same day the migration was deployed to production and the reader
+> session was created. See "Production deployment" and "Reader session" at the
+> end. The rest of this section describes the state when the repair was written.
+
+Status then: **implemented and validated locally. Nothing live changed.** Hosted still
+had 16 migrations, the listener still runs `velora-discovery:gate-b` in metadata
 mode, and all seven candidates are still awaiting media verification. No Telegram
 read or write, no hosted read or write, no reinspection, no rights decision and no
 publication happened in this work.
@@ -306,3 +310,64 @@ confirmed, while the audit above found all 7 confirmed. The fresh backup in step
 1 is what the real rehearsal runs on. A channel post arriving between the
 driver's two reads shows up as data drift and stops verification after the
 commit; apply while the channel is quiet.
+
+## Production deployment (2026-10-11): PASS
+
+Operator-authorized, for this migration only. Hosted now has **17 migrations**:
+the previous 16 and `20261011112745`. The six admin-upload migrations were not
+applied. The running listener was not restarted and stayed healthy.
+
+| Stage | Result |
+| --- | --- |
+| Target | Project, pooler host and owner role checked against the fixed reference before every stage |
+| Backup | Read-only, snapshot-consistent, EFS-encrypted, outside the repository. History exactly the expected 16; 62 tables; 7 candidates, all 7 confirmed |
+| Restore | Archive hash verified; all 62 tables restored to the recorded digests in a disposable database on an internal network |
+| Rehearsal on that copy | Functions before and after identical to the tested chain; no table changed; confirmations unchanged; replay refused; rollback exact |
+| Reinspection rehearsed on the copy | For each of the 7 real candidates: request, claim (with the confirmed choice), then a completion naming another film, no VJ and no evidence. All 7 kept their film, year, VJ and match candidates |
+| Final precheck on production | History 16; the five functions, their owners and ACLs identical to the tested chain; no table changed since the backup |
+| Write | One transaction: the migration and its history row |
+| Verification | History is the 16 plus this one. Exactly the five functions changed, and they equal the tested chain including owner and ACL. No table changed. The 7 confirmations are identical before and after (same digest as the backup). All 7 candidates render through the new view with `inspection` |
+
+The archive, its evidence, the rehearsal result and the production verification
+are kept with the backup, outside Git.
+
+**Consequence for the dashboard.** The review pages now offer **Run media
+check** for the seven. Until the listener runs in bounded mode it checks nothing:
+it is audited as `no_evidence`, keeps the confirmation and uses one revision.
+It was not pressed.
+
+## Reader session (2026-10-11): ready, not used
+
+Operator-authorized: one login of the dedicated reader bot, through the gateway's
+own entry point with `MEDIA_GATEWAY_ALLOW_BOT_LOGIN` (no other login code). The
+gateway container had no published port, so no stream could be requested and no
+media was read. It reached `reader_ready`, which includes its checks that the
+session is the expected reader bot, is not an ingestion bot, and can see the
+Movies channel. It was then stopped and removed.
+
+- The session file is in a private directory outside the repository checkout,
+  readable only by the operator's account and SYSTEM. It is distinct from the
+  Media Gateway's session, which was not modified.
+- The new listener image accepts the listener's real environment plus the real
+  reader identity in bounded mode (`--check`, no network). It refuses the same
+  configuration when the reader is the Movies bot, or without a session path.
+- The compose override validates against the new directory. Nothing was started.
+
+Not proven: that the stored session connects again (the bounded listener checks
+this at start and refuses otherwise), and any media read.
+
+Finding, not changed: the Media Gateway's own session file inherits the
+checkout's permissions, which include a sandbox users group with modify access.
+
+## Remaining before the single-candidate canary
+
+Each needs authorization; none was done.
+
+1. Add the four reader variables to the listener's private environment file.
+   The API ID and hash must be the pair the session was created with.
+2. Set `VELORA_DISCOVERY_READER_DIR` to the private session directory.
+3. Recreate the listener from `velora-discovery:media-recovery` with the bounded
+   override. This restarts the listener; the base file returns it to metadata
+   mode on `gate-b`.
+4. Press **Run media check** on one MP4 candidate (event 8, message 46), then
+   read back its evidence, confirmation and audit entries.
