@@ -11,6 +11,7 @@ import {
   defaultVersion,
   detachMediaSource,
   diagnoseMediaFailure,
+  isAutoplayRefusal,
   needsRenewal,
   playerReducer,
   renewalDelayMs,
@@ -38,6 +39,16 @@ describe("playerReducer", () => {
 
   it("stays loading while the first data is awaited, even if the element reports waiting", () => {
     expect(run([{ type: "play_requested" }, { type: "capability_granted", capability: CAP }, { type: "media_waiting" }]).status).toBe("loading");
+  });
+
+  it("treats a refused automatic start as paused: waiting for the viewer, with the capability kept and no failure", () => {
+    const waiting = run([{ type: "play_requested" }, { type: "capability_granted", capability: CAP }, { type: "media_paused" }]);
+    expect(waiting).toEqual({ status: "paused", failure: null, capability: CAP });
+    // The viewer's own press then follows the normal path, including a bounded wait for data.
+    expect(playerReducer(waiting, { type: "media_waiting" }).status).toBe("buffering");
+    expect(playerReducer(waiting, { type: "media_playing" }).status).toBe("playing");
+    // First data arriving afterwards does not pull a waiting player back to another state.
+    expect(playerReducer(waiting, { type: "media_ready" })).toEqual(waiting);
   });
 
   it("ends in an error with no capability when access is denied, and never starts media", () => {
@@ -86,6 +97,19 @@ describe("playerReducer", () => {
   });
 });
 
+describe("isAutoplayRefusal", () => {
+  it("recognises only the browser's refusal of an automatic start", () => {
+    expect(isAutoplayRefusal(new DOMException("The request is not allowed by the user agent.", "NotAllowedError"))).toBe(true);
+    expect(isAutoplayRefusal({ name: "NotAllowedError" })).toBe(true);
+  });
+
+  it("does not mistake an aborted load, an unsupported source or anything else for a refusal", () => {
+    expect(isAutoplayRefusal(new DOMException("The play() request was interrupted by a new load request.", "AbortError"))).toBe(false);
+    expect(isAutoplayRefusal(new DOMException("The element has no supported sources.", "NotSupportedError"))).toBe(false);
+    for (const value of [new Error("NotAllowedError"), "NotAllowedError", null, undefined, 4]) expect(isAutoplayRefusal(value)).toBe(false);
+  });
+});
+
 describe("classifyMediaError", () => {
   it("never treats an error before metadata as a browser problem: it is diagnosed", () => {
     // Chrome and Firefox report 4 for a refused connection, any HTTP error status and undecodable bytes alike (E3.4).
@@ -108,8 +132,11 @@ describe("classifyMediaError", () => {
     for (const message of Object.values(PLAYER_FAILURE_MESSAGES)) expect(message).not.toMatch(/telegram|mtproto|gateway|token|database|sql|\d{3}/i);
   });
 
-  it("blames the browser in exactly one message", () => {
-    expect(Object.entries(PLAYER_FAILURE_MESSAGES).filter(([, message]) => /browser/i.test(message)).map(([failure]) => failure)).toEqual(["unsupported"]);
+  it("keeps connectivity and availability messages separate from decoder failures", () => {
+    for (const failure of ["network", "temporarily_unavailable", "unavailable", "auth_required"] as const) {
+      expect(PLAYER_FAILURE_MESSAGES[failure]).not.toMatch(/browser|codec|container/i);
+    }
+    for (const failure of ["unsupported_container", "unsupported_video", "unsupported_audio", "missing_video", "missing_audio", "slow_metadata"] as const) expect(PLAYER_FAILURE_MESSAGES[failure]).toBeTruthy();
   });
 });
 
@@ -277,6 +304,17 @@ describe("requestStreamCapability", () => {
       throw new TypeError("fetch failed");
     }) as unknown as typeof fetch;
     expect(await requestStreamCapability(1, failing)).toEqual({ ok: false, failure: "network" });
+  });
+
+  it("bounds a stalled issuer to 15 seconds and releases its timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))))) as typeof fetch;
+      const result = requestStreamCapability(1, fetchImpl);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(await result).toEqual({ ok: false, failure: "network" });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 });
 

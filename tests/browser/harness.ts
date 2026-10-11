@@ -64,6 +64,11 @@ export interface MediaRequest {
 }
 
 export interface HarnessOptions {
+  /** Optional original-download adapter for the frontend fixture tests; never contacts Telegram. */
+  downloads?: boolean;
+  downloadAccess?: () => boolean;
+  allowedOrigins?: readonly string[];
+  beforeRead?: (offset: number, limit: number) => void;
   /** Defaults to the committed fixtures. */
   fixtures?: readonly ServedFile[];
   fixtureDir?: string;
@@ -93,8 +98,13 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
     fileUniqueId: `fixture-${fixture.id}`,
     fileSize: fixture.sizeBytes,
     mimeType: fixture.mime,
+    fileName: fixture.file,
   });
   const resolver: CatalogueMediaResolver = {
+    ...(options.downloads ? { async resolveDownload(movieVersionId: number) {
+      const fixture = byId.get(movieVersionId);
+      return fixture && (options.downloadAccess?.() ?? true) ? locator(fixture) : null;
+    } } : {}),
     async resolveMovieVersion(movieVersionId) {
       const fixture = byId.get(movieVersionId);
       return fixture ? locator(fixture) : null;
@@ -103,6 +113,7 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
   const reader: MediaReader = {
     readiness: () => ({ ready: true, state: "ready" }),
     async readPart(target, offset, limit) {
+      options.beforeRead?.(offset, limit);
       const fixture = byId.get(target.movieVersionId);
       if (!fixture) throw new Error("unknown fixture");
       if (options.readDelayMs) await new Promise((resolve) => setTimeout(resolve, options.readDelayMs));
@@ -114,7 +125,7 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
       return { bytes: bytes.subarray(0, bytesRead), rpcCount: 1 };
     },
   };
-  const gateway = createMediaGateway({ limits: limits(options.maxResponseBytes ?? HARNESS_MAX_RESPONSE_BYTES), tokenSecret: SECRET, resolver, reader, logger: SILENT });
+  const gateway = createMediaGateway({ limits: limits(options.maxResponseBytes ?? HARNESS_MAX_RESPONSE_BYTES), tokenSecret: SECRET, resolver, reader, logger: SILENT, allowedOrigins: options.allowedOrigins });
   const page = await readFile(join(__dirname, "probe.html"));
   const requests: MediaRequest[] = [];
   let resetAt = Date.now();

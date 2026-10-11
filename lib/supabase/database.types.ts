@@ -228,6 +228,11 @@ export type Database = {
     };
     Views: { [_ in never]: never };
     Functions: {
+      /** Optional until the prepared Checkpoint 4 migration is activated. */
+      movie_media_profile: {
+        Args: { p_version_id: number };
+        Returns: unknown;
+      };
       record_search: {
         Args: { p_query: string; p_result_count: number; p_scope: string };
         Returns: undefined;

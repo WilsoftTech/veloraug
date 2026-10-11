@@ -4,7 +4,7 @@ import { notFound } from "next/navigation";
 import { MoviePlayer } from "@/components/movie-player";
 import { TitleHero } from "@/components/title-hero";
 import { WatchlistButton } from "@/components/watchlist-button";
-import { getMovie } from "@/lib/catalogue";
+import { getMovie, getMovieMediaProfile } from "@/lib/catalogue";
 import { TITLE_NOT_FOUND_METADATA, titleMetadata } from "@/lib/title-metadata";
 import { formatRuntime, parseSlug, titleWatchlistItem } from "@/lib/utils";
 
@@ -37,7 +37,9 @@ export default async function MoviePage({ params }: PageProps<"/movies/[slug]">)
   ].filter((fact): fact is string => fact !== null);
 
   // Playable versions come from the published catalogue (ids and VJ names only).
-  const versions = movie.versions.map((version) => ({ id: version.id, label: version.vj.name }));
+  const versions = await Promise.all(movie.versions.map(async (version) => ({
+    id: version.id, label: version.vj.name, profile: await getMovieMediaProfile(version.id),
+  })));
 
   return (
     <article>

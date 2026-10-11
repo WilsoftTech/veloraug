@@ -1,15 +1,18 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MoviePlayer } from "@/components/movie-player";
+import type { PlayableVersion } from "@/lib/playback/player";
 
 const ONE = [{ id: 1, label: "VJ Ice P" }];
 const TWO = [
   { id: 1, label: "VJ Ice P" },
   { id: 4, label: "VJ Junior" },
 ];
-const render = (versions = ONE) => renderToStaticMarkup(<MoviePlayer versions={versions} signInHref="/sign-in?next=%2Fmovies%2Fon-the-hunt-2026" />);
+const session = vi.hoisted(() => ({ state: "unknown" }));
+vi.mock("@/lib/session", () => ({ useSession: () => session.state }));
+const render = (versions: PlayableVersion[] = ONE) => renderToStaticMarkup(<MoviePlayer versions={versions} signInHref="/sign-in?next=%2Fmovies%2Fon-the-hunt-2026" />);
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); session.state = "unknown"; });
 
 describe("MoviePlayer before Play", () => {
   it("renders a Play button and no video, and requests nothing on page load", () => {
@@ -36,5 +39,23 @@ describe("MoviePlayer before Play", () => {
 
   it("renders nothing without a playable version", () => {
     expect(render([])).toBe('');
+  });
+
+  it("shows Download only for the signed-in UX hint, without requesting a capability", () => {
+    session.state = "signed-out";
+    expect(render()).not.toContain("Download");
+    session.state = "signed-in";
+    const fetchSpy = vi.fn(); vi.stubGlobal("fetch", fetchSpy);
+    expect(render()).toContain("Download");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("displays original MP4/MKV format without exposing the raw inspection", () => {
+    session.state = "signed-in";
+    for (const container of ["mp4", "mkv"] as const) {
+      const html = render([{ ...ONE[0], profile: { container, videoCodec: "h264", audioCodec: "aac", startupWarning: false } }]);
+      expect(html).toContain(`Download (${container.toUpperCase()})`);
+      expect(html).toContain(`Original format: ${container.toUpperCase()}`);
+    }
   });
 });

@@ -8,7 +8,7 @@ import { approvalCommand, publicationCommand, publicationState } from "@/lib/dis
 import { probeOf, virtualMp4 } from "@/lib/discovery/synthetic-media";
 import { reconcile, replayProvider, runReplay } from "@/lib/discovery/worker";
 import type { InspectionPorts } from "@/lib/discovery/pipeline";
-import { getMovie, getVj, isMovieVersionPlayable, listMovies, listVjs, searchCatalogue } from "@/lib/catalogue";
+import { getMovie, getMovieMediaProfile, getVj, isMovieVersionPlayable, listMovies, listVjs, searchCatalogue } from "@/lib/catalogue";
 import { canStreamMovieVersion } from "@/lib/playback/entitlement";
 import { issueStreamCapability, streamCapabilityConfigFromEnv } from "@/lib/playback/stream-capability";
 import { verifyMediaToken } from "@/lib/media-gateway/token";
@@ -170,6 +170,9 @@ describe.skipIf(process.env.VELORA_E38_ISOLATED_TESTS !== "true" || process.env.
     expect((await searchCatalogue("Direct Channel Film", "movie")).titles.map((item) => item.slug)).toContain(slug);
     const movie = (await getMovie(slug))!;
     expect(movie.versions).toHaveLength(1);
+    // Optional CP4 published-only projection, through the ordinary anon client.
+    expect(await getMovieMediaProfile(movie.versions[0].id)).toMatchObject({ container: "mp4", videoCodec: "h264", audioCodec: "aac" });
+    expect(await getMovieMediaProfile(99999999)).toBeNull();
     expect((await listVjs()).map((vj) => vj.slug)).toContain("vj-direct");
     expect((await getVj("vj-direct"))?.slug).toBe("vj-direct");
     expect((await listMovies({ vjSlug: "vj-direct" })).items.map((item) => item.slug)).toEqual([slug]);

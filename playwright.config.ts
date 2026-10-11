@@ -11,6 +11,7 @@ import { defineConfig } from "@playwright/test";
  */
 export default defineConfig({
   testDir: "tests/browser",
+  tsconfig: "./tests/browser/tsconfig.json",
   testMatch: "**/*.spec.ts",
   outputDir: "test-results",
   fullyParallel: false,

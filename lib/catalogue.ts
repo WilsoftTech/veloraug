@@ -19,6 +19,12 @@ import type {
   VjSummary,
 } from "@/types/catalogue";
 import type { SearchScope } from "@/types/media";
+import { readMediaProfile } from "@/lib/playback/compatibility";
+
+/** Optional published-only metadata. Never selects new columns from the live catalogue. */
+export function getMovieMediaProfile(versionId: number) {
+  return readMediaProfile(() => catalogueClient().rpc("movie_media_profile", { p_version_id: versionId }).abortSignal(AbortSignal.timeout(3_000)));
+}
 
 /**
  * Server-side reads of the published Velora UG catalogue.

@@ -1,9 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
-import { Play, X } from "lucide-react";
+import { Download, Play, X } from "lucide-react";
 import { buttonClass } from "@/components/button";
+import { useSession } from "@/lib/session";
+import { browserSignals, mediaCompatibility, unsupportedFailure } from "@/lib/playback/compatibility";
+import { DOWNLOAD_GUIDANCE, DOWNLOAD_MESSAGES, launchBrowserDownload, prepareDownload, type DownloadFailure } from "@/lib/playback/download";
 import {
   INITIAL_PLAYER_STATE,
   MIN_RENEWAL_INTERVAL_MS,
@@ -12,6 +15,7 @@ import {
   defaultVersion,
   detachMediaSource,
   diagnoseMediaFailure,
+  isAutoplayRefusal,
   needsRenewal,
   playerReducer,
   renewalDelayMs,
@@ -21,7 +25,7 @@ import {
 } from "@/lib/playback/player";
 
 interface MoviePlayerProps {
-  /** Playable catalogue versions (one per VJ). Ids and labels only: no media details. */
+  /** Published catalogue versions and optional safe codec facts; no private media location. */
   versions: PlayableVersion[];
   /** Where a signed-out viewer goes to sign in (the existing sign-in page, returning here). */
   signInHref: string;
@@ -32,6 +36,9 @@ const STATUS_TEXT: Partial<Record<string, string>> = {
   loading: "Loading…",
   buffering: "Buffering…",
 };
+const subscribeBrowser = () => () => {};
+const browserAgent = () => navigator.userAgent;
+const serverAgent = () => null;
 
 
 /**
@@ -44,13 +51,20 @@ const STATUS_TEXT: Partial<Record<string, string>> = {
 export function MoviePlayer({ versions, signInHref }: MoviePlayerProps) {
   const [versionId, setVersionId] = useState(() => defaultVersion(versions)?.id ?? null);
   const [state, dispatch] = useReducer(playerReducer, INITIAL_PLAYER_STATE);
+  const session = useSession();
+  const userAgent = useSyncExternalStore(subscribeBrowser, browserAgent, serverAgent);
+  const profile = versions.find((version) => version.id === versionId)?.profile ?? null;
+  const compatibility = useMemo(() => mediaCompatibility(profile, userAgent ? browserSignals(profile, document.createElement("video"), userAgent, navigator.maxTouchPoints) : undefined), [profile, userAgent]);
+  const [download, setDownload] = useState<{ busy: boolean; attempted: boolean; handedOff: boolean; failure: DownloadFailure | null; format: string | null }>({ busy: false, attempted: false, handedOff: false, failure: null, format: null });
+  const downloadRequest = useRef<AbortController | null>(null);
+  const [audioWarning, setAudioWarning] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const attachedUrl = useRef<string | null>(null);
   const request = useRef<AbortController | null>(null);
   const renewing = useRef(false);
   const recovered = useRef(false);
   const lastRenewal = useRef(0);
-  /** Whether the attached source has loaded its metadata (the file is known to be playable). */
+  /** Metadata has loaded; this alone does not establish decoded picture or sound. */
   const metadataLoaded = useRef(false);
 
   const stop = useCallback(() => {
@@ -58,6 +72,7 @@ export function MoviePlayer({ versions, signInHref }: MoviePlayerProps) {
     request.current = null;
     renewing.current = false;
     attachedUrl.current = null;
+    metadataLoaded.current = false;
     if (videoRef.current) detachMediaSource(videoRef.current);
   }, []);
 
@@ -65,6 +80,7 @@ export function MoviePlayer({ versions, signInHref }: MoviePlayerProps) {
     if (versionId === null) return;
     stop();
     recovered.current = false;
+    setAudioWarning(false);
     lastRenewal.current = 0;
     dispatch({ type: "play_requested" });
     const controller = new AbortController();
@@ -102,13 +118,16 @@ export function MoviePlayer({ versions, signInHref }: MoviePlayerProps) {
     const capability = state.capability;
     if (!video || !capability || attachedUrl.current === capability.streamUrl) return;
     const first = attachedUrl.current === null;
+    // Autoplay refused: the element is paused and waits for the viewer, with the native controls
+    // available. Say so, or the loading deadline would close a player that is not loading.
+    const awaitViewer = (error: unknown) => {
+      if (isAutoplayRefusal(error)) dispatch({ type: "media_paused" });
+    };
     attachedUrl.current = capability.streamUrl;
     metadataLoaded.current = false;
     if (first) {
       video.src = capability.streamUrl;
-      video.play().catch(() => {
-        // Autoplay refused: the native controls stay available.
-      });
+      video.play().catch(awaitViewer);
       return;
     }
     const position = video.currentTime;
@@ -117,7 +136,7 @@ export function MoviePlayer({ versions, signInHref }: MoviePlayerProps) {
       "loadedmetadata",
       () => {
         video.currentTime = position;
-        if (resume) video.play().catch(() => {});
+        if (resume) video.play().catch(awaitViewer);
       },
       { once: true },
     );
@@ -170,10 +189,45 @@ export function MoviePlayer({ versions, signInHref }: MoviePlayerProps) {
     void diagnoseMediaFailure(capability.streamUrl, fetch, controller.signal).then((diagnosis) => {
       if (diagnosis === null || controller.signal.aborted) return;
       request.current = null;
-      if (diagnosis !== "capability_rejected") return fail(diagnosis);
+      if (diagnosis !== "capability_rejected") return fail(diagnosis === "unsupported" ? unsupportedFailure(profile) : diagnosis);
       // A capability the gateway no longer accepts: one renewal, then report the service as unavailable.
       if (!recoverOnce()) fail("temporarily_unavailable");
     });
+  };
+
+  // Start the watchdog at the loading commit, even if passive effects are delayed.
+  // A native element may never raise an error while waiting for metadata/data.
+  useLayoutEffect(() => {
+    if (state.status !== "loading" && state.status !== "buffering") return;
+    const timer = setTimeout(() => {
+      const failure = metadataLoaded.current ? "network" : "slow_metadata";
+      stop();
+      dispatch({ type: "media_failed", failure });
+    }, 30_000);
+    return () => clearTimeout(timer);
+  }, [state.status, state.capability, stop]);
+
+  useEffect(() => {
+    if (session !== "signed-in") downloadRequest.current?.abort();
+    return () => downloadRequest.current?.abort();
+  }, [session]);
+
+  const startDownload = async () => {
+    if (versionId === null || session !== "signed-in" || downloadRequest.current) return;
+    const controller = new AbortController();
+    downloadRequest.current = controller;
+    setDownload((previous) => ({ ...previous, busy: true, attempted: true, failure: null, handedOff: false }));
+    const result = await prepareDownload(versionId, fetch, controller.signal);
+    if (downloadRequest.current !== controller) return;
+    downloadRequest.current = null;
+    if (controller.signal.aborted) {
+      setDownload((previous) => ({ ...previous, busy: false }));
+      return;
+    }
+    if (result.ok) {
+      launchBrowserDownload(result.url);
+      setDownload({ busy: false, attempted: true, handedOff: true, failure: null, format: result.format });
+    } else setDownload((previous) => ({ ...previous, busy: false, failure: result.failure }));
   };
 
   if (versionId === null) return null;
@@ -184,18 +238,30 @@ export function MoviePlayer({ versions, signInHref }: MoviePlayerProps) {
   return (
     <>
       {!open && (
-        <button type="button" onClick={() => void start()} disabled={busy} className={buttonClass("primary")}>
+        <button type="button" onClick={() => void start()} disabled={busy || compatibility.blocked} className={buttonClass("primary")}>
           <Play aria-hidden className="size-4" />
           {busy ? "Starting…" : "Play"}
+        </button>
+      )}
+      {session === "signed-in" && (
+        <button type="button" onClick={() => void startDownload()} disabled={download.busy} className={buttonClass(compatibility.blocked || state.status === "error" ? "primary" : "secondary")}>
+          <Download aria-hidden className="size-4" />
+          {download.busy ? "Preparing download…" : download.attempted ? "Resume/Retry Download" : "Download"}
+          {(download.format || profile?.container === "mp4" || profile?.container === "mkv") && ` (${download.format ?? profile?.container?.toUpperCase()})`}
         </button>
       )}
       {versions.length > 1 && (
         <label className="inline-flex min-h-11 items-center gap-2 text-body-md text-foreground/80">
           <span>VJ</span>
           <select
+            aria-label="VJ"
             value={versionId}
             onChange={(event) => {
               close();
+              downloadRequest.current?.abort();
+              downloadRequest.current = null;
+              setDownload({ busy: false, attempted: false, handedOff: false, failure: null, format: null });
+              setAudioWarning(false);
               setVersionId(Number(event.target.value));
             }}
             className="min-h-11 rounded-default border border-border bg-surface px-3 text-body-md text-foreground"
@@ -210,6 +276,18 @@ export function MoviePlayer({ versions, signInHref }: MoviePlayerProps) {
       )}
 
       <div className="order-last w-full">
+        <div className="mb-3 space-y-2 text-body-md text-foreground/80" aria-label="Playback compatibility">
+          {profile?.container && <p>Original format: {profile.container === "other" ? "unsupported container" : profile.container.toUpperCase()} · Video: {profile.videoCodec?.toUpperCase() ?? "unknown"} · Audio: {profile.audioCodec?.toUpperCase() ?? "unknown"}</p>}
+          <p>{compatibility.message}</p>
+          {compatibility.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+        </div>
+        {session === "signed-in" && <p className="mb-3 text-body-sm text-muted">{DOWNLOAD_GUIDANCE}</p>}
+        {download.handedOff && <p role="status" className="mb-3 text-body-md">{download.format} download handed to your browser. Check its download manager for progress or interruptions.</p>}
+        {download.failure && <div role="alert" className="mb-3 flex flex-wrap items-center gap-3 rounded-default border border-destructive/40 px-4 py-3 text-body-md">
+          <span className="text-destructive">{DOWNLOAD_MESSAGES[download.failure]}</span>
+          {download.failure === "auth_required" && <Link href={signInHref} className={buttonClass("secondary")}>Sign in</Link>}
+        </div>}
+        {audioWarning && <p role="status" className="mb-3 text-body-md">{PLAYER_FAILURE_MESSAGES.missing_audio}</p>}
         {open && (
           <div className="flex flex-col gap-3">
             <video
@@ -221,7 +299,14 @@ export function MoviePlayer({ versions, signInHref }: MoviePlayerProps) {
               onLoadedMetadata={() => {
                 metadataLoaded.current = true;
               }}
-              onLoadedData={() => dispatch({ type: "media_ready" })}
+              onLoadedData={() => {
+                const video = videoRef.current;
+                if (video && video.videoWidth === 0 && video.videoHeight === 0) return fail("missing_video");
+                // Only use explicit native evidence where available. No audio API does not imply silence.
+                const audio = video as (HTMLVideoElement & { mozHasAudio?: boolean; audioTracks?: { length: number } }) | null;
+                setAudioWarning(audio?.mozHasAudio === false || audio?.audioTracks?.length === 0);
+                dispatch({ type: "media_ready" });
+              }}
               onPlaying={() => {
                 recovered.current = false;
                 dispatch({ type: "media_playing" });

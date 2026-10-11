@@ -1,0 +1,96 @@
+ M .env.example
+ M IMPLEMENTATION_ROADMAP.md
+ M app/movies/[slug]/page.tsx
+ M components/movie-player.test.tsx
+ M components/movie-player.tsx
+ M docs/MP4_MKV_NATIVE_PLAYBACK.md
+ M lib/catalogue.ts
+ M lib/playback/player.test.ts
+ M lib/playback/player.ts
+ M lib/supabase/database.types.ts
+ M playwright.config.ts
+ M tests/browser/harness.ts
+ M tests/integration/direct-channel-publication.test.ts
+?? docs/MP4_MKV_ACTIVATION_READINESS.md
+?? docs/MP4_MKV_CHECKPOINT_6.md
+?? docs/MP4_MKV_CHECKPOINT_7.md
+?? docs/MP4_MKV_DEVICE_TEST_PLAN.md
+?? docs/evidence/checkpoint6-browser-initial.json
+?? docs/evidence/checkpoint6-browser-initial.log
+?? docs/evidence/checkpoint6-browser-targeted-final.json
+?? docs/evidence/checkpoint6-browser-targeted-final.log
+?? docs/evidence/checkpoint6-browser-targeted.json
+?? docs/evidence/checkpoint6-browser-targeted.log
+?? docs/evidence/checkpoint6-build-before-watchdog.log
+?? docs/evidence/checkpoint6-build-final.log
+?? docs/evidence/checkpoint6-build-initial.log
+?? docs/evidence/checkpoint6-focused-initial.log
+?? docs/evidence/checkpoint6-git-status.txt
+?? docs/evidence/checkpoint6-integration-final.log
+?? docs/evidence/checkpoint6-integration.log
+?? docs/evidence/checkpoint6-lint-before-watchdog.log
+?? docs/evidence/checkpoint6-lint-final.log
+?? docs/evidence/checkpoint6-lint-initial.log
+?? docs/evidence/checkpoint6-lint-second.log
+?? docs/evidence/checkpoint6-lint-third.log
+?? docs/evidence/checkpoint6-native-results.sha256
+?? docs/evidence/checkpoint6-native-results.zip
+?? docs/evidence/checkpoint6-player-1440.png
+?? docs/evidence/checkpoint6-player-390.png
+?? docs/evidence/checkpoint6-typecheck-before-watchdog.log
+?? docs/evidence/checkpoint6-typecheck-final.log
+?? docs/evidence/checkpoint6-typecheck-fourth.log
+?? docs/evidence/checkpoint6-typecheck-initial.log
+?? docs/evidence/checkpoint6-typecheck-second.log
+?? docs/evidence/checkpoint6-typecheck-third.log
+?? docs/evidence/checkpoint6-ui-browser-diagnostic.log
+?? docs/evidence/checkpoint6-ui-browser-final.json
+?? docs/evidence/checkpoint6-ui-browser-final.log
+?? docs/evidence/checkpoint6-ui-browser-initial.log
+?? docs/evidence/checkpoint6-ui-browser-rerun1.log
+?? docs/evidence/checkpoint6-ui-browser-rerun2.log
+?? docs/evidence/checkpoint6-ui-browser-rerun3.log
+?? docs/evidence/checkpoint6-ui-browser-rerun4.log
+?? docs/evidence/checkpoint6-ui-browser-rerun5.log
+?? docs/evidence/checkpoint6-unit-before-watchdog.json
+?? docs/evidence/checkpoint6-unit-before-watchdog.log
+?? docs/evidence/checkpoint6-unit-final.json
+?? docs/evidence/checkpoint6-unit-final.log
+?? docs/evidence/checkpoint6-unit-initial.json
+?? docs/evidence/checkpoint6-unit-initial.log
+?? docs/evidence/checkpoint6-webkit-realtime.json
+?? docs/evidence/checkpoint6-webkit-realtime.log
+?? docs/evidence/checkpoint6-webkit-timer-diagnostic.log
+?? docs/evidence/checkpoint6-webkit-watchdog-rerun.json
+?? docs/evidence/checkpoint6-webkit-watchdog-rerun.log
+?? docs/evidence/checkpoint6-webkit-watchdog.json
+?? docs/evidence/checkpoint6-webkit-watchdog.log
+?? docs/evidence/checkpoint7-browser.json
+?? docs/evidence/checkpoint7-browser.log
+?? docs/evidence/checkpoint7-build.log
+?? docs/evidence/checkpoint7-db.log
+?? docs/evidence/checkpoint7-final-browser.json
+?? docs/evidence/checkpoint7-final-browser.log
+?? docs/evidence/checkpoint7-final-webkit-repeat.log
+?? docs/evidence/checkpoint7-gateway-validation.log
+?? docs/evidence/checkpoint7-git-status.txt
+?? docs/evidence/checkpoint7-integration.log
+?? docs/evidence/checkpoint7-lint.log
+?? docs/evidence/checkpoint7-stage-browser-evidence.pathspec
+?? docs/evidence/checkpoint7-stage.pathspec
+?? docs/evidence/checkpoint7-typecheck.log
+?? docs/evidence/checkpoint7-unit.json
+?? docs/evidence/checkpoint7-unit.log
+?? docs/evidence/checkpoint7-watchdog-after-fix.log
+?? docs/evidence/checkpoint7-watchdog-before-fix.log
+?? docs/evidence/checkpoint7-webkit-synthetic-diagnostic.log
+?? docs/evidence/checkpoint7-webkit-synthetic-with-fix.log
+?? docs/evidence/checkpoint7-webkit-synthetic-without-fix.log
+?? lib/playback/compatibility.test.ts
+?? lib/playback/compatibility.ts
+?? lib/playback/download.test.ts
+?? lib/playback/download.ts
+?? tests/browser/player-fixture.tsx
+?? tests/browser/player-harness.ts
+?? tests/browser/player.spec.ts
+?? tests/browser/tsconfig.json

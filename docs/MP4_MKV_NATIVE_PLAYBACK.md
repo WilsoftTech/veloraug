@@ -19,8 +19,12 @@ Telegram upload or push without separate authorization.
 | 0. Read-only verification and impact map | Done. Gate A approved conditionally (2026-10-11) |
 | 1. Browser test infrastructure and baseline | Closed with four transient headed failures and successful reruns; evidence preserved |
 | 2. MP4/MKV ingestion | Implemented locally; see [close-out](MP4_MKV_CHECKPOINTS_2_3.md) |
-| 3. Media verification | Implemented locally; persistence awaits Checkpoint 4 |
-| 4 to 9 | Not implemented; separate approval required |
+| 3. Media verification | Implemented locally; bounded evidence remains unverified |
+| 4. Schema and RPC preparation | Prepared and tested in disposable databases; persistent application not approved; see [report](MP4_MKV_CHECKPOINT_4.md) |
+| 5. Original-file gateway downloads | Implemented and tested locally; resolver migration remains unapplied; see [report](MP4_MKV_CHECKPOINT_5.md) |
+| 6. Frontend playback and downloads | Local implementation; see [report](MP4_MKV_CHECKPOINT_6.md) for final validation and limitations |
+| 7. Activation safety and release preparation | Local review, one player fix, readiness checklist and device test plan; nothing activated; see [report](MP4_MKV_CHECKPOINT_7.md) |
+| 8 to 9 | Not implemented; separate approval required |
 
 ## Checkpoint 0: verification against the audit (2026-10-11)
 

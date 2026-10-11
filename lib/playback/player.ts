@@ -1,4 +1,5 @@
 import type { StreamCapability } from "@/lib/playback/stream-capability";
+import type { MediaProfile } from "@/lib/playback/compatibility";
 
 /**
  * Browser-side playback logic for the movie player (E3), kept free of React and
@@ -16,6 +17,12 @@ export type PlayerFailure =
   | "not_entitled"
   | "unavailable"
   | "unsupported"
+  | "unsupported_container"
+  | "unsupported_video"
+  | "unsupported_audio"
+  | "missing_video"
+  | "missing_audio"
+  | "slow_metadata"
   | "playback_error"
   | "network"
   | "temporarily_unavailable";
@@ -58,6 +65,12 @@ export const PLAYER_FAILURE_MESSAGES: Record<PlayerFailure, string> = {
   not_entitled: "Your account can't watch this movie.",
   unavailable: "This movie isn't available to watch right now.",
   unsupported: "This movie can't be played in this browser.",
+  unsupported_container: "This browser player cannot play this container. Download the original file.",
+  unsupported_video: "This browser could not decode the video codec. Download to use a compatible player.",
+  unsupported_audio: "The audio codec may be unsupported. Download to use a compatible player.",
+  missing_video: "The browser loaded media without a decoded picture. Download to use a compatible player.",
+  missing_audio: "The browser reports no decoded audio. Sound may be missing; try a compatible player with the download.",
+  slow_metadata: "Movie metadata is taking too long to load. Retry playback or download the original file.",
   playback_error: "Playback failed. Try again.",
   network: "Playback was interrupted. Check your connection and try again.",
   temporarily_unavailable: "Playback is temporarily unavailable. Try again in a moment.",
@@ -110,36 +123,46 @@ export async function requestStreamCapability(
   signal?: AbortSignal,
   now: () => number = Date.now,
 ): Promise<CapabilityResult> {
-  let response: Response;
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const timer = setTimeout(abort, 15_000);
+  if (signal?.aborted) abort();
+  signal?.addEventListener("abort", abort, { once: true });
   try {
-    response = await fetchImpl(ENDPOINT, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ movieVersionId }),
-      credentials: "same-origin",
-      cache: "no-store",
-      signal,
-    });
-  } catch {
-    return { ok: false, failure: "network" };
+    let response: Response;
+    try {
+      response = await fetchImpl(ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ movieVersionId }),
+        credentials: "same-origin",
+        cache: "no-store",
+        signal: controller.signal,
+      });
+    } catch {
+      return { ok: false, failure: "network" };
+    }
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+    if (response.status === 200) {
+      if (!isCapability(body)) return { ok: false, failure: "temporarily_unavailable" };
+      const serverNow = Date.parse(response.headers.get("date") ?? "");
+      const skew = Number.isNaN(serverNow) ? 0 : now() - serverNow;
+      return { ok: true, capability: { streamUrl: body.streamUrl, expiresAt: body.expiresAt, expiresAtMs: Date.parse(body.expiresAt) + skew } };
+    }
+    const error = typeof body === "object" && body !== null ? (body as Record<string, unknown>).error : undefined;
+    if (response.status === 401) return { ok: false, failure: "auth_required" };
+    if (response.status === 403 && error === "not_entitled") return { ok: false, failure: "not_entitled" };
+    if (response.status === 404) return { ok: false, failure: "unavailable" };
+    return { ok: false, failure: "temporarily_unavailable" };
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
   }
-  let body: unknown = null;
-  try {
-    body = await response.json();
-  } catch {
-    body = null;
-  }
-  if (response.status === 200) {
-    if (!isCapability(body)) return { ok: false, failure: "temporarily_unavailable" };
-    const serverNow = Date.parse(response.headers.get("date") ?? "");
-    const skew = Number.isNaN(serverNow) ? 0 : now() - serverNow;
-    return { ok: true, capability: { streamUrl: body.streamUrl, expiresAt: body.expiresAt, expiresAtMs: Date.parse(body.expiresAt) + skew } };
-  }
-  const error = typeof body === "object" && body !== null ? (body as Record<string, unknown>).error : undefined;
-  if (response.status === 401) return { ok: false, failure: "auth_required" };
-  if (response.status === 403 && error === "not_entitled") return { ok: false, failure: "not_entitled" };
-  if (response.status === 404) return { ok: false, failure: "unavailable" };
-  return { ok: false, failure: "temporarily_unavailable" };
 }
 
 /** Renew this long before expiry: enough for a slow request and the source swap. */
@@ -166,7 +189,7 @@ export function needsRenewal(capability: PlayerCapability, nowMs: number): boole
  * gateway that is down, an HTTP error status and a file it cannot decode apart:
  * Chrome and Firefox report MediaError 4 (source not supported) for all of
  * them. So such an error is diagnosed (`diagnoseMediaFailure`), never read as
- * "unsupported". After metadata, the file is known to be playable: 2 (network)
+ * "unsupported". After metadata, decoding still needs observation: 2 (network)
  * may be an expired capability, which the component renews once; anything else
  * is a playback error. 1 (aborted) is ignored.
  */
@@ -241,15 +264,26 @@ export async function diagnoseMediaFailure(
   return signal?.aborted ? null : "playback_error";
 }
 
-/** A catalogue version the viewer can choose between (one per VJ). No media details. */
+/** A published version with optional public container/codec facts; no private locator. */
 export interface PlayableVersion {
   id: number;
   label: string;
+  profile?: MediaProfile | null;
 }
 
 /** The version played by default: the first one, in the catalogue's (VJ name) order. */
 export function defaultVersion(versions: readonly PlayableVersion[]): PlayableVersion | null {
   return versions[0] ?? null;
+}
+
+/**
+ * Whether a rejected play() promise means the browser refused the automatic
+ * start (NotAllowedError). The element then stays paused and waits for the
+ * viewer's own press: that is neither loading nor a failed movie. Other
+ * rejections (an aborted load, an unsupported source) are not refusals.
+ */
+export function isAutoplayRefusal(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as { name?: unknown }).name === "NotAllowedError";
 }
 
 /**
