@@ -2,6 +2,7 @@ import { z } from "zod";
 import { MOVIE_UPLOAD_EXTENSIONS } from "@/lib/ingestion/original-media";
 import { movieSnapshotSchema } from "@/lib/tmdb/ingestion-search";
 import { DiscoveryStoreError, storeError, type DiscoveryRpc } from "@/lib/discovery/database";
+import { browserProfile, type MediaFacts } from "@/lib/discovery/media-report";
 
 // Browser staging has its own decimal limit; the existing Telegram limit is unchanged.
 export const ADMIN_UPLOAD_MAX_BYTES = 2_000_000_000;
@@ -29,6 +30,13 @@ export type UploadMetadata = z.infer<typeof uploadMetadataSchema>;
 
 export const emptyUploadMetadata: UploadMetadata = { kind: "movie", title: "", year: null, vjId: null, snapshot: null, season: null, episode: null, provenance: "" };
 
+/** The worker's Policy 3 assessment (migration 20261011192619). A value of another shape is dropped, never guessed. */
+const assessmentSchema = z.object({
+  container: z.string().max(40).nullable(), integrity: z.string().max(60), streaming: z.string().max(60), compatibility: z.record(z.string(), z.unknown()),
+  warnings: z.array(z.string().max(100)).max(50),
+  tracks: z.array(z.object({ type: z.string(), codec: z.string().max(40).nullable().optional(), attachedPicture: z.boolean().optional() })).max(64),
+});
+
 export const uploadSessionSchema = z.object({
   id: z.uuid(), source: z.literal("admin_upload"), owner_id: z.uuid(),
   storage: z.enum(["disk","r2"]).optional(),
@@ -40,9 +48,27 @@ export const uploadSessionSchema = z.object({
   pipeline:z.object({media_verified:z.boolean(),telegram_status:z.string(),rights_cleared:z.boolean(),rights_rejected:z.boolean(),rights_expires_at:z.string().nullable(),rights_reference:z.string().nullable(),approved:z.boolean(),cleanup_state:z.string().nullable(),cleanup_error:z.string().nullable(),publication_slug:z.string().nullable(),stored:z.boolean(),audit:z.array(z.object({action:z.string(),at:z.string(),revision:z.number().int()})).max(100)}).optional(),
   inspection: z.object({ choices: z.array(movieSnapshotSchema).max(20),proposed_tmdb_id: z.number().int().positive().nullable(),proposed_vj_id: z.number().int().positive().nullable().optional(),
     classification: z.object({ class: z.string(),reasons: z.array(z.string()),policyVersion: z.number().int() }),
+    assessment: assessmentSchema.nullable().optional().catch(undefined),
   }).nullable().optional(),
 });
 export type UploadSession = z.infer<typeof uploadSessionSchema>;
+
+/** An upload's inspection for the admin media panel. Without the Policy 3 assessment only the class and reasons are known. */
+export function uploadMedia(session: UploadSession): MediaFacts {
+  const inspection = session.inspection ?? null;
+  const assessment = inspection?.assessment ?? null;
+  const version = inspection?.classification.policyVersion ?? null;
+  const codec = (type: string) => assessment?.tracks.find((track) => track.type === type && !track.attachedPicture)?.codec?.toLowerCase() ?? null;
+  const count = (type: string) => (assessment ? assessment.tracks.filter((track) => track.type === type).length : null);
+  return {
+    fileName: session.file_name, inspected: inspection !== null, policyVersion: version, checkedAt: null,
+    container: assessment?.container ?? null, video: codec("video"), audio: codec("audio"), reasons: inspection?.classification.reasons ?? [],
+    // The earlier policies' verdict; a Policy 3 inspection has none.
+    passed: inspection && version !== null && version < 3 ? inspection.classification.class === "canonical" : null,
+    policy3: assessment ? { integrity: assessment.integrity, streaming: assessment.streaming, browsers: browserProfile(assessment.compatibility),
+      audioTracks: count("audio"), subtitleTracks: count("subtitle"), warnings: assessment.warnings } : undefined,
+  };
+}
 
 /** Presentation only. PostgreSQL and authenticated worker commands authorize mutations. */
 export function canEditUpload(stage: AdminUploadStage): boolean {

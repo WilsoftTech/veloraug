@@ -71,6 +71,18 @@ describe("gatewayConfigFromEnv", () => {
     expect(failures({ ...valid, MEDIA_GATEWAY_DOWNLOAD_MAX_ACTIVE: "8" })).toEqual(["MEDIA_GATEWAY_DOWNLOAD_* limits"]);
   });
 
+  it("leaves downloads off unless the switch is exactly true, and refuses to start on any other value", () => {
+    expect(gatewayConfigFromEnv(valid).downloadsEnabled).toBe(false);
+    expect(gatewayConfigFromEnv({ ...valid, MEDIA_GATEWAY_DOWNLOADS_ENABLED: "false" }).downloadsEnabled).toBe(false);
+    expect(gatewayConfigFromEnv({ ...valid, MEDIA_GATEWAY_DOWNLOADS_ENABLED: "" }).downloadsEnabled).toBe(false);
+    expect(gatewayConfigFromEnv({ ...valid, MEDIA_GATEWAY_DOWNLOADS_ENABLED: "true" }).downloadsEnabled).toBe(true);
+    for (const value of ["TRUE", "1", "yes", "on"]) expect(failures({ ...valid, MEDIA_GATEWAY_DOWNLOADS_ENABLED: value }), value).toEqual(["MEDIA_GATEWAY_DOWNLOADS_ENABLED"]);
+    // The switch changes nothing else in the configuration.
+    const { downloadsEnabled: on, ...withSwitch } = gatewayConfigFromEnv({ ...valid, MEDIA_GATEWAY_DOWNLOADS_ENABLED: "true" });
+    const { downloadsEnabled: off, ...without } = gatewayConfigFromEnv(valid);
+    expect([on, off]).toEqual([true, false]); expect(withSwitch).toEqual(without);
+  });
+
   it("refuses a short token secret", () => {
     expect(failures({ ...valid, MEDIA_GATEWAY_TOKEN_SECRET: Buffer.alloc(16).toString("base64url") })).toContain("MEDIA_GATEWAY_TOKEN_SECRET");
   });

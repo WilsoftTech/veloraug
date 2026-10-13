@@ -77,6 +77,8 @@ export interface HarnessOptions {
   /** Optional original-download adapter for the frontend fixture tests; never contacts Telegram. */
   downloads?: boolean;
   downloadAccess?: () => boolean;
+  /** The gateway's download switch. Defaults to on wherever the download adapter is installed. */
+  downloadsEnabled?: () => boolean;
   allowedOrigins?: readonly string[];
   beforeRead?: (offset: number, limit: number) => void;
   /** Defaults to the committed fixtures. */
@@ -141,7 +143,8 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
       return { bytes: bytes.subarray(0, bytesRead), rpcCount: 1 };
     },
   };
-  const gateway = createMediaGateway({ limits: limits(options.maxResponseBytes ?? HARNESS_MAX_RESPONSE_BYTES), tokenSecret: SECRET, resolver, reader, logger: SILENT, allowedOrigins: options.allowedOrigins, now: options.now, downloadLimits: options.downloadLimits });
+  const gateway = createMediaGateway({ limits: limits(options.maxResponseBytes ?? HARNESS_MAX_RESPONSE_BYTES), tokenSecret: SECRET, resolver, reader, logger: SILENT, allowedOrigins: options.allowedOrigins, now: options.now, downloadLimits: options.downloadLimits,
+    downloadsEnabled: options.downloadsEnabled ?? (() => options.downloads === true) });
   const page = await readFile(join(__dirname, "probe.html"));
   const requests: MediaRequest[] = [];
   const downloads: DownloadRequest[] = [];

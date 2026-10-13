@@ -50,6 +50,7 @@ npm run dev
 - Both read `.env.local`, so they share `MEDIA_GATEWAY_TOKEN_SECRET`. `MEDIA_GATEWAY_PUBLIC_ORIGIN` is the gateway's loopback origin (for example `http://127.0.0.1:8787`), and `MEDIA_GATEWAY_SESSION_FILE` names the existing reader session. The command never logs in to Telegram.
 - `npm run gateway:dev -- --stop` stops it; `-- --build` rebuilds the image after gateway code changes.
 - Without the gateway, Play shows "Playback is temporarily unavailable", and `npm run dev` prints a warning at startup.
+- Original-file downloads are off by default. They need `MEDIA_GATEWAY_DOWNLOADS_ENABLED=true` in `.env.local` (both commands read it; restart both after changing it) and a database with the download resolver. See [the download switch](docs/MP4_MKV_DOWNLOAD_EMERGENCY_STOP.md).
 - Open the app at `http://localhost:3000`. On another host name such as `127.0.0.1`, Next.js development refuses its dev connection and the page never becomes interactive, so Play does nothing.
 
 ## Password recovery

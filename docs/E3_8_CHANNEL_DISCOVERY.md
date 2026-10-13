@@ -304,3 +304,57 @@ The E3.8A end-to-end test uses real modules throughout: worker, persistence, ver
 - a GoTrue-backed run of the skipped watchlist case before launch.
 
 **E3.8A: PASS — DIRECT-CHANNEL REVIEW/PUBLICATION READY FOR CONTROLLED ROLLOUT** (isolated; migration 13 not deployed; listener not started).
+
+# Reviewer screen: media inspection (E3.9 Checkpoint 9, 2026-10-14)
+
+Local only, not deployed. Record: `MP4_MKV_CHECKPOINT_9.md`.
+
+`/admin/discovery/[id]` shows one **Media inspection** panel in place of the
+earlier "Readiness", "Container / gateway / browser" and "Media policy" rows.
+The same panel is on the admin upload detail page. It reads what the database
+recorded and decides nothing.
+
+What a reviewer sees:
+
+- **Four separate statuses**: media integrity, streaming readiness, browser
+  compatibility and download availability. Each has a short value, an icon and
+  one sentence of explanation.
+- **The file's facts**: original container (MP4 or MKV), original file name,
+  video codec, audio codec, number of audio tracks, number of subtitle tracks,
+  inspection policy version, inspection time, media class and the evidence
+  reference.
+- **Why the inspection did not pass**, in plain words, when a file was refused.
+- **Playback warnings** (for example Firefox and MKV, AC-3 audio, more than one
+  audio track, embedded subtitles) and a browser-by-browser list.
+
+How to read a status:
+
+| Shown | Meaning |
+| --- | --- |
+| Verified | The database records it as verified. Under the earlier MP4 policy this is the fast-start check; under Policy 3 nothing can record it yet |
+| Metadata consistent, not verified / Potentially playable, not verified | A Policy 3 inspection accepted the original file. That is recorded metadata from bounded reads. It is not verification and does not open the media gate |
+| Inspection incomplete / Not verified | The check could not read enough of the file (reader outage, timeout). Not a verdict on the file |
+| Failed | The file was refused. The reasons are listed |
+| Not assessed | Inspected under policy 1 or 2, which did not assess this separately |
+| Not reported | The database did not return this fact. On a database without migration `20261011192618` that is every Policy 3 fact |
+| Not inspected | No inspection evidence is recorded |
+
+A candidate whose Policy 3 inspection accepted the file shows **Verification
+pending** as its next step and sits in the "In progress" group: no reviewer
+action or new file moves it on. Reinspect stays available as a secondary action.
+
+**Publication gates** are listed as six requirements, each with its own state:
+media integrity verified, streaming readiness verified, film identity confirmed,
+VJ identity confirmed, rights clearance approved, final publication approval
+granted. They are laid out from the gates the database reports. Browser
+compatibility is not a gate. Approve and Publish are the same buttons as before,
+offered to the same capabilities, and the database checks every gate again.
+
+**Download availability** shows the web server's download switch
+(`MEDIA_GATEWAY_DOWNLOADS_ENABLED`): switched off, not available until
+published, or switched on. It is read-only: there is no control for it on any
+admin page. See `MP4_MKV_DOWNLOAD_EMERGENCY_STOP.md`.
+
+The screen names the source as "Movies channel, message N". It no longer prints
+the channel's numeric identifier, and it never shows a Telegram file identifier
+or a track title.

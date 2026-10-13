@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { createServer, request as httpRequest, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { DOWNLOAD_ENV_NAMES, DOWNLOAD_LIMITS, DOWNLOAD_MAX_DURATION_MS, DOWNLOAD_MAX_FILE_BYTES, downloadHeaders, downloadLimitsFromEnv, type DownloadLimits } from "@/lib/media-gateway/download";
+import { DOWNLOAD_ENV_NAMES, DOWNLOAD_LIMITS, DOWNLOAD_MAX_DURATION_MS, DOWNLOAD_MAX_FILE_BYTES, DOWNLOADS_ENABLED_ENV, downloadHeaders, downloadLimitsFromEnv, downloadsEnabledFromEnv, type DownloadLimits } from "@/lib/media-gateway/download";
 import { GatewayError } from "@/lib/media-gateway/errors";
 import { DEFAULT_LIMITS } from "@/lib/media-gateway/limits";
 import { createLogger } from "@/lib/media-gateway/log";
@@ -34,12 +34,13 @@ class DownloadResolver extends FakeResolver {
 }
 
 let server: Server | undefined;
-async function start(options: { reader?: FakeReader; resolver?: DownloadResolver; downloadLimits?: Partial<DownloadLimits>; limits?: Partial<typeof DEFAULT_LIMITS>; now?: () => number; clientIp?: (request: IncomingMessage) => string } = {}) {
+async function start(options: { reader?: FakeReader; resolver?: DownloadResolver; downloadLimits?: Partial<DownloadLimits>; limits?: Partial<typeof DEFAULT_LIMITS>; now?: () => number; clientIp?: (request: IncomingMessage) => string; downloadsEnabled?: () => boolean } = {}) {
   const reader = options.reader ?? new FakeReader();
   const resolver = options.resolver ?? new DownloadResolver();
   const logs: string[] = [];
   const gateway = createMediaGateway({ tokenSecret: SECRET, limits: { ...DEFAULT_LIMITS, ...options.limits },
-    reader, resolver, logger: createLogger(line => logs.push(line)), downloadLimits: options.downloadLimits, now: options.now, clientIp: options.clientIp });
+    reader, resolver, logger: createLogger(line => logs.push(line)), downloadLimits: options.downloadLimits, now: options.now, clientIp: options.clientIp,
+    downloadsEnabled: options.downloadsEnabled ?? (() => true) });
   server = createServer(gateway.handle);
   await new Promise<void>(resolve => server!.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -261,6 +262,77 @@ describe("download security and resource safety",()=>{
     expect(digest.digest('hex')).toBe(expected.digest('hex'));
     expect(received).toBe(128*1024*1024);expect(readCalls).toBe(128);expect(maxRead).toBe(1024*1024);
     expect(maxChunk).toBeLessThanOrEqual(2*1024*1024);expect(h.gateway.activeStreams).toBe(0);
+  });
+});
+
+// Checkpoint 9: the operator's download switch. It decides admission and nothing else.
+describe("download switch",()=>{
+  const OFF={status:503,body:'{"error":"downloads_disabled"}'};
+  const refused=async(url:string,headers:Record<string,string>={})=>{const r=await get(url,headers);return{status:r.response.status,body:Buffer.from(r.bytes).toString()};};
+  it("is off unless a deployment turns it on: a gateway built without the setting admits no download",async()=>{
+    const reader=new FakeReader(),resolver=new DownloadResolver(),logs:string[]=[];
+    const gateway=createMediaGateway({tokenSecret:SECRET,limits:DEFAULT_LIMITS,reader,resolver,logger:createLogger(line=>logs.push(line))});
+    server=createServer(gateway.handle);await new Promise<void>(resolve=>server!.listen(0,"127.0.0.1",resolve));
+    const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const token=signMediaToken(SECRET,{op:"download",movieVersionId:1,subject:SUBJECT,ttlSeconds:600,nowSeconds:Math.floor(Date.now()/1000)});
+    expect(await refused(`${base}/v1/movie-versions/1/download?token=${token}`)).toEqual(OFF);
+    expect(resolver.downloadCalls+resolver.calls+reader.calls).toBe(0);
+    expect(JSON.parse(logs[0])).toMatchObject({route:"download",status:503,code:"downloads_disabled",outcome:"denied"});
+  });
+  it("off: every download request gets the same refusal, whatever it carries, with no token, limiter, catalogue or media work",async()=>{
+    const h=await start({downloadsEnabled:()=>false,limits:{requestsPerSubjectPerWindow:1,requestsPerIpPerWindow:1}});
+    const etag='"x"';
+    for(const [url,headers] of [[h.url(),{}],[h.url(),{Range:"bytes=0-0"}],[h.url(),{Range:"bytes=100-","If-Range":etag}],[h.url(null),{}],[h.url(h.token()+"bad"),{}],
+      [h.url(h.token("stream")),{}],[h.url(h.token("download",2)),{}],[h.url(h.token("download",1,SUBJECT,Date.now()-700000)),{}],[`${h.url()}&chat_id=1`,{}],
+      [h.url(null),{Authorization:`Bearer ${h.token()}`}]] as const)expect(await refused(url,headers)).toEqual(OFF);
+    // Ten refusals with a limit of one request per window: the limiter was never consulted.
+    expect(h.resolver.downloadCalls+h.resolver.calls+h.reader.calls).toBe(0);expect(h.gateway.activeStreams).toBe(0);
+    expect(h.logs.join("")).not.toContain(h.token().slice(0,16));
+  });
+  it("off: streaming is unaffected",async()=>{
+    const h=await start({downloadsEnabled:()=>false});
+    const ranged=await get(h.url(h.token("stream"),1,"stream"),{Range:"bytes=0-1023"});
+    expect(ranged.response.status).toBe(206);expect(ranged.response.headers.get("content-disposition")).toBeNull();
+    expect(hash(ranged.bytes)).toBe(hash(expectedBytes(0,1024)));
+    expect((await get(h.url(h.token("stream"),1,"stream"))).response.status).toBe(400); // the stream route still requires a Range
+    expect((await fetch(`${h.base}/readyz`)).status).toBe(200);
+  });
+  it("on: every existing check still applies",async()=>{
+    const h=await start({downloadsEnabled:()=>true});
+    for(const [url,status] of [[h.url(null),401],[h.url(h.token()+"bad"),401],[h.url(h.token("stream")),403],[h.url(h.token("download",2)),403],
+      [h.url(h.token("download",1,SUBJECT,Date.now()-700000)),401]] as const)expect((await get(url)).response.status).toBe(status);
+    h.resolver.userAllowed=false;expect((await get(h.url())).response.status).toBe(404);
+    h.resolver.userAllowed=true;h.resolver.available=false;expect((await get(h.url())).response.status).toBe(404);
+    expect(h.reader.calls).toBe(0);
+    h.resolver.available=true;const full=await get(h.url());expect(full.response.status).toBe(200);expect(hash(full.bytes)).toBe(hash(expectedBytes(0,SIZE)));
+  });
+  it("turned off during a transfer: the running transfer completes byte-identical; a new request and a resume are refused",async()=>{
+    let enabled=true;
+    const h=await start({downloadsEnabled:()=>enabled,reader:new FakeReader({delayMs:40}),downloadLimits:{recheckMs:10}});
+    const t=h.token();const response=await fetch(h.url(t));expect(response.status).toBe(200);
+    enabled=false;
+    expect(await refused(h.url(t))).toEqual(OFF);
+    expect(await refused(h.url(t),{Range:"bytes=100-","If-Range":response.headers.get("etag")!})).toEqual(OFF);
+    expect(hash(new Uint8Array(await response.arrayBuffer()))).toBe(hash(expectedBytes(0,SIZE)));
+    expect(h.resolver.downloadCalls).toBeGreaterThan(1); // the running transfer stayed under its recheck
+    for(let n=0;n<40&&h.gateway.activeStreams;n++)await tick(5);
+    expect(h.gateway.activeStreams).toBe(0);
+    enabled=true;expect((await get(h.url(t),{Range:"bytes=0-0"})).response.status).toBe(206);
+  });
+  it.each(['userAllowed','available'] as const)("turned off during a transfer: %s revocation still ends the running transfer",async field=>{
+    let enabled=true;
+    const h=await start({downloadsEnabled:()=>enabled,reader:new FakeReader({delayMs:40}),downloadLimits:{recheckMs:10}});
+    const response=await fetch(h.url());expect(response.status).toBe(200);
+    enabled=false;h.resolver[field]=false;
+    await expect(response.arrayBuffer()).rejects.toThrow();
+    for(let n=0;n<40&&h.gateway.activeStreams;n++)await tick(5);
+    expect(h.gateway.activeStreams).toBe(0);expect(h.reader.inFlight).toBe(0);
+  });
+  it("reads only an exact true as on, and refuses anything that is neither true nor false",()=>{
+    expect(DOWNLOADS_ENABLED_ENV).toBe("MEDIA_GATEWAY_DOWNLOADS_ENABLED");
+    for(const value of [undefined,"","false"])expect(downloadsEnabledFromEnv({[DOWNLOADS_ENABLED_ENV]:value})).toBe(false);
+    expect(downloadsEnabledFromEnv({[DOWNLOADS_ENABLED_ENV]:"true"})).toBe(true);
+    for(const value of ["TRUE","True","1","yes","on"," true","true ","enabled"])expect(()=>downloadsEnabledFromEnv({[DOWNLOADS_ENABLED_ENV]:value}),value).toThrow();
   });
 });
 

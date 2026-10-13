@@ -73,6 +73,17 @@ export function streamCapabilityConfigFromEnv(env: Env = process.env): StreamCap
   return { secret, gatewayOrigin };
 }
 
+/**
+ * The download switch, on the issuing side. Off unless the variable is exactly
+ * `true`, and read on every call. Off, no download capability is issued to
+ * anyone; streaming does not read it. The gateway has the same switch for
+ * admission (lib/media-gateway/download.ts), so neither side alone turns
+ * downloads on. Server-only: the browser is told the result, never the setting.
+ */
+export function downloadsEnabled(env: Env = process.env): boolean {
+  return env.MEDIA_GATEWAY_DOWNLOADS_ENABLED === "true";
+}
+
 export function issueStreamCapability(config: StreamCapabilityConfig, grant: { movieVersionId: number; subject: string }, nowMs: number): StreamCapability {
   return issueCapability(config, grant, nowMs, "stream");
 }

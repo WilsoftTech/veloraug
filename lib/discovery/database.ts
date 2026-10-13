@@ -3,6 +3,7 @@ import { z } from "zod";
 import { detectDocument, newCandidate } from "@/lib/discovery/events";
 import { inspectCandidate, type CatalogueMatch, type InspectionPorts } from "@/lib/discovery/pipeline";
 import { candidateSchema, eventSchema, type ReviewCandidate, type ReviewVj } from "@/lib/discovery/model";
+import { browserProfile } from "@/lib/discovery/media-report";
 import { transientMediaFailure, type ChannelMediaEvidence } from "@/lib/discovery/media-verification";
 import type { DiscoveryPersistence } from "@/lib/discovery/worker";
 import { scoreCandidate } from "@/lib/ingestion/match";
@@ -247,7 +248,22 @@ const evidenceView = z.object({
   identity: z.string(), verified: z.boolean(), method: z.string(), scope: z.literal("bounded"), policy_version: z.number(), media_class: z.string(),
   reasons: z.array(z.string()), container: z.string().nullable(), video_codec: z.string().nullable(), audio_codec: z.string().nullable(),
   accessible: z.boolean(), gateway_compatible: z.boolean(), playback_ready: z.boolean(), bytes_read: z.number(), checked_at: stamp,
+  // Migration 20261011192618 (Policy 3). Absent on a database without it. A value that does not have the
+  // expected shape is dropped, so the page reports it as missing instead of failing or guessing.
+  integrity_status: z.string().max(60).optional().catch(undefined), streaming_status: z.string().max(60).optional().catch(undefined),
+  browser_profile: z.record(z.string(), z.unknown()).nullable().optional().catch(undefined),
+  tracks: z.array(z.object({ type: z.string() })).max(64).nullable().optional().catch(undefined),
+  warnings: z.array(z.string().max(100)).max(50).nullable().optional().catch(undefined),
+  publishable_media: z.boolean().optional().catch(undefined),
 });
+type EvidenceView = z.infer<typeof evidenceView>;
+/** The Policy 3 facts of an evidence row, or undefined when this database does not report them. */
+function mediaFacts(ev: EvidenceView) {
+  if (ev.integrity_status === undefined || ev.streaming_status === undefined) return undefined;
+  const count = (type: string) => (ev.tracks ? ev.tracks.filter((track) => track.type === type).length : null);
+  return { integrity: ev.integrity_status, streaming: ev.streaming_status, browsers: browserProfile(ev.browser_profile), audioTracks: count("audio"), subtitleTracks: count("subtitle"),
+    warnings: ev.warnings ?? [], publishable: ev.publishable_media === true };
+}
 const viewSchema = z.object({
   key: z.string(), revision: z.number().int().positive(), status: z.string(), error_code: z.string().nullable(), attempts: z.number().int(),
   first_seen: stamp, last_seen: stamp,
@@ -310,7 +326,8 @@ export function toCandidate(input: unknown): ReviewCandidate {
     evidence: ev ? { mediaKey: ev.identity.slice(4), container: ev.container === "mp4" && ev.media_class !== "unverified", gateway: ev.gateway_compatible,
       browser: ev.playback_ready, accessible: ev.accessible, checkedAt: ev.checked_at,
       reference: `${ev.method}: ${ev.bytes_read} bytes read (bounded check, not full-file integrity)`.slice(0, 200),
-      identity: ev.identity, mediaClass: ev.media_class, reasons: ev.reasons.slice(0, 50), video: ev.video_codec, audio: ev.audio_codec, bytesRead: ev.bytes_read } : null,
+      identity: ev.identity, mediaClass: ev.media_class, reasons: ev.reasons.slice(0, 50), video: ev.video_codec, audio: ev.audio_codec, bytesRead: ev.bytes_read,
+      policyVersion: ev.policy_version, containerName: ev.container, passed: ev.verified, facts: mediaFacts(ev) } : null,
     rights: view.rights ? { actor: view.rights.cleared_by, at: view.rights.cleared_at, reference: view.rights.reference, revision: view.rights.revision } : null,
     approval: view.approval ? { actor: view.approval.by, at: view.approval.at, revision: view.approval.revision } : null,
     uploaderSource: null, duplicateOf: view.duplicate_of,

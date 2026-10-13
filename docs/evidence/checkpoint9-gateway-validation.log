@@ -1,0 +1,40 @@
+isolated database: 17 migrations applied
+download boundary: 25 pgTAP assertions passed
+recorded hosted-equivalent 17 + download: stream definition/ACL unchanged, CP4/admin SQL not required
+isolated database: 26 migrations applied
+001_catalogue_access.test.sql: 64/64 passed
+002_watchlist.test.sql: 32/32 passed
+003_security_boundaries.test.sql: 30/30 passed
+004_watchlist_identity.test.sql: 40/40 passed
+005_ingestion_worker_boundary.test.sql: 92/92 passed
+006_ingestion_recovery_bounds.test.sql: 81/81 passed
+007_ingestion_movie_publication.test.sql: 77/77 passed
+008_media_gateway_boundary.test.sql: 66/66 passed
+009_direct_channel_publication.test.sql: 139/139 passed
+010_review_service_boundary.test.sql: 62/62 passed
+011_discovery_worker_role.test.sql: 9/9 passed
+012_admin_dashboard_actions.test.sql: 65/65 passed
+013_admin_upload_sessions.test.sql: 33/33 passed
+014_admin_upload_disk_chunks.test.sql: 18/18 passed
+015_admin_upload_inspection.test.sql: 15/15 passed
+016_admin_upload_r2.test.sql: 102/102 passed
+017_channel_media_inspection_recovery.test.sql: 66/66 passed
+018_original_media_evidence.test.sql: 43/43 passed
+019_admin_original_media_evidence.test.sql: 39/39 passed
+020_original_media_download.test.sql: 25/25 passed
+database suites: 20/20 passed, 1098 assertions
+mp4-h264-aac-faststart.mp4: original SHA-256, MIME, extension and filename passed through real restricted DB adapter + gateway
+mp4-h264-aac-moov-at-end.mp4: original SHA-256, MIME, extension and filename passed through real restricted DB adapter + gateway
+mp4-h264-mp3-faststart.mp4: original SHA-256, MIME, extension and filename passed through real restricted DB adapter + gateway
+mkv-h264-aac.mkv: original SHA-256, MIME, extension and filename passed through real restricted DB adapter + gateway
+mkv-h264-mp3.mkv: original SHA-256, MIME, extension and filename passed through real restricted DB adapter + gateway
+mkv-hevc-aac.mkv: original SHA-256, MIME, extension and filename passed through real restricted DB adapter + gateway
+mp4-hevc-aac-faststart.mp4: original SHA-256, MIME, extension and filename passed through real restricted DB adapter + gateway
+mp4-h264-aac-two-audio.mp4: original SHA-256, MIME, extension and filename passed through real restricted DB adapter + gateway
+mkv-h264-aac-two-audio.mkv: original SHA-256, MIME, extension and filename passed through real restricted DB adapter + gateway
+mp4-h264-aac-subtitles.mp4: original SHA-256, MIME, extension and filename passed through real restricted DB adapter + gateway
+mkv-h264-aac-subtitles.mkv: original SHA-256, MIME, extension and filename passed through real restricted DB adapter + gateway
+mp4-h264-ac3-faststart.mp4: original SHA-256, MIME, extension and filename passed through real restricted DB adapter + gateway
+mkv-h264-ac3.mkv: original SHA-256, MIME, extension and filename passed through real restricted DB adapter + gateway
+real Postgres query cancellation passed before statement timeout; original RPC restored in disposable DB
+restricted adapter revocation/unpublished denials: no media reads; 13 original fixtures passed; max read buffer 326656

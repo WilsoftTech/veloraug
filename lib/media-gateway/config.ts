@@ -5,7 +5,7 @@
  * NEXT_PUBLIC_). The Next.js application reads only the shared token secret, to
  * issue stream capabilities (E2: lib/playback/stream-capability.ts).
  */
-import { downloadLimitsFromEnv, type DownloadLimits } from "@/lib/media-gateway/download";
+import { DOWNLOADS_ENABLED_ENV, downloadLimitsFromEnv, downloadsEnabledFromEnv, type DownloadLimits } from "@/lib/media-gateway/download";
 import { limitsFromEnv, type GatewayLimits } from "@/lib/media-gateway/limits";
 import { GATEWAY_DATABASE_ROLE } from "@/lib/media-gateway/resolver-sql";
 import { parseMediaTokenSecret } from "@/lib/media-gateway/token";
@@ -21,6 +21,8 @@ export interface GatewayConfig {
   limits: GatewayLimits;
   /** Download settings the operator tightened; absent keys keep the defaults (lib/media-gateway/download.ts). */
   downloadLimits: Partial<DownloadLimits>;
+  /** The download switch. False unless the operator set it to exactly `true`. */
+  downloadsEnabled: boolean;
   telegram: {
     apiId: number;
     apiHash: string;
@@ -96,6 +98,13 @@ export function gatewayConfigFromEnv(env: Env): GatewayConfig {
     bad.push("MEDIA_GATEWAY_DOWNLOAD_* limits");
   }
 
+  let downloadsEnabled = false;
+  try {
+    downloadsEnabled = downloadsEnabledFromEnv(env);
+  } catch {
+    bad.push(DOWNLOADS_ENABLED_ENV);
+  }
+
   if (bad.length > 0 || !limits || !downloadLimits || !secret) throw new GatewayConfigError(bad);
   return {
     host,
@@ -107,6 +116,7 @@ export function gatewayConfigFromEnv(env: Env): GatewayConfig {
     allowedOrigins: origins,
     limits,
     downloadLimits,
+    downloadsEnabled,
     telegram: { apiId, apiHash, readerBotId, readerUsername, readerBotToken, moviesChannelId, ingestionBotIds },
   };
 }

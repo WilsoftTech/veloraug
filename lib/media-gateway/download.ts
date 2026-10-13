@@ -43,6 +43,21 @@ export function downloadLimitsFromEnv(env: Record<string, string | undefined>): 
   return limits;
 }
 
+/**
+ * The download switch, on the admission side. Off unless the variable is exactly
+ * `true`; unset, empty and `false` are off, and any other value fails closed
+ * (throws), so a typing mistake cannot turn downloads on. Off, the gateway
+ * admits no download request. The issuer has the same switch for capabilities
+ * (lib/playback/stream-capability.ts). Streaming does not read it.
+ */
+export const DOWNLOADS_ENABLED_ENV = "MEDIA_GATEWAY_DOWNLOADS_ENABLED";
+export function downloadsEnabledFromEnv(env: Record<string, string | undefined>): boolean {
+  const raw = env[DOWNLOADS_ENABLED_ENV];
+  if (raw === undefined || raw === "" || raw === "false") return false;
+  if (raw === "true") return true;
+  throw new Error(`${DOWNLOADS_ENABLED_ENV} must be true or false`);
+}
+
 export function downloadHeaders(locator: MediaLocator) {
   const extension = locator.mimeType === "video/mp4" ? "mp4" : locator.mimeType === "video/x-matroska" ? "mkv" : null;
   if (!extension || locator.fileSize > DOWNLOAD_MAX_FILE_BYTES) throw new GatewayError("version_unavailable");

@@ -4,7 +4,10 @@ import { z } from "zod";
 import { Field } from "@/components/form-field";
 import { buttonClass } from "@/components/button";
 import { AdminUploadTransfer } from "@/components/admin-upload-transfer";
-import { canEditUpload } from "@/lib/uploader/admin-upload";
+import { MediaVerification } from "@/components/media-verification";
+import { mediaReport } from "@/lib/discovery/media-report";
+import { downloadsEnabled } from "@/lib/playback/stream-capability";
+import { canEditUpload, uploadMedia } from "@/lib/uploader/admin-upload";
 import { cancelUploadAction, refreshUploadPagesAction, retryUploadAction, saveUploadAction,reviewUploadAction } from "../actions";
 import { uploadClient } from "@/lib/uploader/admin-runtime";
 
@@ -15,9 +18,12 @@ export default async function UploadPage({ params, searchParams }: { params: Pro
   const session = await (await uploadClient()).get(id);
   const { result } = await searchParams;
   const flow=session.pipeline;
+  const media=session.inspection ? mediaReport(uploadMedia(session), { enabled: downloadsEnabled(), published: session.stage==="published" && !!flow?.approved }) : null;
+  // A Policy 3 inspection that accepted the file is waiting for verification; it has not failed.
+  const refused=session.inspection ? session.inspection.classification.policyVersion<3 || media!.statuses.some((status)=>status.tone==="failed") : false;
   const statuses=[
     ["Upload",session.bytes_received===session.size_bytes?"Completed":session.stage==="failed"?"Failed":["draft","cancelled"].includes(session.stage)?session.stage:session.stage==="uploading"?"Uploading / paused":"Pending"],
-    ["Media",flow?.media_verified?"Verified":session.inspection || session.stage==="failed"?"Failed":session.stage==="inspecting"?"Verifying":"Awaiting verification"],
+    ["Media",flow?.media_verified?"Verified":refused || session.stage==="failed"?"Failed":session.stage==="inspecting"?"Verifying":"Awaiting verification"],
     ["Telegram",flow?.stored?"Stored":["upload_failed","blocked"].includes(flow?.telegram_status??"")?"Failed":session.stage==="telegram_uncertain"?"Reconciling uncertain transfer":session.stage==="telegram_uploading"?"Transferring":"Pending transfer"],
     ["Rights",flow?.rights_rejected?"Rejected":flow?.rights_cleared?"Cleared":flow?.rights_expires_at?"Expired / revoked":session.stage==="awaiting_rights"?"Under review":"Awaiting clearance"],
     ["Publication",session.stage==="published" && flow?.approved?"Published":flow?.approved?"Ready":"Blocked"],
@@ -30,7 +36,9 @@ export default async function UploadPage({ params, searchParams }: { params: Pro
     {result && <p role="status" className="mt-4 text-body-sm">{result === "blocked" ? "The change was blocked. Refresh and check your permissions and current status." : result === "cancelled" ? "Upload cancelled. Staging cleanup is pending." : result==="retrying" ? "Processing retry queued." : result==="refreshed" ? "Public catalogue pages were refreshed." : "Draft saved."}</p>}
     {session.error_code && <p role="alert" className="mt-4 text-body-sm text-destructive">{session.error_code.replaceAll("_"," ")}</p>}
     {["draft","uploading"].includes(session.stage) && <AdminUploadTransfer id={id} fileName={session.file_name} sizeBytes={session.size_bytes} storage={session.storage} parallelism={Number(process.env.VELORA_UPLOAD_PARALLEL_PARTS ?? 3)} />}
-    {session.inspection && <p className="mt-4 text-body-sm text-muted">Media inspection: {session.inspection.classification.class.replaceAll("_"," ")}{session.inspection.classification.reasons.length ? ` (${session.inspection.classification.reasons.join(", ")})` : ""}</p>}
+    {session.inspection && media && <div className="mt-6 max-w-3xl"><MediaVerification report={media}>
+      <div className="contents"><dt className="text-muted">Media class</dt><dd>{session.inspection.classification.class.replaceAll("_"," ")}</dd></div>
+    </MediaVerification></div>}
     {session.stage==="failed" && session.retryable && <form action={retryUploadAction} className="mt-4"><input type="hidden" name="id" value={id} /><input type="hidden" name="revision" value={session.revision} /><button className={buttonClass("secondary")}>Retry processing</button></form>}
     <form action={saveUploadAction} className="mt-6 max-w-xl space-y-5">
       <input type="hidden" name="id" value={id} /><input type="hidden" name="revision" value={session.revision} />

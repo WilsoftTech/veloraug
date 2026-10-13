@@ -51,11 +51,30 @@ const REASONS: Record<string, string> = {
   no_audio: "The file has no audio stream.",
   multiple_video_streams: "The file has more than one video stream.",
   multiple_audio_streams: "The file has more than one audio stream.",
+  // Policy 3 (original MP4 and MKV files).
+  container_not_mp4_or_mkv: "The file is neither an MP4 nor an MKV.",
+  container_not_matroska: "The file says it is Matroska but is another format (for example WebM).",
+  container_extension_mismatch: "The file's extension does not match its container.",
+  mp4_brand_unconfirmed: "The file does not identify itself as an MP4 (for example a QuickTime file).",
+  mp4_index_missing: "The MP4 has no index.",
+  size_mismatch: "The file's size does not match what its container reports.",
+  duration_unknown: "The file does not report a duration.",
+  video_metadata_incomplete: "The video track is missing its codec or dimensions.",
+  audio_metadata_incomplete: "An audio track is missing its codec, channels or sample rate.",
+  track_codec_unknown: "A track has no recognisable codec.",
 };
 export const reasonText = (code: string): string => REASONS[code] ?? `Not accepted by the media policy: ${code.replaceAll("_", " ")}.`;
 
 const verified = (candidate: ReviewCandidate): boolean =>
   Boolean(candidate.evidence?.browser && candidate.evidence.container && candidate.evidence.gateway && candidate.evidence.accessible);
+
+/**
+ * A Policy 3 inspection that accepted the original file. That is recorded
+ * metadata, not verification: the media gate stays closed, and no reviewer
+ * action or new file opens it.
+ */
+export const verificationPending = (candidate: ReviewCandidate): boolean =>
+  candidate.evidence?.policyVersion === 3 && candidate.evidence.facts !== undefined && !candidate.evidence.facts.publishable && (candidate.evidence.reasons ?? []).length === 0;
 
 /**
  * What the last inspection could not do, or null. A failed attempt is named by
@@ -64,7 +83,7 @@ const verified = (candidate: ReviewCandidate): boolean =>
 export function lastFailure(candidate: ReviewCandidate): string | null {
   const last = candidate.lastInspection;
   if ((candidate.status === "failed" || inspectionExhausted(candidate)) && last?.action === "inspection_failed" && last.detail) return reasonText(last.detail);
-  if (candidate.evidence && !verified(candidate)) {
+  if (candidate.evidence && !verified(candidate) && !verificationPending(candidate)) {
     const reasons = candidate.evidence.reasons ?? [];
     return reasons.length ? reasons.slice(0, 3).map(reasonText).join(" ") : "The file did not pass the media policy.";
   }
@@ -106,6 +125,7 @@ export function guidance(candidate: ReviewCandidate): ReviewGuidance {
   if (status === "awaiting_vj") return { group: "action", label: "Choose the VJ", next: "The film is confirmed. Pick the VJ, then confirm." };
   if (status === "awaiting_media") {
     if (!mediaCheckAvailable(candidate)) return { group: "progress", label: "Waiting for media check", next: "Film and VJ are confirmed. The file still has to pass the automatic media check before it can be published." };
+    if (verificationPending(candidate)) return { group: "progress", label: "Verification pending", next: "The original file was inspected and its metadata is consistent. Integrity and streaming are not verified yet, and nothing here can verify them, so it cannot be published. Film and VJ stay confirmed." };
     // Nothing runs by itself here: a check is requested by a reviewer, and a file outside the policy needs replacing.
     return candidate.evidence ? { group: "action", label: "Media check failed", next: `${failure ?? "The file did not pass the media policy."} Film and VJ stay confirmed. Run the check again once the file is fixed.` }
       : { group: "action", label: "Media check needed", next: `${failure ? `${failure} ` : ""}Film and VJ are confirmed. Run the media check: it reads the file's index from Telegram and does not change the post.` };

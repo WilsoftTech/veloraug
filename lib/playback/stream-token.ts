@@ -32,6 +32,7 @@ export type StreamTokenError =
   | "not_entitled"
   | "unavailable"
   | "rate_limited"
+  | "downloads_disabled"
   | "temporarily_unavailable";
 
 const STATUS: Record<StreamTokenError, number> = {
@@ -43,6 +44,7 @@ const STATUS: Record<StreamTokenError, number> = {
   not_entitled: 403,
   unavailable: 404,
   rate_limited: 429,
+  downloads_disabled: 503,
   temporarily_unavailable: 503,
 };
 
@@ -55,6 +57,8 @@ export interface StreamTokenDeps {
   loadConfig(): StreamCapabilityConfig;
   now?: () => number;
   limiter?: WindowRateLimiter;
+  /** The download switch, read on every download request. Omitted: no download capability is issued. Streaming ignores it. */
+  downloadsEnabled?: () => boolean;
 }
 
 const NO_STORE = { "Cache-Control": "no-store" } as const;
@@ -74,6 +78,8 @@ export function createStreamTokenHandler(deps: StreamTokenDeps, operation: "stre
     const site = request.headers.get("sec-fetch-site");
     if (site && site !== "same-origin") return fail("forbidden");
     if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) return fail("unsupported_media_type");
+    // Off, nothing below runs: no session is read, no catalogue is asked and nothing is signed.
+    if (operation === "download" && !deps.downloadsEnabled?.()) return fail("downloads_disabled");
 
     let config: StreamCapabilityConfig;
     try {

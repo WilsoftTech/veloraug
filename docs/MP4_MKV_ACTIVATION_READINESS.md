@@ -2,6 +2,8 @@
 
 Prepared at Checkpoint 7, 2026-10-12. Sections 3, 5, 7, 10, 11 and 13 were updated
 and section 14 added at Checkpoint 8 and its final verification, 2026-10-13.
+Sections 2, 3, 5, 6, 7 and 13 were updated and section 15 added at Checkpoint 9,
+2026-10-14 (the download switch and the admin media dashboard).
 **Nothing in this list has been activated.**
 It is the list to work through, with separate approval for each live step, before
 original-file playback facts and downloads go live. It records what is already
@@ -109,13 +111,19 @@ hosted 17 ──► 1 ► 2 ► 3 ► 4 ► 5 ► 6 ──┴──► 8 admin P
   | All three in place | 206 | Download starts |
 
   Deploy in the order database, gateway, web to avoid the misleading messages.
+  Since Checkpoint 9 the button itself is behind the download switch
+  (section 5): with the web side's switch off there is no button, and with it
+  on and the gateway's off the probe gets 503 and the viewer sees "temporarily
+  unavailable".
 - [ ] **Open.** After activation the two published titles will most likely still
   show "untested": the profile returns facts only for versions with recorded
   inspection evidence, and both were published through the command-line uploader,
   which records none in the database. Confirm with a read-only check, then decide
   whether that is acceptable.
-- [ ] **Open.** The developer `next dev` server hot-reloads this tree against
-  hosted data. Until activation it shows the Download button to signed-in users.
+- [x] **Closed at Checkpoint 9.** The developer `next dev` server hot-reloads
+  this tree against hosted data. It no longer shows a Download button: the
+  control is rendered only when `MEDIA_GATEWAY_DOWNLOADS_ENABLED=true` is in the
+  web server's environment, and the issuer refuses without it.
 
 ## 3. Gateway deployment
 
@@ -189,16 +197,20 @@ variable, never its value.
 | `MEDIA_GATEWAY_DOWNLOAD_MAX_ACTIVE` | No | Downloads at once, 4 | New. 1 to 4. Can only be lowered |
 | `MEDIA_GATEWAY_DOWNLOAD_MAX_PER_USER` | No | Downloads at once per user, 1 | New. Only 1 is accepted |
 | `MEDIA_GATEWAY_DOWNLOAD_MAX_PER_IP` | No | Downloads at once per address, 2 | New. 1 to 2. Can only be lowered |
+| `MEDIA_GATEWAY_DOWNLOADS_ENABLED` | No | The download switch: whether the download route admits anything | Checkpoint 9. Off unless exactly `true`; unset, empty and `false` are off; any other value stops startup. Read at startup only |
 
-Web side (Next.js server): `MEDIA_GATEWAY_TOKEN_SECRET`, the same value, and
-`MEDIA_GATEWAY_PUBLIC_ORIGIN`, the gateway's public HTTPS origin.
+Web side (Next.js server): `MEDIA_GATEWAY_TOKEN_SECRET`, the same value,
+`MEDIA_GATEWAY_PUBLIC_ORIGIN`, the gateway's public HTTPS origin, and
+`MEDIA_GATEWAY_DOWNLOADS_ENABLED`, the same switch for issuing download
+capabilities and for showing the Download control (off unless exactly `true`;
+read on every request). Both sides must be on for a download to start.
 
 Not configurable, by design: the capability lifetime (600 s, set by the issuer),
 the download recheck interval (30 s), its authorization deadline (5 s) and the
 download read-ahead (1).
 
-- [ ] **Open.** `.env.example` lists none of the four download settings, and its
-  comment on the database role still names one function. It carries an unrelated
+- [ ] **Open.** `.env.example` lists none of the four download settings or the
+  download switch, and its comment on the database role still names one function. It carries an unrelated
   uncommitted edit that is kept out of commits, so it was not touched.
 - [ ] **Open.** There is no trusted-proxy setting. See the item above and
   `MP4_MKV_CHECKPOINT_8.md`, section 4.
@@ -234,11 +246,19 @@ download read-ahead (1).
 - [ ] **Open.** Gateway rollback is redeploying the previous image. The streaming
   contract is unchanged, so playback continues. Downloads then answer 404.
 - [ ] **Open.** Web rollback is redeploying the previous build.
-- [ ] **Open, gap.** There is **no runtime switch** for downloads. Since
-  Checkpoint 8 the download limits can be lowered by configuration, but not to
-  zero: the smallest setting still allows one download. The ways to stop
-  downloads are listed below. Decide whether a switch is wanted before
-  activation.
+- [x] **Implemented locally at Checkpoint 9 (2026-10-14), not deployed: the
+  download switch.** `MEDIA_GATEWAY_DOWNLOADS_ENABLED`, off unless exactly
+  `true`, enforced on the server in two places: the web application issues no
+  download capability, and the gateway admits no download request. It decides
+  admission only and never ends a running transfer. Streaming does not read it.
+  The procedure, with what each stop interrupts, is in
+  `MP4_MKV_DOWNLOAD_EMERGENCY_STOP.md`.
+- [ ] **Open, limit of the switch.** The gateway reads it at startup, so
+  changing the gateway's copy needs a restart, which cuts running transfers and
+  interrupts playback after the 15-second grace. The web side's copy is the
+  quiet stop: no new capability from the next deployment, and admission ends
+  within the 10 minutes an issued capability lasts. A switch the gateway could
+  change while running was not built.
 - [ ] **Open.** Listener rollback is the base compose file with the `gate-b`
   image, as done on 2026-10-11.
 - [ ] **Open, Checkpoint 8: rolling the continuation change back.** It is gateway
@@ -261,6 +281,9 @@ download read-ahead (1).
      failed recheck ends the transfer) and has not been rehearsed.
   Rotating `MEDIA_GATEWAY_TOKEN_SECRET` invalidates every link but **does not
   stop a running transfer**. Playback links fail too, and each player renews once.
+  Since Checkpoint 9 the download switch is the way to stop *new* downloads
+  without any of these; it does not end a running one either
+  (`MP4_MKV_DOWNLOAD_EMERGENCY_STOP.md`).
 - [ ] **Open, recovery after a restart or an outage.** Nothing is persisted about
   transfers, so there is nothing to repair. Viewers press Resume/Retry Download.
   Their browser may continue the partial file only while the old link is inside
@@ -273,9 +296,12 @@ download read-ahead (1).
 - [x] **Proven.** `GET /healthz` is process liveness. `GET /readyz` is 200 only
   when the reader can serve and the catalogue connection is the restricted role.
 - [ ] **Open, gap.** `/readyz` does not cover downloads. A gateway is "ready"
-  with migration 9 absent. Add a post-deploy smoke check: issue one download
-  capability for a published version and expect `206` with `Content-Range:
-  bytes 0-0/<size>` for `Range: bytes=0-0`.
+  with migration 9 absent, and "ready" with the download switch off. Add a
+  post-deploy smoke check: issue one download capability for a published
+  version and expect `206` with `Content-Range: bytes 0-0/<size>` for
+  `Range: bytes=0-0`. With the switch off the expected answer is
+  `503 {"error":"downloads_disabled"}` and the startup log line
+  `event=downloads state=disabled`.
 - [ ] **Open.** Post-deploy playback smoke check on both published titles:
   play, seek, pause, resume, all responses 206 of at most 8 MiB.
 - [ ] **Open.** Listener `/readyz` on port 8790 and upload worker `/health` on
@@ -295,6 +321,7 @@ download read-ahead (1).
   | `authorization_expired` on downloads | Resume attempts with a link older than ten minutes (section 11). Expected in small numbers; many means viewers are losing partial files |
   | `outcome=timeout` on `route=download` near 14,400,000 ms | Transfers hitting the four-hour maximum |
   | `too_many_streams`, `rate_limited` | Limits too tight, or a proxy collapsing addresses |
+  | `code=downloads_disabled` on `route=download` | Requests refused by the download switch. Expected while it is off; any after it is turned on means the gateway was not restarted with the new value |
   | `flood_wait`, `telegram_unavailable`, `mtproto_disconnected` | Telegram throttling or reader loss |
   | `catalogue_state` changes | Database unreachable or wrong identity |
   | `upstream_timeout` | Slow uplink or slow Telegram reads |
@@ -502,7 +529,10 @@ has a recorded result.
    including I1, I3, I4, I5 and I9, and a measured whole-file transfer.
 7. **Web deployment.** Until this step no viewer sees a Download button that
    works. Deploy database, gateway, web in that order (section 2).
-8. **Watch the signals in section 7** for the first transfers. Be ready to stop
+8. **Turn the download switch on**, gateway first and then the web application
+   (`MP4_MKV_DOWNLOAD_EMERGENCY_STOP.md`). Steps 5 and 7 can be deployed with the
+   switch off: nothing about downloads is reachable until both sides are on.
+9. **Watch the signals in section 7** for the first transfers. Be ready to stop
    them by the means in section 5.
 
 Independent of downloads, and each its own approval: migration 7 and then the
@@ -545,3 +575,44 @@ separately approved (Gate C of the original brief).
 - [ ] **Open.** Sustained whole-file reads are new traffic for the reader's
   session. Their effect on flood waits, and on the listener's own bounded reads
   if both ever share a reader, is not measured. Today they use separate sessions.
+
+## 15. Admin media dashboard (Checkpoint 9)
+
+Implemented locally on 2026-10-14, not deployed. Record:
+`MP4_MKV_CHECKPOINT_9.md`.
+
+- [x] **Proven locally.** The reviewer screen (`/admin/discovery/[id]`) and the
+  upload detail page show one media panel: original container and file name,
+  video and audio codec, audio and subtitle track counts, inspection policy and
+  time, and four separate statuses (media integrity, streaming readiness, browser
+  compatibility, download availability), with failure reasons and playback
+  warnings. A value the database did not report is shown as "Not reported", a
+  file with no evidence as "Not inspected", and neither is shown as verified.
+- [x] **Proven locally.** The publication gates are listed as six separate
+  requirements. Browser compatibility is not one of them. The screen adds no
+  approval or publication path: the buttons, the capabilities and the database
+  checks behind them are unchanged.
+- [x] **Proven on the hosted-equivalent 17 migrations** (disposable database,
+  `scripts/checkpoint9-validation.mts`). The screen needs no migration: it reads
+  container, codecs, policy version, inspection time, reasons and the earlier
+  policies' verdict from the existing reviewer view, and reports every Policy 3
+  fact as not reported.
+- [ ] **Needs migration 7** (`20261011192618_original_media_evidence`): the
+  separate integrity and streaming statuses, the browser profile, the track
+  counts and the playback warnings for channel candidates.
+- [ ] **Needs migrations 1 to 6 and 8** for the same on the admin upload page
+  (the page itself is behind `VELORA_ADMIN_UPLOADS_ENABLED`). Inspection time is
+  not in the upload readback and shows as "Not reported".
+- [ ] **Open, by design of Checkpoint 4.** After migration 7 a new original
+  shows "Metadata consistent, not verified" and "Potentially playable, not
+  verified", and the screen says "Verification pending". Nothing can move it to
+  verified until the verification contract of section 12 exists.
+- [ ] **Open.** The seven backlog candidates keep their recorded results. After
+  migration 7 the screen shows them as inspected under policy 2 (message 50:
+  streaming failed, integrity not assessed). It does not re-judge them.
+- [ ] **Open, not tested.** The screen has been rendered only with synthetic
+  candidates: unit tests, six automated browser projects on Windows, and real
+  reviewer RPCs in disposable databases. It has not been opened against hosted
+  data, in Safari, or on a phone.
+- [x] **Changed at Checkpoint 9.** The reviewer screen no longer prints the
+  Movies channel's numeric identifier; it says "Movies channel, message N".

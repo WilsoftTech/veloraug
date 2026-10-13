@@ -24,7 +24,7 @@ interface Harness {
 }
 let current: Harness | null = null;
 
-async function start(options: { limits?: Partial<GatewayLimits>; reader?: FakeReader; resolver?: FakeResolver } = {}): Promise<Harness> {
+async function start(options: { limits?: Partial<GatewayLimits>; reader?: FakeReader; resolver?: FakeResolver; downloadsEnabled?: () => boolean } = {}): Promise<Harness> {
   const reader = options.reader ?? new FakeReader();
   const resolver = options.resolver ?? new FakeResolver();
   const logs: string[] = [];
@@ -34,6 +34,7 @@ async function start(options: { limits?: Partial<GatewayLimits>; reader?: FakeRe
     resolver,
     reader,
     logger: createLogger((line) => logs.push(line)),
+    downloadsEnabled: options.downloadsEnabled ?? (() => true),
   });
   const server = createServer(gateway.handle);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

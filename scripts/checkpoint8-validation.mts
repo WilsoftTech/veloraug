@@ -70,7 +70,7 @@ try {
   };
   let clockOffsetMs = 0;
   const now = () => Date.now() + clockOffsetMs;
-  const gateway = createMediaGateway({ tokenSecret: secret, limits: DEFAULT_LIMITS, resolver, reader, now, downloadLimits: { recheckMs: RECHECK_MS },
+  const gateway = createMediaGateway({ tokenSecret: secret, limits: DEFAULT_LIMITS, resolver, reader, now, downloadLimits: { recheckMs: RECHECK_MS }, downloadsEnabled: () => true,
     logger: { info() {}, warn() {}, error() {} } });
   const server = createServer(gateway.handle);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

@@ -29,6 +29,8 @@ interface MoviePlayerProps {
   versions: PlayableVersion[];
   /** Where a signed-out viewer goes to sign in (the existing sign-in page, returning here). */
   signInHref: string;
+  /** The server's download switch. Off, no Download control is shown. The server refuses downloads whatever this says. */
+  downloads: boolean;
 }
 
 const STATUS_TEXT: Partial<Record<string, string>> = {
@@ -48,7 +50,7 @@ const serverAgent = () => null;
  * so the player renews shortly before expiry while playing, and on resume or
  * after a network error, by swapping the source at the same position.
  */
-export function MoviePlayer({ versions, signInHref }: MoviePlayerProps) {
+export function MoviePlayer({ versions, signInHref, downloads }: MoviePlayerProps) {
   const [versionId, setVersionId] = useState(() => defaultVersion(versions)?.id ?? null);
   const [state, dispatch] = useReducer(playerReducer, INITIAL_PLAYER_STATE);
   const session = useSession();
@@ -213,7 +215,7 @@ export function MoviePlayer({ versions, signInHref }: MoviePlayerProps) {
   }, [session]);
 
   const startDownload = async () => {
-    if (versionId === null || session !== "signed-in" || downloadRequest.current) return;
+    if (!downloads || versionId === null || session !== "signed-in" || downloadRequest.current) return;
     const controller = new AbortController();
     downloadRequest.current = controller;
     setDownload((previous) => ({ ...previous, busy: true, attempted: true, failure: null, handedOff: false }));
@@ -243,7 +245,7 @@ export function MoviePlayer({ versions, signInHref }: MoviePlayerProps) {
           {busy ? "Starting…" : "Play"}
         </button>
       )}
-      {session === "signed-in" && (
+      {downloads && session === "signed-in" && (
         <button type="button" onClick={() => void startDownload()} disabled={download.busy} className={buttonClass(compatibility.blocked || state.status === "error" ? "primary" : "secondary")}>
           <Download aria-hidden className="size-4" />
           {download.busy ? "Preparing download…" : download.attempted ? "Resume/Retry Download" : "Download"}
@@ -281,7 +283,7 @@ export function MoviePlayer({ versions, signInHref }: MoviePlayerProps) {
           <p>{compatibility.message}</p>
           {compatibility.warnings.map((warning) => <p key={warning}>{warning}</p>)}
         </div>
-        {session === "signed-in" && <p className="mb-3 text-body-sm text-muted">{DOWNLOAD_GUIDANCE}</p>}
+        {downloads && session === "signed-in" && <p className="mb-3 text-body-sm text-muted">{DOWNLOAD_GUIDANCE}</p>}
         {download.handedOff && <p role="status" className="mb-3 text-body-md">{download.format} download handed to your browser. Check its download manager for progress or interruptions.</p>}
         {download.failure && <div role="alert" className="mb-3 flex flex-wrap items-center gap-3 rounded-default border border-destructive/40 px-4 py-3 text-body-md">
           <span className="text-destructive">{DOWNLOAD_MESSAGES[download.failure]}</span>

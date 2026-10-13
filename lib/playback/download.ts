@@ -1,4 +1,4 @@
-export type DownloadFailure = "auth_required" | "not_entitled" | "unavailable" | "expired" | "network" | "temporarily_unavailable";
+export type DownloadFailure = "auth_required" | "not_entitled" | "unavailable" | "expired" | "network" | "temporarily_unavailable" | "disabled";
 export const DOWNLOAD_MESSAGES: Record<DownloadFailure, string> = {
   auth_required: "Sign in again to download or continue this movie.",
   not_entitled: "Download access has been revoked or is not included for this account.",
@@ -6,6 +6,7 @@ export const DOWNLOAD_MESSAGES: Record<DownloadFailure, string> = {
   expired: "The download link expired before it could be used. Resume/Retry Download requests fresh authorization.",
   network: "Could not reach the download service. Check your connection, then use Resume/Retry Download.",
   temporarily_unavailable: "Download is temporarily unavailable. Try again in a moment.",
+  disabled: "Downloads are switched off at the moment.",
 };
 // The gateway lets a transfer that started inside the link's ten minutes run on, up to four hours
 // (lib/media-gateway/download.ts). Only starting or resuming needs a link that has not expired.
@@ -26,6 +27,11 @@ export async function prepareDownload(movieVersionId: number, fetchImpl: (input:
       if (response.status === 401) return { ok: false, failure: "auth_required" };
       if (response.status === 403) return { ok: false, failure: "not_entitled" };
       if (response.status === 404) return { ok: false, failure: "unavailable" };
+      if (response.status === 503) {
+        // The issuer's download switch is off (server-side; the page only reports it).
+        const refusal: unknown = await response.json().catch(() => null);
+        return { ok: false, failure: refusal && typeof refusal === "object" && (refusal as Record<string, unknown>).error === "downloads_disabled" ? "disabled" : "temporarily_unavailable" };
+      }
       if (response.status !== 200) return { ok: false, failure: "temporarily_unavailable" };
       let body: unknown;
       try { body = await response.json(); } catch { return { ok: false, failure: "temporarily_unavailable" }; }

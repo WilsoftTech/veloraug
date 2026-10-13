@@ -63,6 +63,7 @@ const gatedReader: MediaReader = {
 const gateway = createMediaGateway({
   limits: config.limits,
   downloadLimits: config.downloadLimits,
+  downloadsEnabled: () => config.downloadsEnabled,
   tokenSecret: config.tokenSecret,
   resolver,
   reader: gatedReader,
@@ -73,6 +74,7 @@ const gateway = createMediaGateway({
 const server = createServer({ headersTimeout: 15_000, requestTimeout: 30_000, keepAliveTimeout: 5_000 }, gateway.handle);
 // requestTimeout bounds receiving the request only; response time is bounded by the gateway's own limits.
 server.listen(config.port, config.host, () => logger.info({ event: "listening", state: "starting" }));
+logger.info({ event: "downloads", state: config.downloadsEnabled ? "enabled" : "disabled" });
 
 const TRANSIENT = new Set(["starting", "connecting"]);
 let stopping = false;

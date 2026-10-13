@@ -3,6 +3,7 @@ import { requireReviewAdmin, offlineReviewRuntime, reviewMode, databaseReviewCli
 import { ReviewDetail } from "@/components/discovery-review";
 import { reviewAction } from "../actions";
 import { resultMessage } from "@/lib/discovery/guidance";
+import { downloadsEnabled } from "@/lib/playback/stream-capability";
 
 export const dynamic = "force-dynamic";
 export default async function DiscoveryDetail({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ result?: string }> }) {
@@ -15,7 +16,7 @@ export default async function DiscoveryDetail({ params, searchParams }: { params
     // The capabilities only decide which controls are offered; the database checks each action again.
     const [detail, capabilities] = await Promise.all([client.get(id), client.capabilities()]);
     if (!detail) notFound();
-    return <ReviewDetail candidate={detail.candidate} vjs={detail.vjs} action={reviewAction} {...message} mode="database" capabilities={capabilities} />;
+    return <ReviewDetail candidate={detail.candidate} vjs={detail.vjs} action={reviewAction} {...message} mode="database" capabilities={capabilities} downloads={downloadsEnabled()} />;
   }
   const { store, fixture } = await offlineReviewRuntime();
   const candidate = (await store.read()).candidates[id];

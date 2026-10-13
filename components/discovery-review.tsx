@@ -6,7 +6,9 @@ import { Field } from "@/components/form-field";
 import { EmptyState } from "@/components/empty-state";
 import { TabLinks } from "@/components/tab-links";
 import { PosterImage, BackdropImage } from "@/components/media-image";
-import { canReinspect, guidance, inspectionExhausted, lastFailure, mediaCheckAvailable, otherGates, reviewOpen, steps, REVIEW_GROUPS, type ReviewGroup, type ReviewGuidance } from "@/lib/discovery/guidance";
+import { MediaVerification } from "@/components/media-verification";
+import { canReinspect, guidance, inspectionExhausted, lastFailure, mediaCheckAvailable, reviewOpen, verificationPending, REVIEW_GROUPS, type ReviewGroup, type ReviewGuidance } from "@/lib/discovery/guidance";
+import { candidateMedia, mediaReport, publicationRequirements } from "@/lib/discovery/media-report";
 import { cn } from "@/lib/utils";
 import type { ReviewCandidate, ReviewVj } from "@/lib/discovery/model";
 import type { ReviewCapabilities } from "@/lib/discovery/database";
@@ -93,16 +95,17 @@ function NextStep({ candidate, database, children }: { candidate: ReviewCandidat
   </section>;
 }
 
-function Gates({ gates }: { gates: readonly string[] }) {
-  const extra = otherGates(gates);
+/** The six requirements, each with its own state. The database decides them; approval and publication stay separate actions. */
+function Gates({ candidate }: { candidate: ReviewCandidate }) {
+  const { requirements, also } = publicationRequirements(candidate);
   return <section className="rounded-lg border border-border p-5" aria-labelledby="gates-heading"><h2 id="gates-heading" className="text-headline-sm">Publication gates</h2>
-    {!gates.length ? <p className="mt-3 text-body-md">Every mandatory gate passes.</p> : <>
-      <ul className="mt-3 space-y-2 text-body-md">{steps(gates).map((step) => <li key={step.label} className="flex items-start gap-3">
-        {step.done ? <Check aria-hidden className="mt-0.5 size-5 shrink-0 text-highlight" /> : <Circle aria-hidden className="mt-0.5 size-5 shrink-0 text-muted" />}
-        <span><span className="font-semibold">{step.label}</span><span className="text-muted"> · {step.done ? "done" : step.blockers.map(human).join(", ")}</span></span>
-      </li>)}</ul>
-      {extra.length > 0 && <p className="mt-3 text-body-sm text-muted">Also blocking: {extra.map(human).join(", ")}.</p>}
-    </>}
+    {!candidate.gates?.length && <p className="mt-3 text-body-md">Every mandatory gate passes.</p>}
+    <ul className="mt-3 space-y-2 text-body-md">{requirements.map((step) => <li key={step.label} className="flex items-start gap-3">
+      {step.done ? <Check aria-hidden className="mt-0.5 size-5 shrink-0 text-highlight" /> : <Circle aria-hidden className="mt-0.5 size-5 shrink-0 text-muted" />}
+      <span><span className="font-semibold">{step.label}</span><span className="text-muted"> · {step.detail}</span></span>
+    </li>)}</ul>
+    {also.length > 0 && <p className="mt-3 text-body-sm text-muted">Also blocking: {also.map(human).join(", ")}.</p>}
+    <p className="mt-3 text-body-sm text-muted">Browser compatibility is not a gate: a playback warning does not block publication.</p>
   </section>;
 }
 
@@ -129,7 +132,8 @@ function FilmChoices({ candidate }: { candidate: ReviewCandidate }) {
  * `capabilities` (database review): what the signed-in account may do, so only usable controls are offered.
  * Null: the database does not have the dashboard commands yet. The database checks every action again.
  */
-export function ReviewDetail({ candidate, vjs, action, error, notice, mode = "fixture", capabilities = null }: { candidate: ReviewCandidate; vjs: readonly ReviewVj[]; action: Action; error?: string; notice?: string; mode?: ReviewUiMode; capabilities?: ReviewCapabilities | null }) {
+export function ReviewDetail({ candidate, vjs, action, error, notice, mode = "fixture", capabilities = null, downloads = false }: { candidate: ReviewCandidate; vjs: readonly ReviewVj[]; action: Action; error?: string; notice?: string; mode?: ReviewUiMode; capabilities?: ReviewCapabilities | null;
+  /** The server's download setting (database review). It is shown, never decided, here. */ downloads?: boolean }) {
   const candidateId = <><input type="hidden" name="id" value={candidate.id} /><input type="hidden" name="revision" value={candidate.revision} /></>;
   const database = mode === "database";
   const open = reviewOpen(candidate);
@@ -138,7 +142,7 @@ export function ReviewDetail({ candidate, vjs, action, error, notice, mode = "fi
   const urgent = database && (inspectionExhausted(candidate) || candidate.status === "failed");
   // A confirmed candidate whose media was not verified: the check is the next step, requested by a reviewer.
   const diagnostics = database && mediaCheckAvailable(candidate);
-  const mediaDue = diagnostics && candidate.status === "awaiting_media";
+  const mediaDue = diagnostics && candidate.status === "awaiting_media" && !verificationPending(candidate);
   const mayInspect = capabilities === null || capabilities.review;
   const failure = lastFailure(candidate);
   const last = candidate.lastInspection;
@@ -170,16 +174,11 @@ export function ReviewDetail({ candidate, vjs, action, error, notice, mode = "fi
           </div>}
         </NextStep>
         <dl className="grid grid-cols-1 gap-2 break-words text-body-md sm:grid-cols-2">
-          <dt className="text-muted">Telegram reference</dt><dd>Channel {candidate.event.channelId}, message {candidate.event.messageId}</dd>
-          <dt className="text-muted">Filename</dt><dd>{candidate.event.media.name ?? "Unknown"}</dd>
+          <dt className="text-muted">Telegram reference</dt><dd>{database ? "Movies channel" : `Channel ${candidate.event.channelId}`}, message {candidate.event.messageId}</dd>
           <dt className="text-muted">Media size</dt><dd>{size(candidate.event.media.size)}</dd>
           <dt className="text-muted">Read from the post</dt><dd>{candidate.title ?? "No title"} · {candidate.year ?? "no year"} · {candidate.vjText ? `VJ ${candidate.vjText}` : "no VJ"}</dd>
           <dt className="text-muted">Catalogue match</dt><dd>{candidate.movieId ? `Movie ${candidate.movieId}` : "New or unresolved"} · {human(candidate.relation)}</dd>
           <dt className="text-muted">TMDB identity</dt><dd>{candidate.tmdbId ?? "Unresolved"} · {human(candidate.identity)}</dd>
-          <dt className="text-muted">Readiness</dt><dd>{readiness(candidate)}</dd>
-          <dt className="text-muted">Container / gateway / browser</dt><dd>{[evidence?.container, evidence?.gateway, evidence?.browser].map((value) => value ? "Verified" : "Unknown").join(" / ")}</dd>
-          {evidence?.mediaClass && <><dt className="text-muted">Media policy</dt><dd>{human(evidence.mediaClass)} · video {evidence.video ?? "unknown"} · audio {evidence.audio ?? "unknown"}{evidence.reasons?.length ? ` · ${evidence.reasons.map(human).join(", ")}` : ""}</dd></>}
-          <dt className="text-muted">Verification reference</dt><dd>{evidence?.reference ?? "No verification evidence"}</dd>
           {diagnostics && <>
             <dt className="text-muted">Last inspection</dt><dd>{last ? `${when(last.at)} · ${human(last.action)} · revision ${last.revision}` : "No inspection recorded"}</dd>
             <dt className="text-muted">Last failure</dt><dd>{failure ?? "None"}</dd>
@@ -189,10 +188,14 @@ export function ReviewDetail({ candidate, vjs, action, error, notice, mode = "fi
           <dt className="text-muted">Rights</dt><dd>{candidate.rights?.reference ?? "No clearance; publication blocked"}</dd>
           {candidate.publication && <><dt className="text-muted">Published</dt><dd><Link className="underline underline-offset-4" href={`/movies/${candidate.publication.movieSlug}`}>{candidate.publication.movieSlug}</Link> · version {candidate.publication.versionId}</dd></>}
         </dl>
+        <MediaVerification report={mediaReport(candidateMedia(candidate), database ? { enabled: downloads, published: candidate.status === "published" } : undefined)}>
+          {evidence?.mediaClass && <div className="contents"><dt className="text-muted">Media class</dt><dd>{human(evidence.mediaClass)}</dd></div>}
+          <div className="contents"><dt className="text-muted">Evidence reference</dt><dd>{evidence?.reference ?? "No verification evidence"}</dd></div>
+        </MediaVerification>
         <details className="rounded-lg border border-border p-4"><summary className="cursor-pointer text-label-lg">Caption and validation warnings</summary><p className="mt-3 whitespace-pre-wrap break-all">{candidate.event.media.caption ?? "No caption"}</p><ul className="mt-3 list-inside list-disc">{candidate.warnings.map((warning) => <li key={warning}>{human(warning)}</li>)}</ul>{candidate.error && <p>{human(candidate.error)}</p>}</details>
       </section>
     </div>
-    {database && <Gates gates={candidate.gates ?? []} />}
+    {database && <Gates candidate={candidate} />}
     {open && database && candidate.choices.length === 0 && <section className="rounded-lg border border-border bg-surface p-5" aria-labelledby="nofilm-heading">
       <h2 id="nofilm-heading" className="text-headline-sm">No film found for this title</h2>
       <p className="mt-2 text-body-md">TMDB returned nothing usable for “{candidate.title ?? "this post"}”. Fix the post in Telegram and it is read again by itself:</p>

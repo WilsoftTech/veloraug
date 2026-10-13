@@ -5,6 +5,7 @@ import { MoviePlayer } from "@/components/movie-player";
 import { TitleHero } from "@/components/title-hero";
 import { WatchlistButton } from "@/components/watchlist-button";
 import { getMovie, getMovieMediaProfile } from "@/lib/catalogue";
+import { downloadsEnabled } from "@/lib/playback/stream-capability";
 import { TITLE_NOT_FOUND_METADATA, titleMetadata } from "@/lib/title-metadata";
 import { formatRuntime, parseSlug, titleWatchlistItem } from "@/lib/utils";
 
@@ -48,7 +49,7 @@ export default async function MoviePage({ params }: PageProps<"/movies/[slug]">)
         facts={facts}
         actions={
           <>
-            <MoviePlayer versions={versions} signInHref={`/sign-in?next=${encodeURIComponent(`/movies/${movie.slug}`)}`} />
+            <MoviePlayer versions={versions} signInHref={`/sign-in?next=${encodeURIComponent(`/movies/${movie.slug}`)}`} downloads={downloadsEnabled()} />
             <WatchlistButton item={titleWatchlistItem(movie)} variant={versions.length > 0 ? "secondary" : "primary"} />
           </>
         }

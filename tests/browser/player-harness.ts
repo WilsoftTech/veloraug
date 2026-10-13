@@ -8,6 +8,8 @@ import { FIXTURES, startHarness, type HarnessOptions } from "./harness";
 /** Isolated actual-player host, actual issuer/gateway, synthetic identity and local fixture media. */
 export async function startPlayerHarness(gatewayOptions: Pick<HarnessOptions, "fixtures" | "fixtureDir" | "readDelayMs" | "downloadLimits"> = {}) {
   const state = { signedIn: true, entitled: true, published: true, expiredOnce: false, gatewayUnavailable: false,
+    /** The download switch on each server side. The page is told the issuer's, as the movie page is. */
+    issuerDownloads: true, gatewayDownloads: true,
     /** Added to the issuer's and the gateway's clock alike: moves both past a capability's expiry. */
     clockOffsetMs: 0,
     /** Cut the next transfer once, when it reaches this byte offset: a connection lost mid-body. */
@@ -24,6 +26,7 @@ export async function startPlayerHarness(gatewayOptions: Pick<HarnessOptions, "f
       return !user ? { allowed: false, reason: "authentication_required" } : !state.entitled ? { allowed: false, reason: "not_entitled" } : !state.published ? { allowed: false, reason: "unavailable" } : { allowed: true, movieVersionId: id, subject: user.id };
     },
     loadConfig: () => ({ secret: new Uint8Array(32).fill(7), gatewayOrigin }),
+    downloadsEnabled: () => state.issuerDownloads,
     now: () => {
       if (operation === "download" && state.expiredOnce) return Date.now() - 601_000;
       return Date.now() + state.clockOffsetMs;
@@ -35,15 +38,18 @@ export async function startPlayerHarness(gatewayOptions: Pick<HarnessOptions, "f
     resolve: { alias: [
       { find: "@/lib/session", replacement: "fixture-session" },
       { find: "next/link", replacement: "fixture-link" },
+      { find: "next/image", replacement: "fixture-image" },
       { find: "@", replacement: resolve(__dirname, "../..") },
     ] },
-    optimizeDeps: { noDiscovery: true, include: ["react", "react-dom/client", "react/jsx-runtime", "react/jsx-dev-runtime", "lucide-react"], exclude: ["fixture-link", "fixture-session"] },
+    optimizeDeps: { noDiscovery: true, include: ["react", "react-dom/client", "react/jsx-runtime", "react/jsx-dev-runtime", "lucide-react"], exclude: ["fixture-link", "fixture-session", "fixture-image"] },
     server: { host: "127.0.0.1", port: 0, strictPort: false, hmr: false },
     plugins: [{ name: "isolated-player-host",
-      resolveId(id) { if (id === "fixture-session") return "\0fixture-session"; if (id === "fixture-link") return "\0fixture-link"; },
+      resolveId(id) { if (id === "fixture-session") return "\0fixture-session"; if (id === "fixture-link") return "\0fixture-link"; if (id === "fixture-image") return "\0fixture-image"; },
       load(id) {
         if (id === "\0fixture-session") return `import { useSyncExternalStore } from 'react'; export function useSession() { return useSyncExternalStore((notify) => { window.addEventListener('fixture-session', notify); return () => window.removeEventListener('fixture-session', notify); }, () => window.fixtureSignedIn ? 'signed-in' : 'signed-out', () => 'unknown'); }`;
-        if (id === "\0fixture-link") return `import { createElement } from 'react'; export default function Link(props) { return createElement('a', props); }`;
+        if (id === "\0fixture-link") return `import { createElement } from 'react'; export default function Link({ prefetch, ...props }) { return createElement('a', props); }`;
+        // The admin fixture's candidates carry no artwork, so the image component is never rendered.
+        if (id === "\0fixture-image") return `export default function Image() { return null; }`;
       },
       configureServer(server) {
         server.middlewares.use(async (req, res, next) => {
@@ -55,6 +61,11 @@ export async function startPlayerHarness(gatewayOptions: Pick<HarnessOptions, "f
             if (path.pathname.includes("download")) state.expiredOnce = false;
             res.writeHead(result.status, Object.fromEntries(result.headers)); res.end(await result.text()); return;
           }
+          // The reviewer screen (tests/browser/admin-fixture.tsx): static synthetic candidates, no issuer or gateway call.
+          if (path.pathname === "/admin-fixture") {
+            const admin = await server.transformIndexHtml("/admin-fixture", `<!doctype html><html lang="en" data-theme="${path.searchParams.get("theme") === "light" ? "light" : "dark"}"><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Isolated reviewer screen</title></head><body><div id="root"></div><script type="module" src="/tests/browser/admin-fixture.tsx"></script></body></html>`);
+            res.setHeader("content-type", "text/html"); res.end(admin); return;
+          }
           if (path.pathname !== "/fixture") return next();
           const ids = (path.searchParams.get("versions") ?? "1,4").split(",").map(Number);
           const versions = ids.map((id) => {
@@ -65,7 +76,7 @@ export async function startPlayerHarness(gatewayOptions: Pick<HarnessOptions, "f
               videoCodec: file.video, audioCodec: file.audio[0], startupWarning: file.fastStart === false,
             } };
           });
-          const page = await server.transformIndexHtml("/fixture", `<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Isolated player</title></head><body><div id="root"></div><script>window.fixtureVersions=${JSON.stringify(versions)};window.fixtureSignedIn=${state.signedIn};</script><script type="module" src="/tests/browser/player-fixture.tsx"></script></body></html>`);
+          const page = await server.transformIndexHtml("/fixture", `<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Isolated player</title></head><body><div id="root"></div><script>window.fixtureVersions=${JSON.stringify(versions)};window.fixtureSignedIn=${state.signedIn};window.fixtureDownloads=${state.issuerDownloads};</script><script type="module" src="/tests/browser/player-fixture.tsx"></script></body></html>`);
           res.setHeader("content-type", "text/html"); res.end(page);
         });
       },
@@ -74,7 +85,7 @@ export async function startPlayerHarness(gatewayOptions: Pick<HarnessOptions, "f
   // No .env loading or Next.js service startup. Only this disposable loopback fixture host.
   await vite.listen();
   const origin = `http://127.0.0.1:${(vite.httpServer!.address() as AddressInfo).port}`;
-  const gateway = await startHarness({ ...gatewayOptions, downloads: true, allowedOrigins: [origin],
+  const gateway = await startHarness({ ...gatewayOptions, downloads: true, downloadsEnabled: () => state.gatewayDownloads, allowedOrigins: [origin],
     now: () => Date.now() + state.clockOffsetMs,
     downloadAccess: () => state.signedIn && state.entitled && state.published,
     beforeRead: (offset) => {

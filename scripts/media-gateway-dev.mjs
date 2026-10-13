@@ -56,6 +56,8 @@ const PASSED = [
   "MEDIA_GATEWAY_DOWNLOAD_MAX_ACTIVE",
   "MEDIA_GATEWAY_DOWNLOAD_MAX_PER_USER",
   "MEDIA_GATEWAY_DOWNLOAD_MAX_PER_IP",
+  // The download switch. Unset, the gateway admits no download.
+  "MEDIA_GATEWAY_DOWNLOADS_ENABLED",
 ];
 
 const args = new Set(process.argv.slice(2));

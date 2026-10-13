@@ -35,6 +35,7 @@ beforeAll(async () => {
     reader,
     logger: createLogger((line) => logs.push(line)),
     now: () => clockMs,
+    downloadsEnabled: () => true,
   });
   server = createServer(gateway.handle);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { DOWNLOAD_GUIDANCE, launchBrowserDownload, prepareDownload } from "./download";
+import { DOWNLOAD_GUIDANCE, DOWNLOAD_MESSAGES, launchBrowserDownload, prepareDownload } from "./download";
 import { createStreamTokenHandler } from "./stream-token";
 
 const URL = "https://media.velora.example/v1/movie-versions/4/download?token=opaque";
@@ -22,6 +22,17 @@ describe("browser-managed download authorization and bounded readiness", () => {
   it.each([[401, "auth_required"], [403, "not_entitled"], [404, "unavailable"], [429, "temporarily_unavailable"], [503, "temporarily_unavailable"]] as const)("denied issuance %s never fetches media", async (status, failure) => {
     const fetcher = fake(new Response("{}", { status }));
     expect(await prepareDownload(4, fetcher)).toEqual({ ok: false, failure }); expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it("reports the server's download switch when the issuer refuses with it, and fetches no media", async () => {
+    const off = fake(Response.json({ error: "downloads_disabled" }, { status: 503 }));
+    expect(await prepareDownload(4, off)).toEqual({ ok: false, failure: "disabled" }); expect(off).toHaveBeenCalledTimes(1);
+    expect(DOWNLOAD_MESSAGES.disabled).toBe("Downloads are switched off at the moment.");
+    // Any other 503, an unreadable body included, stays the general message.
+    for (const response of [Response.json({ error: "temporarily_unavailable" }, { status: 503 }), new Response("<html>", { status: 503 }), Response.json(null, { status: 503 })])
+      expect(await prepareDownload(4, fake(response))).toEqual({ ok: false, failure: "temporarily_unavailable" });
+    // The gateway's own switch answers the one-byte probe: no transfer starts, and the body is not read.
+    const gateway = fake(issue(), Response.json({ error: "downloads_disabled" }, { status: 503 }));
+    expect(await prepareDownload(4, gateway)).toEqual({ ok: false, failure: "temporarily_unavailable" }); expect(gateway).toHaveBeenCalledTimes(2);
   });
   it("reissues at most once after expiry and checks authentication again", async () => {
     const fetcher = fake(issue(), new Response(null, { status: 401 }), issue(), probe());
@@ -78,6 +89,7 @@ describe("retry against the real authenticated download issuer", () => {
       currentUser: async () => { auth(); return state.signedIn ? { id: "00000000-0000-4000-8000-000000000051", email: null } : null; },
       decide: async (user, id) => { decide(); return !user ? { allowed: false, reason: "authentication_required" } : !state.entitled ? { allowed: false, reason: "not_entitled" } : !state.published ? { allowed: false, reason: "unavailable" } : { allowed: true, movieVersionId: id, subject: user.id }; },
       loadConfig: () => ({ secret: new Uint8Array(32).fill(8), gatewayOrigin: "https://media.velora.example" }),
+      downloadsEnabled: () => true,
     }, "download");
     let reads = 0;
     const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => input === "/api/media/download-token" ? post(new Request("https://velora.example/api/media/download-token", { ...init, headers: { ...init?.headers, "Sec-Fetch-Site": "same-origin" } })) : (reads++, probe());

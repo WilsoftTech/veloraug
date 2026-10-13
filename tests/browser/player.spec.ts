@@ -34,6 +34,61 @@ test("authorized download uses selected VJ, gateway filename and exact original 
   expect(await page.evaluate(() => ({ local: { ...localStorage }, session: { ...sessionStorage } }))).toEqual({ local: {}, session: {} });
 });
 
+// Checkpoint 9: the server's download switch (issuer and gateway). The page is only told the result.
+const askIssuer = (page: Page) => page.evaluate(async () => {
+  const response = await fetch("/api/media/download-token", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ movieVersionId: 1 }) });
+  return { status: response.status, body: await response.json() as Record<string, string> };
+});
+
+test("download switch off: no Download control, both server sides refuse a request made anyway, and playback is unaffected", async ({ page, host }) => {
+  host.state.issuerDownloads = false; host.state.gatewayDownloads = false;
+  await page.goto(`${host.origin}/fixture?versions=1`);
+  await expect(page.getByRole("button", { name: "Play", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Download/ })).toHaveCount(0);
+  await expect(page.getByText(/download manager/i)).toHaveCount(0);
+  // The issuer refuses before it reads the session or asks the catalogue.
+  expect(await askIssuer(page)).toEqual({ status: 503, body: { error: "downloads_disabled" } });
+  expect(host.requests).toEqual([]);
+  // A link issued while the issuer's switch was on is refused by the gateway's own switch: no byte of the file is sent.
+  host.state.issuerDownloads = true;
+  const issued = await askIssuer(page);
+  expect(issued.status).toBe(200);
+  const refused = await page.evaluate(async (url) => {
+    const results = [];
+    for (const headers of [{}, { Range: "bytes=0-0" }] as Record<string, string>[]) { const response = await fetch(url, { headers }); results.push({ status: response.status, body: await response.text() }); }
+    return results;
+  }, issued.body.downloadUrl);
+  expect(refused).toEqual([{ status: 503, body: '{"error":"downloads_disabled"}' }, { status: 503, body: '{"error":"downloads_disabled"}' }]);
+  expect(host.gateway.downloads.map((request) => request.status)).toEqual([503, 503]);
+  // Streaming never reads the switch.
+  await page.getByRole("button", { name: "Play", exact: true }).click();
+  await expect(page.locator("video")).toHaveJSProperty("readyState", 4);
+  expect(host.gateway.requests.length).toBeGreaterThan(0);
+  expect(host.gateway.requests.every((request) => request.status === 206)).toBe(true);
+});
+
+test("a page opened before the switch went off cannot download, and says why", async ({ page, host }) => {
+  await page.goto(`${host.origin}/fixture?versions=1`);
+  const button = page.getByRole("button", { name: "Download (MP4)", exact: true });
+  await expect(button).toBeVisible();
+  host.state.issuerDownloads = false;
+  await button.click();
+  await expect(page.getByRole("alert")).toContainText("Downloads are switched off at the moment.");
+  expect(host.gateway.downloads).toEqual([]);
+  // The issuer on and only the gateway off: the one-byte probe is refused, so nothing is handed to the browser.
+  host.state.issuerDownloads = true; host.state.gatewayDownloads = false;
+  let handedOff = false; page.on("download", () => { handedOff = true; });
+  await page.getByRole("button", { name: "Resume/Retry Download (MP4)", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("temporarily unavailable");
+  expect(host.gateway.downloads.map((request) => request.status)).toEqual([503]);
+  expect(handedOff).toBe(false);
+  // Both on again: the same control works, after a fresh authorization.
+  host.state.gatewayDownloads = true;
+  const event = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Resume/Retry Download (MP4)", exact: true }).click();
+  expect(await (await event).failure()).toBeNull();
+});
+
 test("signed-out action is hidden and stale signed-in UI cannot obtain a download", async ({ page, host }) => {
   host.state.signedIn = false;
   await page.goto(`${host.origin}/fixture`);

@@ -1,0 +1,13 @@
+isolated database: 17 migrations applied
+isolated PostgREST: http://127.0.0.1:54440
+hosted-equivalent 17: reviewer view parsed with no Policy 3 field; earlier facts shown, the rest reported as missing; refused file shown as failed
+hosted-equivalent 17: anonymous, non-reviewer, review-only, rights-only and publish-only accounts each refused outside their capability; the earlier publication path works; the refused file cannot be approved
+isolated database: 26 migrations applied
+isolated PostgREST: http://127.0.0.1:54440
+mp4-h264-aac-faststart.mp4: MP4, h264/aac, 1 audio, 0 subtitle; Metadata consistent, not verified; Potentially playable, not verified; Tested combination on desktop; 0 playback warning(s); media gate closed
+mp4-h264-aac-moov-at-end.mp4: MP4, h264/aac, 1 audio, 0 subtitle; Metadata consistent, not verified; Potentially playable, slow start, not verified; Tested combination on desktop; 1 playback warning(s); media gate closed
+mkv-h264-aac-two-audio.mkv: MKV, h264/aac, 2 audio, 0 subtitle; Metadata consistent, not verified; Potentially playable, not verified; Limited in some browsers; 2 playback warning(s); media gate closed
+mkv-h264-aac-subtitles.mkv: MKV, h264/aac, 1 audio, 1 subtitle; Metadata consistent, not verified; Potentially playable, not verified; Limited in some browsers; 2 playback warning(s); media gate closed
+mkv-h264-ac3.mkv: MKV, h264/ac3, 1 audio, 0 subtitle; Metadata consistent, not verified; Potentially playable, not verified; Limited in some browsers; 2 playback warning(s); media gate closed
+mkv-hevc-aac.mkv: MKV, hevc/aac, 1 audio, 0 subtitle; Metadata consistent, not verified; Potentially playable, not verified; Limited in some browsers; 2 playback warning(s); media gate closed
+repository 26: 6 originals inspected for real; Policy 3 facts reach the reviewer view; none is verified, none can be approved or published, and no dashboard value changed that

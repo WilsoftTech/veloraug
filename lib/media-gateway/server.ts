@@ -7,6 +7,11 @@
  *   GET /v1/movie-versions/{id}/download?token=…   original attachment, full or ranged
  *   OPTIONS on the media routes                    CORS preflight, allow-listed origins only
  *
+ * The download route answers only while the operator's download switch is on.
+ * Off, which is the default, every download request is refused first, before its
+ * token is read. The switch decides admission only: a transfer admitted while it
+ * was on runs on under the rules below. The stream route does not read it.
+ *
  * Order per stream request (each step fails closed before the next runs):
  * route → token (MAC, expiry, operation, version) → rate and stream limits →
  * reader readiness → catalogue resolution (publication) → Range → bytes.
@@ -46,6 +51,8 @@ export interface MediaGatewayDeps {
   clientIp?: (request: IncomingMessage) => string;
   /** Download-only profile; configurable for offline deadline tests, never stream limits. */
   downloadLimits?: Partial<DownloadLimits>;
+  /** The download switch, read on every download request. Omitted: downloads are off. */
+  downloadsEnabled?: () => boolean;
 }
 
 export interface MediaGateway {
@@ -77,6 +84,7 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
     }
   }
   const downloads = new StreamAdmission(downloadLimits);
+  const downloadsEnabled = deps.downloadsEnabled ?? (() => false);
   const bySubject = new WindowRateLimiter(limits.requestsPerSubjectPerWindow, limits.rateWindowMs);
   const byIp = new WindowRateLimiter(limits.requestsPerIpPerWindow, limits.rateWindowMs);
   const origins = new Set(deps.allowedOrigins ?? []);
@@ -123,6 +131,10 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
       const status = sendError(request, response, code, extra);
       finish({ status, code, outcome: "denied" }, status >= 500 ? "warn" : "info");
     };
+
+    // 0. The download switch. Off, nothing below runs for a download: no token is read, no limiter is
+    //    touched and no catalogue or Telegram call is made. Transfers already admitted are not affected.
+    if (op === "download" && !downloadsEnabled()) return deny("downloads_disabled");
 
     // 1. The only accepted parameter is the token. Anything else, including an
     //    attempt to name Telegram media, is refused rather than ignored.

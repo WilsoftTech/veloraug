@@ -46,6 +46,34 @@ describe("admin upload detail page", () => {
     }
   });
 
+  // Checkpoint 9: the media panel on an upload.
+  it("shows the Policy 3 assessment as separate facts, pending until the database verifies them", async () => {
+    const assessment = { accepted: true, container: "mkv", reasons: [], warnings: ["firefox_mkv_streaming_unreliable", "audio_track_switching_not_available", "embedded_subtitles_not_displayed"], integrity: "metadata_consistent", streaming: "potentially_playable",
+      download: "not_implemented_authorization_required", compatibility: { basis: "tested_fixture_combinations", perFile: "prediction", evidence: "docs", chromium: "tested_combination", firefox: "streaming_unreliable", safari: "real_device_not_tested", ios: "real_device_not_tested", android: "real_device_not_tested" },
+      tracks: [{ index: 0, type: "video", codec: "H264", attachedPicture: false, title: "PRIVATE TRACK TITLE" }, { index: 1, type: "audio", codec: "aac", attachedPicture: false }, { index: 2, type: "audio", codec: "aac", attachedPicture: false }, { index: 3, type: "subtitle", codec: "subrip", attachedPicture: false }] };
+    const html = await render(session("metadata_review", { file_name: "Uploaded.Film.2025.VJ.Test.mkv", pipeline: { ...waiting, media_verified: false }, inspection: { choices: [film], proposed_tmdb_id: film.tmdb_id, proposed_vj_id: 3, classification: { class: "original", reasons: [], policyVersion: 3 }, assessment } }));
+    for (const text of ["Media inspection", "MKV", "Uploaded.Film.2025.VJ.Test.mkv", "h264", "aac", "Metadata consistent, not verified", "Potentially playable, not verified", "Limited in some browsers", "Version 3", "Switched off",
+      "Firefox does not stream MKV reliably.", "plays only the default one", "Embedded subtitles are not shown by the player.", "Awaiting verification"]) expect(html, text).toContain(text);
+    expect(html).toMatch(/Audio tracks<\/dt><dd[^>]*>2</); expect(html).toMatch(/Subtitle tracks<\/dt><dd[^>]*>1</);
+    expect(html).not.toContain("PRIVATE TRACK TITLE"); expect(html).not.toContain(">Failed<");
+  });
+
+  it("without the Policy 3 readback the upload page still renders: earlier facts shown, the rest not reported", async () => {
+    const html = await render(session("published"));
+    for (const text of ["Media inspection", "Not reported", "migration 20261011192618", "Verified by the earlier MP4 policy", "Version 2", "canonical", "Switched off"]) expect(html, text).toContain(text);
+    // A Policy 3 inspection whose assessment did not come back (lib/uploader/admin-upload.test.ts covers the parsing): nothing is verified or failed.
+    const bare = await render(session("metadata_review", { pipeline: { ...waiting, media_verified: false }, inspection: { choices: [film], proposed_tmdb_id: film.tmdb_id, classification: { class: "original", reasons: [], policyVersion: 3 } } }));
+    expect(bare).toContain("Not reported"); expect(bare).toContain("Awaiting verification"); expect(bare).not.toContain(">Verified<"); expect(bare).not.toContain(">Failed<");
+    // A refused Policy 3 file is a failure, in the panel and in the status row. A session with no inspection has no panel.
+    const refused = await render(session("metadata_review", { pipeline: { ...waiting, media_verified: false }, inspection: { choices: [], proposed_tmdb_id: null, classification: { class: "manual_review", reasons: ["size_mismatch"], policyVersion: 3 },
+      assessment: { container: "mp4", integrity: "incomplete", streaming: "unverified", compatibility: {}, warnings: [], tracks: [] } } }));
+    expect(refused.match(/>Failed</g)).toHaveLength(3); expect(refused).toContain("does not match what its container reports");
+    expect(await render(session("uploading", { pipeline: waiting, inspection: null, bytes_received: 10 }))).not.toContain("Media inspection");
+    vi.stubEnv("MEDIA_GATEWAY_DOWNLOADS_ENABLED", "true");
+    expect(await render(session("published"))).toContain("Switched on");
+    expect(await render(session("metadata_review", { pipeline: waiting }))).toContain("Not available until published");
+  });
+
   it("keeps rights, approval and transfer as separate, labelled steps before publication", async () => {
     const html = await render(session("awaiting_approval", { pipeline: { ...waiting, rights_cleared: true, rights_expires_at: "2027-01-01T00:00:00.000Z", rights_reference: "licence UPL-001" } }));
     for (const text of ['for="rights-reference"', 'for="rights-expiry"', 'value="clear_rights"', 'value="revoke_rights"', 'value="approve"', 'value="reject_rights"', "Uploading never grants rights", "Pending transfer", "Blocked", "Cancel upload", "retained"]) expect(html).toContain(text);

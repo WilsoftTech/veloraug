@@ -21,6 +21,16 @@ export const evidenceSchema = z.strictObject({
   mediaClass: z.string().max(40).optional(), reasons: z.array(z.string().max(100)).max(50).optional(),
   video: z.string().max(40).nullable().optional(), audio: z.string().max(40).nullable().optional(),
   bytesRead: z.number().int().nonnegative().optional(),
+  // What the database recorded with the evidence row. Absent in E3.8 fixtures.
+  policyVersion: z.number().int().positive().optional(), containerName: z.string().max(40).nullable().optional(), passed: z.boolean().optional(),
+  // The separate Policy 3 facts (migration 20261011192618). Absent on a database without it, and never inferred
+  // from the fields above. Track titles stay in the database: only counts are carried.
+  facts: z.strictObject({
+    integrity: z.string().max(60), streaming: z.string().max(60),
+    browsers: z.record(z.string().max(20), z.string().max(60)).nullable(),
+    audioTracks: z.number().int().nonnegative().nullable(), subtitleTracks: z.number().int().nonnegative().nullable(),
+    warnings: z.array(z.string().max(100)).max(50), publishable: z.boolean(),
+  }).optional(),
 });
 export type MediaEvidence = z.infer<typeof evidenceSchema>;
 const auditSchema = z.strictObject({ at: instant, actor: z.string().min(1).max(128), action: z.string().max(100), revision: z.number().int().positive() });

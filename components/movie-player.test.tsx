@@ -10,7 +10,7 @@ const TWO = [
 ];
 const session = vi.hoisted(() => ({ state: "unknown" }));
 vi.mock("@/lib/session", () => ({ useSession: () => session.state }));
-const render = (versions: PlayableVersion[] = ONE) => renderToStaticMarkup(<MoviePlayer versions={versions} signInHref="/sign-in?next=%2Fmovies%2Fon-the-hunt-2026" />);
+const render = (versions: PlayableVersion[] = ONE, downloads = true) => renderToStaticMarkup(<MoviePlayer versions={versions} signInHref="/sign-in?next=%2Fmovies%2Fon-the-hunt-2026" downloads={downloads} />);
 
 afterEach(() => { vi.unstubAllGlobals(); session.state = "unknown"; });
 
@@ -39,6 +39,18 @@ describe("MoviePlayer before Play", () => {
 
   it("renders nothing without a playable version", () => {
     expect(render([])).toBe('');
+  });
+
+  it("shows no Download control or download text while the server's switch is off, signed in or not", () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    for (const state of ["unknown", "signed-out", "signed-in"]) {
+      session.state = state;
+      const html = render(ONE, false);
+      expect(html, state).toContain("Play");
+      expect(html, state).not.toMatch(/Download|download manager/);
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("shows Download only for the signed-in UX hint, without requesting a capability", () => {

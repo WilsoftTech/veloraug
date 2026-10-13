@@ -18,6 +18,7 @@ export const GATEWAY_ERROR_CODES = [
   "rate_limited",
   "too_many_streams",
   "not_ready",
+  "downloads_disabled",
   "catalogue_unavailable",
   "telegram_unavailable",
   "flood_wait",
@@ -49,6 +50,8 @@ const PUBLIC: Record<GatewayErrorCode, { status: number; error: string }> = {
   rate_limited: { status: 429, error: "rate_limited" },
   too_many_streams: { status: 429, error: "too_many_streams" },
   not_ready: { status: 503, error: "temporarily_unavailable" },
+  // The operator's download switch is off. The same answer for every download request, whatever it carries.
+  downloads_disabled: { status: 503, error: "downloads_disabled" },
   catalogue_unavailable: { status: 503, error: "temporarily_unavailable" },
   telegram_unavailable: { status: 503, error: "temporarily_unavailable" },
   flood_wait: { status: 503, error: "temporarily_unavailable" },

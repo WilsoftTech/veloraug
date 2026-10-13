@@ -59,7 +59,7 @@ try {
     try {const bytes=Buffer.alloc(limit);const result=await file.read(bytes,0,limit,offset);return {bytes:bytes.subarray(0,result.bytesRead),rpcCount:1};}
     finally {await file.close();}
   }};
-  const gateway=createMediaGateway({tokenSecret:secret,limits:DEFAULT_LIMITS,resolver,reader,logger:{info(){},warn(){},error(){}}});
+  const gateway=createMediaGateway({tokenSecret:secret,limits:DEFAULT_LIMITS,resolver,reader,downloadsEnabled:()=>true,logger:{info(){},warn(){},error(){}}});
   const server=createServer(gateway.handle);await new Promise<void>(resolve=>server.listen(0,"127.0.0.1",resolve));
   const origin=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const url=(version:number)=>`${origin}/v1/movie-versions/${version}/download?token=${signMediaToken(secret,{op:"download",movieVersionId:version,subject,ttlSeconds:600,nowSeconds:Math.floor(Date.now()/1000)})}`;
