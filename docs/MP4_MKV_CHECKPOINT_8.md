@@ -7,8 +7,13 @@ Next.js development server was started, no movie was uploaded, replaced,
 reinspected or published, and nothing was staged, committed, pushed or deployed.
 E3.9 remains a provisional label.
 
+Sections 1 to 10 are the record as it stood at the approval gate, section 11 is
+the commit, and **section 12 is the final verification** that followed it. Where
+they differ, section 12 is the later state: in particular the four gates that
+section 7 lists as not run have since been run, and they pass.
+
 Branch `phase-a-foundation` at `dd3e478` (Checkpoints 6 and 7), 13 commits ahead
-of its remote. Everything below is uncommitted in the working tree.
+of its remote. Everything below was uncommitted in the working tree at the gate.
 `.env.example` still has SHA-256 `86e57706…`; `.env.local` and `.claude/` were
 not edited.
 
@@ -446,3 +451,233 @@ hash. `git log -1 -- docs/MP4_MKV_CHECKPOINT_8.md` shows it.
 
 Still not run: the four Docker-dependent gates of section 7. Everything in
 section 10 still stands.
+
+## 12. Final verification (2026-10-13)
+
+Requested after the commit, with a second brief that also named the sections the
+first one lost. Starting point `d38dd90`, which was **not amended**. Everything
+this section adds is uncommitted. No migration was applied to a persistent
+database, no hosted query was made, no Telegram call was made, no service was
+started, restarted or rebuilt, and nothing was pushed or deployed. Checkpoint 9
+was not started.
+
+**Docker.** It was stopped during the implementation. When this verification
+began it was running: the persistent containers (discovery listener, Bot API,
+local Supabase) had all started at 19:53:36Z, with no restart since, before any
+command of this verification. They were not touched. The gates below created and
+removed only the disposable `velora-e38a-db` and `velora-e38a-rest` containers,
+on tmpfs, with synthetic credentials. Docker's own event log for the period
+shows no other container event.
+
+### 12.1 Completed validation results
+
+| Gate | Result | Evidence |
+| --- | --- | --- |
+| Database security and boundary suites, all 26 migrations | 20 of 20 suites, 1,098 assertions | `checkpoint8-db.log` |
+| Real restricted adapter with the gateway core (the Checkpoint 5 script) | Pass. Hosted-equivalent 17 plus the download resolver alone: 25 assertions, streaming resolver and its ACL unchanged. 13 fixtures byte-identical with name, type and extension. Ban and unpublished denied with no media read. A running SQL query cancelled | `checkpoint8-gateway-validation.log` |
+| Real restricted adapter, continuation (new script, below) | Pass, 3 runs of 3 | `checkpoint8-adapter-continuation.log` |
+| Isolated integration | 44 passed, 1 skipped (it needs an Auth server the harness does not have, as at Checkpoint 7) | `checkpoint8-integration.log` |
+| Offline production build | Pass, with the same single Turbopack warning as Checkpoints 5 to 7 | `checkpoint8-build.log` |
+| Typecheck and lint, with the new script | Pass | Not saved again: unchanged output |
+| Unit, full (from the commit gate; no source file has changed since) | 1,130 passed, 0 failed, 0 skipped | `checkpoint8-unit.{log,json}` |
+| Browser, full, six projects (from the commit gate) | 174 passed, 0 failed, 24 skipped | `checkpoint8-browser.{log,json}` |
+
+The four gates that section 7 lists as not run are now run and pass.
+
+**New script: `scripts/checkpoint8-validation.mts`.** The unit tests use a fake
+resolver in which unpublishing and rights withdrawal are the same flag. This
+script runs the gateway core against the real restricted database role and real
+SQL in a disposable database, with two committed synthetic fixtures (one MP4,
+one MKV) read from disk. It shows:
+
+- One capability serves a full download and then a `Range` resume with
+  `If-Range`, byte-identical, and each request is resolved in the database.
+- A transfer whose capability expires an hour before it finishes completes,
+  byte-identical. The expired link then gets 401 for a new request and for a
+  resume, with no database call and no media read (both counted).
+- Seven real row changes each end a transfer that is already running past its
+  expiry: account banned, account deleted, account made anonymous, movie
+  unpublished, rights withdrawn, version made unavailable, VJ deactivated. In
+  the saved run each ended 144 to 179 ms after the row changed, with the recheck
+  interval set to 200 ms. The media read was cancelled and the slot freed. A
+  new, valid capability was then refused with no media read, and access returned
+  when the row was restored.
+
+Its limit: a fixture is a single read, so the transfer is held open by delaying
+that read, and the refusal arrives as a clean 404 before any byte. A cut in the
+middle of a body is proven only by the unit tests.
+
+**A defect in that script's first version, recorded because it matters.** Its
+first run failed on the first revocation: the transfer returned 200. The cause
+was the script, not the gateway. A helper returned the pending response from an
+`async` function, which waits for the whole response, so the clock was moved and
+the row changed only after the transfer had finished. The two "continued past
+expiry" lines printed by that run therefore proved nothing. The helper was
+fixed, and the script now asserts that the clock moves and the row changes while
+the read is still in flight. The unit and browser tests were checked for the
+same mistake: both act after the headers and assert that the body is still being
+sent.
+
+### 12.2 Blocked tests and reasons
+
+Nothing is blocked by missing infrastructure any more. What has still not been
+tested, and why:
+
+| Not tested | Reason |
+| --- | --- |
+| A real ten minutes or a real four hours | Tests move an injected clock and assert the constants. No transfer has really outlived a capability in elapsed time |
+| The recheck at its production interval of 30 seconds | Tests use 10 to 200 ms. The "about 35 seconds" bound is the interval plus the 5-second authorization deadline, by construction |
+| Migration 9 on hosted, and the security advisors | Needs the per-migration approval (Gate B). Only disposable databases were used |
+| A whole file read from Telegram through the download route | A live media operation (Gate C). Throughput, flood waits and a transfer near 2,000 MiB are unknown |
+| Safari, iOS, Android, real Firefox | Real devices and a reachable host |
+| A lost network, a person pressing resume in a download manager | The same |
+| A peer that dies without closing its connection | Cannot be produced on loopback. The 429-for-up-to-30-seconds behaviour is reasoned from the code |
+| A cut in the middle of a body with the real database adapter | The committed fixtures are one read each. Proven with the fake resolver only |
+| Process memory in the container under download load | Needs the rebuilt image, which is not authorized |
+| The gateway image built from this commit | Not built. Any existing image predates the download route |
+
+### 12.3 Security findings
+
+The implemented policy, item by item as the verification brief lists it:
+
+| Policy | Confirmed | By |
+| --- | --- | --- |
+| Ten-minute capability validity | Yes | The issuer's lifetime constant (600 s) is untouched by the commit. The gateway refuses a download capability issued for longer, and refuses to be configured to accept 601 |
+| Capability reuse during validity | Yes | Unit test; real adapter, both containers; Chrome, Edge and Chromium doing it by themselves |
+| Active transfers continue after expiry | Yes | Unit test, mid-body, one hour past; real adapter; six browser projects |
+| New requests require valid authorization | Yes | Every request passes the capability check and the database resolver. Expired: 401 with no database call. Revoked: a new capability is refused. A new capability needs a signed-in session at the issuer |
+| Four-hour maximum transfer duration | Yes, as a constant and a mechanism | The value is asserted, a lowered value cuts a transfer mid-body and frees the slot, and 14,400,001 is refused. No test waits four hours |
+| One active download per user | Yes | Same link, new link and another address are all refused while one runs |
+| Four concurrent downloads per gateway process | Yes | Four held, a fifth refused, a freed slot reusable at once; 5 is refused as a setting |
+| Publication, rights and account revocation | Yes | Per request: database suite 020 and the Checkpoint 5 script. On a running transfer: unit tests and seven real row changes (12.1) |
+| Correct Range resume and cancellation | Yes | Exact ranges, 416, malformed ranges, `If-Range` mismatch restarting as 200, a resume reproducing the SHA-256; disconnect and revocation cancel the read and free the slot |
+| Existing streaming limits unchanged | Yes | `limits.ts`, `pump.ts`, `token.ts`, `range.ts`, the resolver SQL, the Postgres adapter, the reader, the issuer and every route have an empty diff between `dd3e478` and `d38dd90`. A test holds the playback deadline at 120 seconds, independent of the download limit |
+
+No path to unpublished media was found, and no defect was found in the
+committed gateway code.
+
+Deviations from what was approved, none of them a defect:
+
+1. **Decision point 3 of Checkpoint 7 section 11.2** says resumed requests need
+   a new capability. The implementation lets one capability serve several
+   requests until it expires, and needs a new one only afterwards. The
+   Checkpoint 8 brief asked for exactly that, and it is what lets a browser's own
+   resume work.
+2. **"Configurable four-hour maximum"** is configurable downwards only. Four
+   hours is the ceiling in code. Raising it, or any concurrency limit, is a code
+   change. This follows the brief's rule not to raise concurrency without
+   load-test evidence, applied to the duration as well.
+3. **The two-per-address download limit** is also in force. It is from
+   Checkpoint 5 and is not in the verification brief's list.
+4. **Test T5** asked for the new wording to be asserted in
+   `tests/browser/player.spec.ts`. That file is unchanged, since its assertion
+   still holds; the new wording is asserted in the new browser spec and in
+   `lib/playback/download.test.ts`.
+
+Security-relevant facts that follow from the policy, for the owner to accept or
+change. Only the first is new since section 2:
+
+1. **Rotating the token secret no longer bounds a running transfer.** Before, a
+   running download ended within ten minutes of any rotation. Now it can run for
+   four hours. Stopping it needs one of the means in the readiness checklist,
+   section 5.
+2. A link leaked inside its ten minutes can fetch a whole file.
+3. A link issued before sign-out works for the rest of its ten minutes, and a
+   running download survives sign-out.
+4. Behind a proxy or carrier NAT the per-address limits are shared (section 4).
+5. There is no runtime switch for downloads.
+6. Carried over, playback only: a banned account keeps streaming until its
+   access token expires, because the streaming resolver does not check the user.
+
+### 12.4 Missing requirements and their disposition
+
+Checked against three sources: the Checkpoint 8 brief (truncated), the decision
+in Checkpoint 7 section 11.2, and the original MP4/MKV brief of 2026-10-11, which
+was recovered from the earlier session record for this verification.
+
+| Source | Requirement | State | Disposition |
+| --- | --- | --- | --- |
+| Checkpoint 8 brief, lost part | Migration dependency sequence | Was already in the readiness checklist, section 1 | Confirmed still correct: Checkpoint 8 adds no migration. Downloads need only migration 9 |
+| | Gateway environment configuration | **Was missing** | Written: readiness checklist, section 3, complete table |
+| | Trusted-proxy requirements | Written at the commit (section 4) | Cross-referenced from the checklist. Not built |
+| | Download capacity estimates | **Was missing** | Written: readiness checklist, section 10. Arithmetic, not measurement |
+| | Logging and observability | Partly present | Checklist section 7 updated for the four-hour limit and expired resumes. No collector exists |
+| | Recovery and rollback procedures | Partly present | Checklist section 5 extended: rolling this change back, stopping running transfers, recovery after an outage |
+| | Real-device testing requirements | Written at the commit | Device plan sections 1, 8 and 9 |
+| | Telegram backlog restrictions | **Was missing** | Written: readiness checklist, new section 14 |
+| | Production activation order | Present, out of date | Rewritten: checklist section 13 |
+| | Anything else the lost text held | Unknown | The original text after "Avoid adding a service worker, Blob-based" is still not available. Only the nine headings above are known |
+| Checkpoint 7, 11.2 | T3: rights withdrawal ends a running transfer | The unit test could not tell it from unpublishing | **Closed** by the real-database script (12.1) |
+| | Decision point 3 | See deviation 1 | Recorded |
+| Checkpoint 8 brief, section 4 | Settings "configurable and documented" | Documented in the reports; not in `.env.example` | **Open.** Owed when that file's pending edit is settled |
+| Original brief, its Checkpoint 7 | Admin dashboard: original container, codecs, audio-track count, structural, streaming, browser and download status, evidence and failure reason | **Not implemented.** The reviewer screen shows the earlier fields: container, gateway and browser as verified or unknown, the media class, the video and audio codec, reasons and the last inspection | **Open.** It was never an E3.9 checkpoint. It also depends on migrations 7 and 8, which hold the facts. Needs its own approval |
+| Original brief, its Checkpoint 8 | Testing and regression across inspection, gateway, browser playback and download integrity; typecheck, lint, unit, integration, build | Covered by Checkpoints 1 to 8 and the gates above. The earlier checkpoints' tests were run here, not re-audited one by one | Gaps: process memory is bounded by construction, not measured; a flood wait in the middle of a file is not simulated; real devices |
+| Original brief, its Checkpoint 9 | Controlled validation: a single-candidate live plan, message 46 as canary, message 50 preserved | **Not started**, as instructed | Restrictions recorded in the checklist, section 14 |
+| Original brief, section 8 item 16 | Handle token expiry and interrupted downloads safely | Done | With the consequence in section 5: a partial file is lost after ten minutes |
+
+**Numbering.** The original brief's Checkpoints 7, 8 and 9 are the admin
+dashboard, testing and regression, and controlled validation. E3.9's Checkpoint
+7 became activation safety and its Checkpoint 8 became download continuation.
+The Checkpoint 7 report says Checkpoints 8 and 9 "had no defined scope before
+this"; against the original brief that sentence is wrong. What "Checkpoint 9"
+now means needs the owner's decision.
+
+### 12.5 Operational prerequisites
+
+All in `MP4_MKV_ACTIVATION_READINESS.md`. Nothing in it has been activated.
+
+| Topic | Where | State |
+| --- | --- | --- |
+| Migration dependency sequence | Section 1 | Nine undeployed. Downloads need only 9, on the hosted 17. Never `db push --include-all` |
+| Gateway environment configuration | Section 3 | Complete list. Allowed origins are required for downloads. Four new optional settings |
+| Trusted-proxy requirements | Section 3; this report, section 4 | Rules written. Not built: needs the hosting decision |
+| Download capacity estimates | Section 10 | Four slots. 82 to 172 completed downloads a day at an assumed 0.5 MB/s, depending on the file. Unmeasured |
+| Logging and observability | Section 7 | Logs carry no token or user id. Nothing collects or alerts on them |
+| Recovery and rollback | Section 5 | Image rollback restores the ten-minute cut. Three ways to stop running transfers. No runtime switch |
+| Real-device testing | `MP4_MKV_DEVICE_TEST_PLAN.md` | Not run. I1, I3, I4, I5 and I9 must have results before viewers get downloads |
+| Telegram backlog restrictions | Section 14 | No reinspection, send, replacement, rights approval or publication. Listener untouched |
+| Production activation order | Section 13 | Eight steps, each its own approval. None given |
+
+### 12.6 Remaining activation blockers
+
+Replaces section 10. The four Docker-dependent gates are done.
+
+1. **Production gateway hosting**, and with it the trusted-proxy change, HTTPS,
+   allowed origins, a single instance and a proxy that allows four-hour
+   responses.
+2. **A decision on partial files lost after ten minutes.**
+3. **Migration 9 on hosted**, with its preflight and the advisors.
+4. **A gateway image built from the activation commit.**
+5. **Real-device tests**, and a measured whole-file transfer, which decides
+   whether four hours and four slots are enough.
+6. **A decision on a runtime switch for downloads**, now that a running
+   transfer can last four hours.
+7. **`.env.example`**: the four settings and the role comment.
+8. Carried over unchanged: the admin dashboard of the original brief, the
+   Policy 3 verification contract, migrations 1 to 8, the listener image, a
+   download smoke check after deploy, the banned-account streaming gap before
+   Phase F, the meaning of Checkpoint 9 and the owner's confirmation of the
+   E3.9 label.
+
+### 12.7 Git status
+
+- `HEAD` is `d38dd90` on `phase-a-foundation`, 14 commits ahead of its remote.
+  Not amended, not pushed.
+- Nothing is staged.
+- Uncommitted, from this verification:
+  - new: `scripts/checkpoint8-validation.mts`;
+  - modified: this report, `docs/MP4_MKV_ACTIVATION_READINESS.md`,
+    `IMPLEMENTATION_ROADMAP.md`;
+  - new evidence, not browser output: `checkpoint8-db.log`,
+    `checkpoint8-gateway-validation.log`, `checkpoint8-adapter-continuation.log`,
+    `checkpoint8-integration.log`, `checkpoint8-build.log`.
+- Still uncommitted and still not to be staged: `.env.example` (SHA-256
+  `86e57706…`, unchanged), the three browser-generated Checkpoint 8 evidence
+  files and the 36 from Checkpoints 6 and 7.
+
+If approved, these nine paths would be one further local commit on top of
+`d38dd90`.
+
+Stop here. Approval is required before committing, applying migrations,
+rebuilding or restarting services, any live Telegram operation, pushing,
+deploying or starting Checkpoint 9.

@@ -1,0 +1,13 @@
+isolated database: 26 migrations applied
+mp4-h264-aac-faststart.mp4: one capability, full download then Range resume with If-Range, byte-identical, each request resolved in the database
+mkv-h264-aac.mkv: one capability, full download then Range resume with If-Range, byte-identical, each request resolved in the database
+mp4-h264-aac-faststart.mp4: transfer continued an hour past expiry, byte-identical; the expired link then got 401 twice with no database call and no media read
+mkv-h264-aac.mkv: transfer continued an hour past expiry, byte-identical; the expired link then got 401 twice with no database call and no media read
+account banned: running transfer (already past expiry) ended 172 ms after the row changed, read cancelled, slot freed; a new capability is refused with no read
+account deleted: running transfer (already past expiry) ended 153 ms after the row changed, read cancelled, slot freed; a new capability is refused with no read
+account anonymous: running transfer (already past expiry) ended 147 ms after the row changed, read cancelled, slot freed; a new capability is refused with no read
+movie unpublished: running transfer (already past expiry) ended 179 ms after the row changed, read cancelled, slot freed; a new capability is refused with no read
+rights withdrawn: running transfer (already past expiry) ended 144 ms after the row changed, read cancelled, slot freed; a new capability is refused with no read
+version made unavailable: running transfer (already past expiry) ended 151 ms after the row changed, read cancelled, slot freed; a new capability is refused with no read
+VJ deactivated: running transfer (already past expiry) ended 144 ms after the row changed, read cancelled, slot freed; a new capability is refused with no read
+real restricted adapter: 2 fixtures continued past expiry; 7 revocations each ended a running transfer within the 200 ms recheck interval used here (30 s in production)

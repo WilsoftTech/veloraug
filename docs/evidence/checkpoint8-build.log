@@ -1,0 +1,94 @@
+isolated database: 26 migrations applied
+isolated database: dev catalogue seed loaded
+isolated PostgREST: http://127.0.0.1:54440
+▲ Next.js 16.3.8 (Turbopack)
+- Environments: .env.local
+⚠ Warning: Next.js ignored bun.lock in C:\Users\willi because it is outside the current Git repository (C:\Users\willi\veloraug).
+ To use this directory, set `turbopack.root` in your Next.js config.
+
+✓ Running next.config.ts took 232ms
+
+  Creating an optimized production build ...
+✓ Compiled successfully in 6.2s
+  Running TypeScript ...
+  Finished TypeScript in 10.3s ...
+  Collecting page data using 5 workers ...
+  Generating static pages using 5 workers (0/19) ...
+  Generating static pages using 5 workers (4/19) 
+  Generating static pages using 5 workers (9/19) 
+  Generating static pages using 5 workers (14/19) 
+✓ Generating static pages using 5 workers (19/19) in 558ms
+Turbopack build encountered 1 warning:
+./lib/uploader/journal.ts:232:15
+Warning: Dynamic filesystem access causes tracing of the whole project
+  [90m230 |[0m ...[90mResolves and checks the journal directory. `projectRoot` is the repository. */[0m
+  [90m231 |[0m ...[36mrt[0m [36mfunction[0m resolveJournalDir(configured: string | [36mundefined[0m, projectRoot: string): st...
+[33m[1m>[0m [90m232 |[0m ...[36mnst[0m dir = resolve(configured || join(homedir(), [32m".velora-ingest"[0m, [32m"journal"[0m));
+  [90m    |[0m              [33m[1m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+  [90m233 |[0m ...[36mnst[0m inside = relative(resolve(projectRoot), dir);
+  [90m234 |[0m ...[90m On another drive, relative() returns an absolute path: outside the repository.[0m
+  [90m235 |[0m ...[36mnst[0m inRepo = inside === [32m""[0m || (!inside.startsWith([32m".."[0m) && !isAbsolute(inside));
+
+Static analysis determined that this filesystem access causes the whole project to be traced and included in the output.
+This is usually unintentional and leads to all source files (including the public folder) to be deployed as part of the server code.
+This can slow down deployments or lead to failures when size limits are exceeded.
+To resolve this, you can
+- make sure the path is statically scoped to some subfolder, for example path.join(process.cwd(), 'data', bar), or
+- only use them in development, or
+- opt out by adding an ignore comment to the highlighted call: path.resolve(/*turbopackIgnore: true*/ ...), or
+- remove them.
+
+Import traces:
+  Server Component:
+    ./lib/uploader/journal.ts
+    ./lib/discovery/store.ts
+    ./lib/discovery/runtime.ts
+    ./app/admin/layout.tsx
+
+  App Route:
+    ./lib/uploader/journal.ts
+    ./lib/discovery/store.ts
+    ./lib/discovery/runtime.ts
+    ./lib/uploader/admin-runtime.ts
+    ./app/api/admin/uploads/[id]/transfer/route.ts
+
+
+  Finalizing page optimization ...
+
+Route (app)                           Revalidate  Expire
+┌ ○ /                                         5m      1y
+├ ○ /_not-found
+├ ƒ /[mediaType]/[id]
+├ ƒ /account
+├ ƒ /admin
+├ ƒ /admin/catalogue
+├ ƒ /admin/discovery
+├ ƒ /admin/discovery/[id]
+├ ○ /admin/uploads
+├ ƒ /admin/uploads/[id]
+├ ○ /admin/uploads/new
+├ ƒ /api/admin/uploads/[id]/transfer
+├ ƒ /api/media/download-token
+├ ƒ /api/media/stream-token
+├ ƒ /api/search-events
+├ ƒ /auth/callback
+├ ƒ /forgot-password
+├ ○ /icon.svg
+├ ƒ /movies
+├ ƒ /movies/[slug]
+├ ƒ /my-list
+├ ƒ /reset-password
+├ ƒ /search
+├ ƒ /series
+├ ƒ /series/[slug]
+├ ƒ /sign-in
+├ ƒ /sign-up
+├ ○ /vjs                                      5m      1y
+└ ƒ /vjs/[slug]
+
+
+ƒ Proxy (Middleware)
+
+○  (Static)   prerendered as static content
+ƒ  (Dynamic)  server-rendered on demand
+

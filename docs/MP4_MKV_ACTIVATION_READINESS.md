@@ -1,7 +1,8 @@
 # MP4/MKV activation readiness checklist
 
-Prepared at Checkpoint 7, 2026-10-12; sections 3, 10, 11 and 13 updated at
-Checkpoint 8, 2026-10-13. **Nothing in this list has been activated.**
+Prepared at Checkpoint 7, 2026-10-12. Sections 3, 5, 7, 10, 11 and 13 were updated
+and section 14 added at Checkpoint 8 and its final verification, 2026-10-13.
+**Nothing in this list has been activated.**
 It is the list to work through, with separate approval for each live step, before
 original-file playback facts and downloads go live. It records what is already
 proven locally, what is still open and what blocks activation.
@@ -160,6 +161,48 @@ hosted 17 ──► 1 ► 2 ► 3 ► 4 ► 5 ► 6 ──┴──► 8 admin P
 - [x] **Proven.** Graceful stop: readiness drops, new requests are refused, and
   running streams and downloads get 15 seconds.
 
+### Gateway environment configuration (complete list, Checkpoint 8)
+
+Every value is server-only and none may be `NEXT_PUBLIC_`. A missing or invalid
+required value stops the gateway at startup with exit code 78 and names the
+variable, never its value.
+
+| Variable | Required | What it is | Activation note |
+| --- | --- | --- | --- |
+| `MEDIA_GATEWAY_DATABASE_URL` | Yes | Connection as `velora_media_gateway`, nothing else | Any other user is refused. After migration 9 this role may execute two functions, the streaming and the download resolver |
+| `MEDIA_GATEWAY_TOKEN_SECRET` | Yes | HMAC key, base64url, at least 32 bytes | The same value on the web side. Rotating it invalidates every link at once and does not stop transfers already running |
+| `MEDIA_GATEWAY_SESSION_FILE` | Yes | The reader's MTProto session file | On a persistent, owner-only volume |
+| `TELEGRAM_MEDIA_BOT_ID`, `TELEGRAM_MEDIA_BOT_USERNAME` | Yes | Identity the reader must have | Must not equal an ingestion bot |
+| `TELEGRAM_MOVIES_CHANNEL_ID` | Yes | The one channel the reader may read | |
+| `TELEGRAM_MOVIES_BOT_ID` or `TELEGRAM_SERIES_BOT_ID` | At least one | Ingestion bot ids the reader must never be | |
+| `TELEGRAM_MEDIA_API_ID`, `TELEGRAM_MEDIA_API_HASH` | One pair | Telegram app credentials; fall back to `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | |
+| `MEDIA_GATEWAY_ALLOW_BOT_LOGIN`, `TELEGRAM_MEDIA_BOT_TOKEN` | No | First login only | Leave unset in production; the session file is reused |
+| `MEDIA_GATEWAY_HOST`, `MEDIA_GATEWAY_PORT` | No | Listen address, default `127.0.0.1:8787` | Behind a proxy keep it on loopback or a private interface (section 3) |
+| `MEDIA_GATEWAY_ALLOWED_ORIGINS` | No, but **required for downloads** | Exact web origins, comma-separated | Without it the download readiness probe cannot be read and no download starts |
+| `MEDIA_GATEWAY_MAX_ACTIVE_STREAMS`, `_MAX_STREAMS_PER_SUBJECT`, `_MAX_STREAMS_PER_IP` | No | Playback slots: 32, 3, 6 | Unchanged by Checkpoint 8 |
+| `MEDIA_GATEWAY_MAX_READS_IN_FLIGHT`, `_READ_AHEAD_PER_STREAM`, `_MAX_RESPONSE_BYTES` | No | Telegram reads: 8 shared, 2 ahead per stream, 8 MiB per playback response | The shared 8 also serve downloads |
+| `MEDIA_GATEWAY_REQUEST_TIMEOUT_MS` | No | Playback response deadline, 120 s | **Does not apply to downloads** |
+| `MEDIA_GATEWAY_IDLE_TIMEOUT_MS`, `_READ_TIMEOUT_MS` | No | 30 s without progress; 30 s per Telegram read | Apply to playback and downloads alike |
+| `MEDIA_GATEWAY_MAX_TOKEN_LIFETIME_SECONDS` | No | Longest capability accepted, 3,600 s | Downloads accept at most 600 s whatever this says |
+| `MEDIA_GATEWAY_REQUESTS_PER_SUBJECT_PER_WINDOW`, `_PER_IP_PER_WINDOW`, `MEDIA_GATEWAY_RATE_WINDOW_MS` | No | 120 and 240 requests per 60 s | Shared by playback and downloads. Collapses behind a proxy (section 3) |
+| `MEDIA_GATEWAY_DOWNLOAD_MAX_DURATION_MS` | No | Longest download response, 14,400,000 (4 hours) | New. 60,000 to 14,400,000. Can only be lowered |
+| `MEDIA_GATEWAY_DOWNLOAD_MAX_ACTIVE` | No | Downloads at once, 4 | New. 1 to 4. Can only be lowered |
+| `MEDIA_GATEWAY_DOWNLOAD_MAX_PER_USER` | No | Downloads at once per user, 1 | New. Only 1 is accepted |
+| `MEDIA_GATEWAY_DOWNLOAD_MAX_PER_IP` | No | Downloads at once per address, 2 | New. 1 to 2. Can only be lowered |
+
+Web side (Next.js server): `MEDIA_GATEWAY_TOKEN_SECRET`, the same value, and
+`MEDIA_GATEWAY_PUBLIC_ORIGIN`, the gateway's public HTTPS origin.
+
+Not configurable, by design: the capability lifetime (600 s, set by the issuer),
+the download recheck interval (30 s), its authorization deadline (5 s) and the
+download read-ahead (1).
+
+- [ ] **Open.** `.env.example` lists none of the four download settings, and its
+  comment on the database role still names one function. It carries an unrelated
+  uncommitted edit that is kept out of commits, so it was not touched.
+- [ ] **Open.** There is no trusted-proxy setting. See the item above and
+  `MP4_MKV_CHECKPOINT_8.md`, section 4.
+
 ## 4. Discovery listener image
 
 - [ ] **Open.** The running listener is `velora-discovery:gate-b` in metadata
@@ -191,12 +234,39 @@ hosted 17 ──► 1 ► 2 ► 3 ► 4 ► 5 ► 6 ──┴──► 8 admin P
 - [ ] **Open.** Gateway rollback is redeploying the previous image. The streaming
   contract is unchanged, so playback continues. Downloads then answer 404.
 - [ ] **Open.** Web rollback is redeploying the previous build.
-- [ ] **Open, gap.** There is **no runtime switch** for downloads. The download
-  limits can only be tightened in code. The fastest ways to stop downloads are
-  redeploying the previous gateway image or revoking the resolver's grant through
-  a new migration. Decide whether a switch is wanted before activation.
+- [ ] **Open, gap.** There is **no runtime switch** for downloads. Since
+  Checkpoint 8 the download limits can be lowered by configuration, but not to
+  zero: the smallest setting still allows one download. The ways to stop
+  downloads are listed below. Decide whether a switch is wanted before
+  activation.
 - [ ] **Open.** Listener rollback is the base compose file with the `gate-b`
   image, as done on 2026-10-11.
+- [ ] **Open, Checkpoint 8: rolling the continuation change back.** It is gateway
+  code only, with no database or web dependency. Redeploying a gateway image
+  built before `d38dd90` restores the ten-minute cut. The web text would then
+  overstate what happens ("keeps running, for up to 4 hours"), so roll the web
+  build back with it. Lowering `MEDIA_GATEWAY_DOWNLOAD_MAX_DURATION_MS` shortens
+  the maximum without a rebuild, down to 60 seconds, and needs a restart.
+- [ ] **Open, Checkpoint 8: stopping transfers that are already running.** Since
+  a running transfer no longer ends with its capability, these are the only ways
+  to end one, fastest first:
+  1. Restart the gateway. Running transfers are cut after its 15-second grace.
+     Every download fails and playback is interrupted too; viewers start again.
+  2. Unpublish the version, withdraw its rights or ban the account. The transfer
+     ends at its next recheck, within about 35 seconds. Each of these is its own
+     authorized operation with its own consequences for the catalogue.
+  3. Revoke the gateway role's right to run the download resolver (a new
+     migration). Every running download then fails its next recheck, and no new
+     one starts. Playback is not affected. This is reasoned from the code (a
+     failed recheck ends the transfer) and has not been rehearsed.
+  Rotating `MEDIA_GATEWAY_TOKEN_SECRET` invalidates every link but **does not
+  stop a running transfer**. Playback links fail too, and each player renews once.
+- [ ] **Open, recovery after a restart or an outage.** Nothing is persisted about
+  transfers, so there is nothing to repair. Viewers press Resume/Retry Download.
+  Their browser may continue the partial file only while the old link is inside
+  its ten minutes (section 11).
+- [ ] **Open.** A database outage ends every running download within about 35
+  seconds, because the recheck fails closed. That is the intended trade.
 
 ## 6. Health checks
 
@@ -295,6 +365,55 @@ hosted 17 ──► 1 ► 2 ► 3 ► 4 ► 5 ► 6 ──┴──► 8 admin P
 - [ ] **Open.** Memory under download load has not been measured in the
   container. Streaming peaked at about 76 MiB of a 256 MiB cap.
 
+### Download capacity estimates (Checkpoint 8)
+
+These are arithmetic from the limits, not measurements. **Read throughput from
+Telegram through a hosted gateway has never been measured**, so the rate column
+is an assumption. The only Telegram rate measured from this site is an upload at
+about 0.5 MB/s (E3.7).
+
+What one download costs: one slot of 4 for its whole duration, one Telegram
+read of at most 1 MiB at a time (of the 8 shared with playback), its bytes in
+from Telegram and the same bytes out to the viewer, and one database recheck
+every 30 seconds.
+
+| Rate per download | On The Hunt (1.01 GB) | Call of Heroes (1.92 GB) | Ceiling (2,000 MiB) | All 4 slots busy: uplink out | Out per day |
+| --- | --- | --- | --- | --- | --- |
+| 146 kB/s (the slowest that finishes the ceiling in 4 hours) | 115 min | 219 min | 240 min | 4.7 Mbit/s | 50 GB |
+| 0.5 MB/s | 34 min | 64 min | 70 min | 16 Mbit/s | 173 GB |
+| 2 MB/s | 8.4 min | 16 min | 17.5 min | 64 Mbit/s | 691 GB |
+| 5 MB/s | 3.4 min | 6.4 min | 7.0 min | 160 Mbit/s | 1,728 GB |
+
+Completed downloads per day if all four slots were busy all day:
+
+| Rate per download | On The Hunt | Call of Heroes | Ceiling |
+| --- | --- | --- | --- |
+| 146 kB/s | 50 | 26 | 24 |
+| 0.5 MB/s | 172 | 90 | 82 |
+| 2 MB/s | 686 | 360 | 330 |
+| 5 MB/s | 1,715 | 901 | 824 |
+
+The same number of gigabytes comes in from Telegram as goes out, so the host's
+transfer allowance has to cover twice the "out per day" figure.
+
+- [ ] **Open.** The rate is set by the slower of Telegram's read speed and the
+  viewer's connection. A viewer on a 1 Mbit/s link holds a slot for about 2
+  hours 15 minutes for On The Hunt. Four such viewers stop everyone else from
+  downloading for that long. There is no queue: a fifth viewer sees "temporarily
+  unavailable".
+- [ ] **Open.** Memory per download is one read of at most 1 MiB plus what the
+  socket has not yet accepted, in the order of 2 MiB, so about 8 MiB for four.
+  That is by construction and by the unit test that moves 128 MiB with one
+  bounded read. It has not been measured as process memory in the container.
+- [ ] **Open.** Playback during downloads. Four downloads can hold 4 of the 8
+  shared Telegram reads. Playback reads then queue behind them, with a 30-second
+  read timeout. Not measured.
+- [ ] **Open.** Database load is small: at most 8 recheck queries a minute for
+  four downloads, on a pool of 4 connections shared with playback requests.
+- [ ] **Open.** Telegram flood waits under sustained whole-file reads are
+  unknown. A flood wait before the first byte is a clean 503 with `Retry-After`;
+  one in the middle of a file cuts the transfer.
+
 ## 11. Download continuation (was: the ten-minute download deadline)
 
 - [x] **Implemented and proven locally at Checkpoint 8 (2026-10-13). Not
@@ -361,15 +480,68 @@ hosted 17 ──► 1 ► 2 ► 3 ► 4 ► 5 ► 6 ──┴──► 8 admin P
 
 ## 13. Order of activation, once each step is approved
 
-1. Decide gateway hosting (section 3), including how the gateway learns the
-   client address behind the TLS terminator. The download continuation policy
-   is implemented locally (section 11, Checkpoint 8).
-2. Real-device tests against a reachable test host (`MP4_MKV_DEVICE_TEST_PLAN.md`).
-3. Database: migration 9 for downloads; 7 for channel facts; 1 to 6 then 8 for
-   admin uploads. Each with the preflight in section 1.
-4. Gateway: rebuilt image, allowed origins, smoke checks (section 6).
-5. Listener image, only after migration 7 and the isolated lease test.
-6. Web deployment.
-7. Watch the signals in section 7 for the first transfers.
+Updated at the Checkpoint 8 final verification. Each numbered step is a separate
+approval. None has been given. A step is not started until the one before it
+has a recorded result.
 
-Each numbered step is a separate approval. None has been given.
+1. **Decide gateway hosting** (section 3): the host, the TLS terminator, how the
+   gateway learns the client address behind it, a single instance, and a
+   transfer allowance sized from section 10.
+2. **Build the trusted-proxy change** for that host, by the rules in
+   `MP4_MKV_CHECKPOINT_8.md`, section 4, and review the per-address limits
+   against carrier NAT. Local work, its own checkpoint.
+3. **Decide what happens to partial files after ten minutes** (section 11):
+   accept it, or approve a resumable client or a longer-lived resume credential.
+4. **Database, downloads only: migration 9**, with the preflight in section 1:
+   hosted history check, backup, restore rehearsal, one guarded transaction,
+   verification, advisors. Confirm the three `auth.users` columns first.
+5. **Gateway:** image rebuilt from the activation commit, the configuration in
+   section 3, then the smoke checks in section 6 for playback and for one
+   download probe.
+6. **Real-device tests** against that host (`MP4_MKV_DEVICE_TEST_PLAN.md`),
+   including I1, I3, I4, I5 and I9, and a measured whole-file transfer.
+7. **Web deployment.** Until this step no viewer sees a Download button that
+   works. Deploy database, gateway, web in that order (section 2).
+8. **Watch the signals in section 7** for the first transfers. Be ready to stop
+   them by the means in section 5.
+
+Independent of downloads, and each its own approval: migration 7 and then the
+listener image (section 4); migrations 1 to 6 and then 8 for admin uploads; the
+Policy 3 verification contract (section 12); the Telegram backlog (section 14).
+
+## 14. Telegram backlog restrictions
+
+Nothing in Checkpoints 2 to 8 touched Telegram, and none of it lifts a
+restriction on the existing backlog. These stay in force until each is
+separately approved (Gate C of the original brief).
+
+- [ ] **Blocked: no reinspection of the seven channel candidates.** They wait at
+  the media gate (`E3_8_MEDIA_RECOVERY.md`). None has passed. They are not to be
+  reinspected as a batch.
+- [ ] **Blocked: the canary.** Movies channel message 46 may be proposed as a
+  single-candidate live check. It has not been inspected, and the check needs
+  explicit approval and a path that cannot land on another film.
+- [ ] **Blocked: recorded evidence is not rewritten.** Message 50 keeps its
+  `mp4_not_fast_start` result and message 49 its `container_not_mp4` result,
+  with their confirmed film and VJ. Policy 3 would judge those original files
+  differently. That has to come from a new, approved inspection, never from
+  relabelling the old rows.
+- [ ] **Blocked: no Telegram send, replacement or deletion.** Existing documents
+  are preserved. No media is converted, remuxed or re-uploaded.
+- [ ] **Blocked: no rights approval or publication.** A new original cannot be
+  published anyway (section 12).
+- [ ] **Blocked: the listener.** Its image is `velora-discovery:gate-b`. It is
+  not to be rebuilt, restarted or replaced without approval, and a Policy 3
+  image must not run before migration 7 (section 4). On 2026-10-13 it was seen
+  running after Docker Desktop was started on the machine; it was not touched.
+- [x] **Proven.** The backlog cannot be reached through playback or download.
+  Both resolvers return only published movies with a ready, rights-cleared
+  version and an active VJ (database suites 008 and 020, run again on
+  2026-10-13). An unpublished
+  candidate has no version to name.
+- [x] **Proven.** Downloads read Telegram only through the dedicated reader, in
+  reads of at most 1 MiB, and only after authorization and publication pass.
+  They add no bot, no session and no write.
+- [ ] **Open.** Sustained whole-file reads are new traffic for the reader's
+  session. Their effect on flood waits, and on the listener's own bounded reads
+  if both ever share a reader, is not measured. Today they use separate sessions.
