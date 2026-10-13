@@ -1,0 +1,142 @@
+
+ RUN  v4.1.11 C:/Users/willi/veloraug
+
+ ✓ lib/uploader/uploader.test.ts (77 tests) 2619ms
+ ✓ lib/media-gateway/pump.test.ts (14 tests) 4012ms
+     ✓ writes each reply as it arrives (no whole-range buffer)  427ms
+     ✓ keeps at most readAhead reads in flight per stream  705ms
+     ✓ respects the global read semaphore across streams  1300ms
+     ✓ stops scheduling reads under backpressure until the sink drains  586ms
+     ✓ with a reader that cannot cancel, lets only already-issued reads finish  328ms
+ ✓ lib/discovery/operations.test.ts (7 tests) 5885ms
+     ✓ metadata matching config needs no reader session and touches neither unreachable endpoint  1637ms
+     ✓ bounded inspection still fails closed without dedicated reader configuration  1428ms
+     ✓ empty reader template values do not prevent metadata-only configuration  1388ms
+     ✓ metadata mode does not bypass separate live activation authorization  1420ms
+ ✓ lib/media-gateway/server.test.ts (25 tests) 2930ms
+     ✓ limits concurrent streams per subject  427ms
+     ✓ stops scheduling reads once the client disconnects  801ms
+     ✓ does not read ahead of a client that stops reading  959ms
+ ✓ lib/discovery/discovery.test.ts (49 tests) 2521ms
+ ✓ lib/media-gateway/download.test.ts (67 tests) 7435ms
+     ✓ full GET preserves video/mp4 bytes and filename  380ms
+     ✓ full GET preserves video/x-matroska bytes and filename  365ms
+     ✓ resumes an interrupted transfer with fresh capability and If-Range to reproduce SHA-256  519ms
+     ✓ a transfer authorized before expiry continues past it, byte-identical, and frees admission; the expired capability starts nothing new  451ms
+     ✓ one capability serves several requests in its lifetime, and every request is authorized on arrival  574ms
+     ✓ incrementally transfers 128 MiB with one bounded read and bounded downstream chunks  1381ms
+     ✓ counts the identity the deployment supplies, and holds four slots for the whole gateway  582ms
+ ✓ lib/uploader/staging.test.ts (17 tests) 1141ms
+     ✓ preserves origin, identity, attempts and media; persists and revalidates verified bytes  420ms
+ ✓ lib/ingestion/identity.test.ts (23 tests) 1059ms
+     ✓ changes when sampled content or size changes  516ms
+     ✓ offers an optional full-content hash for strong verification  351ms
+ ✓ lib/telegram/local-bot-api.test.ts (72 tests) 2437ms
+     ✓ a sendDocument reply that arrives late, but within the upload timeout, succeeds  1555ms
+     ✓ at the finite upload timeout the outcome is uncertain, never a definite failure, and nothing is retried  418ms
+     ✓ ordinary calls keep their own short timeout even when the upload timeout is long  318ms
+ ✓ lib/telegram/long-running-fetch.test.ts (10 tests) 2608ms
+     ✓ waits for headers as long as the signal allows, then returns a fetch Response  1551ms
+     ✓ the caller's signal is the finite limit: at its deadline the request is aborted with a TimeoutError  368ms
+     ✓ the deadline also destroys a response whose body has stalled  365ms
+ ✓ lib/uploader/normalize.test.ts (21 tests) 520ms
+ ✓ lib/playback/player.test.ts (58 tests) 183ms
+stderr | lib/playback/stream-token.test.ts > POST /api/media/stream-token: denials are normalized > fails closed when the issuer is not configured
+Stream capabilities are not configured: MEDIA_GATEWAY_TOKEN_SECRET
+
+ ✓ lib/playback/stream-token.test.ts (42 tests) 109ms
+ ✓ components/discovery-review.test.tsx (7 tests) 152ms
+ ✓ lib/media-gateway/issuer-contract.test.ts (7 tests) 69ms
+ ✓ lib/uploader/r2.test.ts (21 tests) 513ms
+ ✓ lib/uploader/disk-transfer.test.ts (5 tests) 123ms
+ ✓ lib/playback/download.test.ts (18 tests) 95ms
+ ✓ lib/media-gateway/boundary.test.ts (5 tests) 88ms
+ ✓ lib/telegram/mtproto-range.test.ts (12 tests) 75ms
+ ✓ lib/discovery/database.test.ts (30 tests) 74ms
+ ✓ lib/playback/download-token.test.ts (6 tests) 53ms
+ ✓ lib/ingestion/media.test.ts (33 tests) 111ms
+ ✓ lib/uploader/store.test.ts (19 tests) 50ms
+ ✓ lib/ingestion/recovery.test.ts (32 tests) 59ms
+ ✓ components/admin-upload-page.test.tsx (5 tests) 40ms
+ ✓ lib/uploader/admin-upload-actions.test.ts (7 tests) 38ms
+ ✓ lib/uploader/admin-inspection.test.ts (7 tests) 33ms
+ ✓ lib/uploader/r2-route.test.ts (4 tests) 33ms
+stderr | lib/discovery/cache-refresh.test.ts > authenticated publication cache coordination > refreshes every public surface from authoritative state and safely repeats after failure
+{"event":"review_action_refused","command":"refresh","code":"invalid_input"}
+
+ ✓ lib/discovery/cache-refresh.test.ts (2 tests) 29ms
+ ✓ lib/catalogue-boundary.test.ts (7 tests) 22ms
+ ✓ lib/playback/gateway-dev-check.test.ts (4 tests) 27ms
+ ✓ components/admin-catalogue.test.tsx (4 tests) 23ms
+ ✓ lib/auth-recovery.test.ts (12 tests) 25ms
+ ✓ lib/ingestion/boundary.test.ts (4 tests) 20ms
+ ✓ components/movie-player.test.tsx (6 tests) 25ms
+ ✓ lib/ingestion/lifecycle.test.ts (46 tests) 43ms
+ ✓ lib/ingestion/parser.test.ts (30 tests) 20ms
+ ✓ lib/uploader/publication.test.ts (6 tests) 14ms
+ ✓ components/auth-form.test.tsx (3 tests) 18ms
+ ✓ lib/playback/stream-capability.test.ts (35 tests) 13ms
+ ✓ components/movie-card.test.tsx (3 tests) 17ms
+ ✓ lib/discovery/security.test.ts (6 tests) 16ms
+ ✓ lib/media-gateway/token.test.ts (29 tests) 14ms
+ ✓ lib/media-gateway/config.test.ts (17 tests) 13ms
+ ✓ components/admin-upload-form.test.tsx (1 test) 13ms
+ ✓ lib/media-gateway/log.test.ts (8 tests) 12ms
+ ✓ lib/uploader/admin-upload.test.ts (6 tests) 11ms
+ ✓ lib/discovery/guidance.test.ts (7 tests) 13ms
+ ✓ lib/media-gateway/limits.test.ts (16 tests) 10ms
+ ✓ lib/media-gateway/range.test.ts (31 tests) 10ms
+ ✓ lib/playback/compatibility.test.ts (19 tests) 9ms
+ ✓ lib/playback/entitlement.test.ts (16 tests) 10ms
+ ✓ lib/media-gateway/range-reader.test.ts (3 tests) 8ms
+ ✓ lib/discovery/service.test.ts (4 tests) 10ms
+ ✓ lib/ingestion/original-media.test.ts (3 tests) 8ms
+ ✓ lib/watchlist-identity.test.ts (12 tests) 8ms
+ ✓ lib/utils.test.ts (9 tests) 9ms
+ ✓ lib/media-gateway/ports.test.ts (9 tests) 6ms
+ ✓ lib/browse.test.ts (3 tests) 5ms
+ ✓ lib/discovery/shutdown.test.ts (2 tests) 7ms
+ ✓ lib/discovery/media-probe.test.ts (1 test) 314ms
+   ✓ verifies a locally generated MP4 through the real bounded ffprobe adapter  312ms
+ ✓ lib/discovery/media-verification.test.ts (20 tests) 7757ms
+     ✓ inspects mp4-h264-aac-faststart.mp4 without replacing or transforming its bytes  1171ms
+     ✓ inspects mp4-h264-aac-moov-at-end.mp4 without replacing or transforming its bytes  950ms
+     ✓ inspects mkv-h264-aac.mkv without replacing or transforming its bytes  962ms
+     ✓ inspects mkv-h264-aac-two-audio.mkv without replacing or transforming its bytes  1255ms
+     ✓ inspects mkv-h264-aac-subtitles.mkv without replacing or transforming its bytes  1104ms
+     ✓ inspects mkv-hevc-aac.mkv without replacing or transforming its bytes  910ms
+     ✓ inspects mkv-h264-ac3.mkv without replacing or transforming its bytes  1349ms
+ ✓ lib/uploader/media-ffmpeg.test.ts (29 tests) 8112ms
+     ✓ E3.6: real ffprobe flags the covers attached_pic, and selection follows meaning, not position  777ms
+     ✓ Tom Clancy's [Jack_Ryan] (Ghost war) — Ünïcode & spaces.VJ ICE P.2026.mkv: stream copy, fast start, identical packets, source untouched  479ms
+     ✓ Slow Start.VJ Test.2024.mp4: stream copy, fast start, identical packets, source untouched  491ms
+     ✓ E: Cover Art.VJ Test.2024.mp4: the film and audio are copied, the cover is left out, packets identical, source untouched  614ms
+     ✓ E: Audio First Cover.VJ Test.2024.mp4: the film and audio are copied, the cover is left out, packets identical, source untouched  739ms
+     ✓ E: Cover First.VJ Test.2024.mp4: the film and audio are copied, the cover is left out, packets identical, source untouched  519ms
+     ✓ E: Matroska Cover.VJ Test.2024.mkv: the film and audio are copied, the cover is left out, packets identical, source untouched  504ms
+     ✓ the verifier catches a re-encode that keeps the codec, container and duration  335ms
+ ✓ lib/uploader/cli.test.ts (17 tests) 28482ms
+     ✓ loads every module and runs a read-only command  409ms
+     ✓ staging requires explicit selection and configuration without using provider credentials  381ms
+     ✓ refuses malformed reviewed years before provider configuration or network access  1090ms
+     ✓ refuses a real upload or resume in C2A.1, before reading any configuration  732ms
+     ✓ the runtime gate: only REAL_TELEGRAM_UPLOADS_AUTHORIZED=true passes, and its raw value is never printed  6768ms
+     ✓ status and dry runs show the sanitized state, never the raw value  2379ms
+     ✓ checkpoint validates its input and needs the channel configuration; it never calls Telegram  1333ms
+     ✓ a dry run selects exactly that entry, runs the offline preflight, and writes nothing  501ms
+     ✓ the dry run is independent of journal order: the last-sorting entry is selected just the same  496ms
+     ✓ without configuration the dry run still selects, and says it would not upload  497ms
+     ✓ --execute with the gate off refuses after selection and before any configuration, server or Telegram use  467ms
+     ✓ refuses bad selections with a code and a fixed message, never echoing the value  7210ms
+     ✓ a same-size change to the selected file is caught by the dry run's revalidation; the journal is not updated  515ms
+     ✓ an entry whose media was never verified is not uploaded, whatever its plan says (E3.5)  926ms
+     ✓ normalize, show and cleanup (E3.5): dry runs that explain themselves and write nothing  2487ms
+     ✓ show and normalize explain cover art and ambiguity per stream (E3.6), and write nothing  1800ms
+     ✓ a missing value is a clean usage error, not a stack trace  400ms
+
+ Test Files  65 passed (65)
+      Tests  1130 passed (1130)
+   Start at  21:30:28
+   Duration  29.21s (transform 2.97s, setup 0ms, import 11.95s, tests 80.22s, environment 13ms)
+
+JSON report written to C:/Users/willi/veloraug/docs/evidence/checkpoint8-unit.json

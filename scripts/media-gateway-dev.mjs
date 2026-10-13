@@ -51,6 +51,11 @@ const PASSED = [
   "MEDIA_GATEWAY_REQUESTS_PER_SUBJECT_PER_WINDOW",
   "MEDIA_GATEWAY_REQUESTS_PER_IP_PER_WINDOW",
   "MEDIA_GATEWAY_RATE_WINDOW_MS",
+  // Optional download limits; each can only tighten its default (lib/media-gateway/download.ts).
+  "MEDIA_GATEWAY_DOWNLOAD_MAX_DURATION_MS",
+  "MEDIA_GATEWAY_DOWNLOAD_MAX_ACTIVE",
+  "MEDIA_GATEWAY_DOWNLOAD_MAX_PER_USER",
+  "MEDIA_GATEWAY_DOWNLOAD_MAX_PER_IP",
 ];
 
 const args = new Set(process.argv.slice(2));

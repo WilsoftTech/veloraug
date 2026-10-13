@@ -12,6 +12,12 @@
  * reader readiness → catalogue resolution (publication) → Range → bytes.
  * No Telegram call happens before authorization and publication both pass,
  * and a client can name only an internal version id, never Telegram media.
+ *
+ * Downloads follow the same order on every request, new or resumed. A capability
+ * authorizes requests that start before it expires; a response that has started
+ * may then run past the expiry, up to the download duration limit. While it runs
+ * it stays under the periodic catalogue and user recheck, the idle and read
+ * timeouts and the client's connection, each of which ends it.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
@@ -160,8 +166,10 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
       if (!response.writableFinished) abort("client_closed");
     };
     response.on("close", onClose);
+    // The whole-response deadline. For a download it is the only time limit on an authorized
+    // transfer: the capability was checked above, when the request started, and its later expiry
+    // does not end the response. Revocation still does, through the recheck below.
     const requestTimer = setTimeout(() => abort(new GatewayError("upstream_timeout")), op === "download" ? downloadLimits.requestTimeoutMs : limits.requestTimeoutMs);
-    const expiryTimer = op === "download" ? setTimeout(() => abort(new GatewayError("authorization_expired")), Math.max(0, verified.claims.exp * 1000 - now())) : undefined;
     let recheckTimer: ReturnType<typeof setInterval> | undefined;
     let checking = false;
     // Race even adapters without cancellation against a bounded authorization deadline.
@@ -269,7 +277,7 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
       const fields = { servedBytes: result.bytesWritten, rpcCount: result.rpcCount, readsIssued: result.readsIssued, firstByteMs, status: response.headersSent ? status : undefined };
       if (result.outcome === "complete" && !controller.signal.aborted) {
         if (op === "download") {
-          // Hold admission, expiry and idle checks until the socket accepts the final bytes.
+          // Hold admission, the recheck and the idle and duration limits until the socket accepts the final bytes.
           await new Promise<void>((resolve, reject) => {
             const done = () => { controller.signal.removeEventListener("abort", aborted); resolve(); };
             const aborted = () => { response.off("finish", done); response.destroy(); reject(controller.signal.reason); };
@@ -300,7 +308,6 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
       return finish({ status: response.statusCode, code, outcome: "failed" }, "error");
     } finally {
       clearTimeout(requestTimer);
-      clearTimeout(expiryTimer);
       clearInterval(recheckTimer);
       clearTimeout(idleTimer);
       response.off("close", onClose);

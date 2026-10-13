@@ -1,6 +1,7 @@
 # MP4/MKV activation readiness checklist
 
-Prepared at Checkpoint 7, 2026-10-12. **Nothing in this list has been activated.**
+Prepared at Checkpoint 7, 2026-10-12; sections 3, 10, 11 and 13 updated at
+Checkpoint 8, 2026-10-13. **Nothing in this list has been activated.**
 It is the list to work through, with separate approval for each live step, before
 original-file playback facts and downloads go live. It records what is already
 proven locally, what is still open and what blocks activation.
@@ -134,13 +135,26 @@ hosted 17 ──► 1 ► 2 ► 3 ► 4 ► 5 ► 6 ──┴──► 8 admin P
   limits are per process. Two instances would double every limit and the
   one-download-per-user rule. A second instance needs an approved shared
   admission design first.
-- [ ] **Open, reverse proxy.** The per-IP limits use the socket peer address and
-  trust no forwarding header. Behind a proxy or tunnel every viewer shares one
-  address, so the defaults become global: 6 streams and 2 downloads in total.
-  Either expose the gateway directly or approve a trusted-proxy change.
+- [ ] **Blocked on the hosting decision: client identity behind a proxy.** The
+  per-address limits use the socket peer address and read no forwarding header
+  (tested at Checkpoint 8 with `X-Forwarded-For`, `X-Real-IP` and `Forwarded`
+  all set to different values). That is correct for a gateway that clients reach
+  directly. The gateway speaks plain HTTP and production needs HTTPS, so
+  something will terminate TLS in front of it, and then every viewer arrives
+  from that one address. The per-address defaults become global: 6 streams,
+  2 downloads and 240 requests a minute for all viewers together. The per-user
+  limits are not affected, because the user comes from the signed capability.
+  The rules a trusted-proxy change must follow are in
+  `MP4_MKV_CHECKPOINT_8.md`, section 4. It is not built: it needs to know which
+  proxy.
+- [ ] **Open, carrier NAT.** Viewers behind one carrier-grade NAT address share
+  the per-address allowance even with no proxy: 2 downloads and 6 streams per
+  address. How common that is for the audience has not been measured.
 - [ ] **Open, reverse proxy.** A proxy in front must not log query strings (the
   capability travels in the URL), must not cache or buffer responses, must pass
-  `Range` and `If-Range` through, and must allow a response to run for ten minutes.
+  `Range` and `If-Range` through, must close the upstream connection when the
+  viewer disconnects (that is what frees the slot), and must allow a response to
+  run for four hours with no total-duration cap below that.
 - [x] **Proven.** The gateway accepts only the restricted database role and
   refuses to become ready as any other identity.
 - [x] **Proven.** Graceful stop: readiness drops, new requests are refused, and
@@ -208,7 +222,8 @@ hosted 17 ──► 1 ► 2 ► 3 ► 4 ► 5 ► 6 ──┴──► 8 admin P
   | Signal | Why |
   | --- | --- |
   | `outcome=failed` or `timeout` on `route=download` | Cut transfers; viewers see a failed download |
-  | `authorization_expired` on downloads | Transfers hitting the ten-minute deadline (section 11) |
+  | `authorization_expired` on downloads | Resume attempts with a link older than ten minutes (section 11). Expected in small numbers; many means viewers are losing partial files |
+  | `outcome=timeout` on `route=download` near 14,400,000 ms | Transfers hitting the four-hour maximum |
   | `too_many_streams`, `rate_limited` | Limits too tight, or a proxy collapsing addresses |
   | `flood_wait`, `telegram_unavailable`, `mtproto_disconnected` | Telegram throttling or reader loss |
   | `catalogue_state` changes | Database unreachable or wrong identity |
@@ -257,7 +272,7 @@ hosted 17 ──► 1 ► 2 ► 3 ► 4 ► 5 ► 6 ──┴──► 8 admin P
 | Per signed user | 3 | 1 |
 | Per client address | 6 | 2 |
 | Response size | 8 MiB window | whole file, up to 2,000 MiB |
-| Response deadline | 120 s | 600 s |
+| Response deadline | 120 s | 4 hours (Checkpoint 8; was 600 s) |
 | Reads ahead | 2 | 1 |
 | Telegram reads in flight, shared | 8 | 8 |
 
@@ -268,46 +283,62 @@ hosted 17 ──► 1 ► 2 ► 3 ► 4 ► 5 ► 6 ──┴──► 8 admin P
   1 GB of egress. Size the host and its transfer allowance for that.
 - [ ] **Open.** Four concurrent downloads can occupy half of the shared Telegram
   reads. Watch playback start time when downloads are running.
+- [ ] **Open, since Checkpoint 8.** A download slot is now held for the whole
+  transfer, up to four hours, so four per process is the ceiling on viewers
+  downloading at the same time. A fifth gets "temporarily unavailable". The
+  ceiling can be lowered by configuration and raised only in code, after a load
+  test (`MP4_MKV_CHECKPOINT_8.md`, section 3).
+- [x] **Proven (Checkpoint 8).** Slots are counted correctly: four for the
+  process, one per signed user whatever address or link is used, two per
+  address, released once when the response ends, is cut or the client leaves.
+  The page's one-byte readiness probe takes a download slot for its duration.
 - [ ] **Open.** Memory under download load has not been measured in the
   container. Streaming peaked at about 76 MiB of a 256 MiB cap.
 
-## 11. The ten-minute download deadline
+## 11. Download continuation (was: the ten-minute download deadline)
 
-- [ ] **Decided 2026-10-12; not implemented. Blocked on Checkpoint 8.** The
-  decision: the capability keeps its ten-minute lifetime, and a transfer
-  authorized before expiry may continue beyond it. New and resumed requests need
-  fresh authentication and a new capability. The periodic revocation checks, the
-  resource limits and one download per user stay. The exact changes are in
-  `MP4_MKV_CHECKPOINT_7.md`, section 11. **Until Checkpoint 8 is implemented the
-  behaviour below is what the code does**, so downloads must not be activated
-  before it.
+- [x] **Implemented and proven locally at Checkpoint 8 (2026-10-13). Not
+  deployed.** The capability keeps its ten-minute lifetime. Every request, new or
+  resumed, is authorized when it arrives: signature, expiry, operation, version,
+  then publication, rights, VJ and the user. A response that has started is no
+  longer ended when its capability expires. It ends when it completes, when the
+  viewer disconnects, when a read or the socket stalls for 30 seconds, when the
+  30-second recheck finds the version or the user no longer allowed, or at the
+  maximum duration of four hours. Record: `MP4_MKV_CHECKPOINT_8.md`.
 
-  As built today, a download must finish within one capability: the gateway ends the response
-  when the capability expires, at most 600 seconds after it was issued. A browser
-  download cannot be continued with a new capability, because the new URL starts
-  a new download from byte 0. So a viewer whose connection, or whose path through
-  the gateway and Telegram, is slower than the rate below can never complete the
-  file, however often they retry.
+  What the four-hour maximum means for the published files:
 
-  | File | Size | Sustained rate needed |
+  | File | Size | Sustained rate needed to finish in 4 hours |
   | --- | --- | --- |
-  | On The Hunt (published) | 1,007,441,962 bytes | 1.68 MB/s, about 13.4 Mbit/s |
-  | Call of Heroes (published) | 1,917,405,700 bytes | 3.20 MB/s, about 25.6 Mbit/s |
-  | Ceiling | 2,097,152,000 bytes | 3.50 MB/s, about 28 Mbit/s |
+  | On The Hunt (published) | 1,007,441,962 bytes | 70 kB/s, about 0.56 Mbit/s |
+  | Call of Heroes (published) | 1,917,405,700 bytes | 133 kB/s, about 1.07 Mbit/s |
+  | Ceiling | 2,097,152,000 bytes | 146 kB/s, about 1.17 Mbit/s |
 
-  The Telegram upload measured in E3.7 ran at about 0.5 MB/s from this site.
-  Read throughput through the reader has not been measured for whole files.
-
-  Options that were considered: keep ten minutes and accept completion only on
-  fast links; a longer capability lifetime; a resumable client in the page. The
-  decision above is none of these. It keeps the short lifetime for starting a
-  transfer and removes the cut on a transfer that is already running.
-- [ ] **Open, part of Checkpoint 8.** A finite maximum transfer duration has to
-  replace the ten-minute response deadline. Its value is not decided.
+  Before Checkpoint 8 the same files needed 13.4, 25.6 and 28 Mbit/s, because
+  the response was cut at ten minutes.
+- [x] **Proven locally.** One capability serves several requests inside its ten
+  minutes, which is what lets a browser's own resume work. After expiry the same
+  link starts and resumes nothing (401, no media read).
+- [x] **Proven in the automated browsers (Chrome, Edge, Chromium).** After a
+  connection cut inside the ten minutes, the browser's download manager resumes
+  by itself on the same link with `Range` and `If-Range`, and the saved file is
+  byte-identical. Playwright's WebKit and Firefox builds send no resume request.
+- [x] **Proven in all six automated browser projects.** A newly issued link
+  never continues a partial file. Resume/Retry Download starts a new download at
+  byte 0. The page's text says so and promises no seamless resume.
+- [ ] **Open, consequence.** A viewer whose connection drops after the link's ten
+  minutes loses the partial file in every browser tested and starts again from
+  byte 0. On a slow, unreliable link a large file may never complete. Fixing
+  that needs a resumable client in the page or a longer-lived resume credential,
+  and neither is approved.
 - [ ] **Open.** Measure real read throughput for one published file through a
-  hosted gateway (a read-only operation that still needs approval). It sets the
-  maximum transfer duration and shows whether four concurrent slots are enough
-  once each is held for a whole transfer.
+  hosted gateway (a read-only operation that still needs approval). It shows
+  whether four hours and four concurrent slots are enough.
+- [ ] **Open.** Real Safari, iOS, Android and Firefox behaviour after an
+  interruption is not tested (`MP4_MKV_DEVICE_TEST_PLAN.md`, section 8).
+- [ ] **Open.** `.env.example` does not list the four download settings yet. It
+  has an unrelated uncommitted edit that the checkpoint rules keep out of
+  commits. The settings are documented in `MP4_MKV_CHECKPOINT_8.md`, section 3.
 
 ## 12. Rights-clearance and publication gates
 
@@ -330,8 +361,9 @@ hosted 17 ──► 1 ► 2 ► 3 ► 4 ► 5 ► 6 ──┴──► 8 admin P
 
 ## 13. Order of activation, once each step is approved
 
-1. Decide gateway hosting (section 3). Implement and test the download
-   continuation policy (section 11, Checkpoint 8).
+1. Decide gateway hosting (section 3), including how the gateway learns the
+   client address behind the TLS terminator. The download continuation policy
+   is implemented locally (section 11, Checkpoint 8).
 2. Real-device tests against a reachable test host (`MP4_MKV_DEVICE_TEST_PLAN.md`).
 3. Database: migration 9 for downloads; 7 for channel facts; 1 to 6 then 8 for
    admin uploads. Each with the preflight in section 1.

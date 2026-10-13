@@ -67,6 +67,13 @@ lifetimes above 600 seconds (or a tighter configured common cap). Missing or
 invalid tokens reach neither database nor media reader. Unavailable/user-denied
 versions return the same 404, without exposing private identity or resolver facts.
 
+> **Superseded at Checkpoint 8 (2026-10-13).** The gateway no longer terminates a
+> running download at expiry, and the response deadline is four hours, not ten
+> minutes. A capability still lasts 600 seconds and still has to be valid when a
+> request starts. Where this report says "terminates downloads at expiry",
+> "ten-minute response deadline" or "capability-expiry timer", read
+> `MP4_MKV_CHECKPOINT_8.md` instead. The rest of this report stands.
+
 The proposed 60-minute lifetime was not adopted: a new capability cannot extend
 an active response. The gateway terminates downloads at expiry. To continue,
 request the same issuer endpoint with a current authenticated session and resume

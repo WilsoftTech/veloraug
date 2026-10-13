@@ -62,6 +62,7 @@ const gatedReader: MediaReader = {
 
 const gateway = createMediaGateway({
   limits: config.limits,
+  downloadLimits: config.downloadLimits,
   tokenSecret: config.tokenSecret,
   resolver,
   reader: gatedReader,

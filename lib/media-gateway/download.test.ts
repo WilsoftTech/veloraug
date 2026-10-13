@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { createServer, request as httpRequest, type Server } from "node:http";
+import { createServer, request as httpRequest, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { DOWNLOAD_MAX_FILE_BYTES, downloadHeaders, type DownloadLimits } from "@/lib/media-gateway/download";
+import { DOWNLOAD_ENV_NAMES, DOWNLOAD_LIMITS, DOWNLOAD_MAX_DURATION_MS, DOWNLOAD_MAX_FILE_BYTES, downloadHeaders, downloadLimitsFromEnv, type DownloadLimits } from "@/lib/media-gateway/download";
 import { GatewayError } from "@/lib/media-gateway/errors";
 import { DEFAULT_LIMITS } from "@/lib/media-gateway/limits";
 import { createLogger } from "@/lib/media-gateway/log";
@@ -34,12 +34,12 @@ class DownloadResolver extends FakeResolver {
 }
 
 let server: Server | undefined;
-async function start(options: { reader?: FakeReader; resolver?: DownloadResolver; downloadLimits?: Partial<DownloadLimits>; limits?: Partial<typeof DEFAULT_LIMITS>; now?: () => number } = {}) {
+async function start(options: { reader?: FakeReader; resolver?: DownloadResolver; downloadLimits?: Partial<DownloadLimits>; limits?: Partial<typeof DEFAULT_LIMITS>; now?: () => number; clientIp?: (request: IncomingMessage) => string } = {}) {
   const reader = options.reader ?? new FakeReader();
   const resolver = options.resolver ?? new DownloadResolver();
   const logs: string[] = [];
   const gateway = createMediaGateway({ tokenSecret: SECRET, limits: { ...DEFAULT_LIMITS, ...options.limits },
-    reader, resolver, logger: createLogger(line => logs.push(line)), downloadLimits: options.downloadLimits, now: options.now });
+    reader, resolver, logger: createLogger(line => logs.push(line)), downloadLimits: options.downloadLimits, now: options.now, clientIp: options.clientIp });
   server = createServer(gateway.handle);
   await new Promise<void>(resolve => server!.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -143,13 +143,64 @@ describe("download security and resource safety",()=>{
     const h=await start({reader:new FakeReader({delayMs:40}),downloadLimits:{recheckMs:10}});
     const response=await fetch(h.url());h.resolver.current.fileUniqueId='replaced';await expect(response.arrayBuffer()).rejects.toThrow();
   });
-  it("token expiry terminates an active response and frees admission",async()=>{
+  // Checkpoint 8 replaces "token expiry terminates an active response": a capability authorizes
+  // requests that start in its lifetime, and a started transfer may outlive it.
+  it("a transfer authorized before expiry continues past it, byte-identical, and frees admission; the expired capability starts nothing new",async()=>{
     const now=Date.now();let clock=now;
     const h=await start({now:()=>clock,reader:new FakeReader({delayMs:40}),downloadLimits:{recheckMs:10}});
-    // Request starts with under 100ms of remaining life according to the injected gateway clock.
+    // The request starts with about 50 ms of capability life left on the gateway's clock.
     const t=h.token("download",1,SUBJECT,now,1);clock=Math.floor(now/1000)*1000+950;
-    const response=await fetch(h.url(t));await expect(response.arrayBuffer()).rejects.toThrow();
-    await tick(15);expect(h.gateway.activeStreams).toBe(0);
+    const response=await fetch(h.url(t));expect(response.status).toBe(200);
+    clock+=3_600_000; // an hour past expiry while the body is still being sent
+    const bytes=new Uint8Array(await response.arrayBuffer());
+    expect(hash(bytes)).toBe(hash(expectedBytes(0,SIZE)));
+    expect(h.resolver.downloadCalls).toBeGreaterThan(1); // the periodic recheck kept running past expiry
+    for(let n=0;n<40&&h.gateway.activeStreams;n++)await tick(5);
+    expect(h.gateway.activeStreams).toBe(0);
+    const reads=h.reader.calls,checks=h.resolver.downloadCalls;
+    expect((await get(h.url(t))).response.status).toBe(401);
+    expect((await get(h.url(t),{Range:'bytes=100-',"If-Range":response.headers.get("etag")!})).response.status).toBe(401);
+    expect(h.reader.calls).toBe(reads);expect(h.resolver.downloadCalls).toBe(checks);
+  });
+  it.each(['userAllowed','available'] as const)("%s revocation still ends a transfer that has outlived its capability",async field=>{
+    const now=Date.now();let clock=now;
+    const h=await start({now:()=>clock,reader:new FakeReader({delayMs:40}),downloadLimits:{recheckMs:10}});
+    const t=h.token("download",1,SUBJECT,now,1);clock=Math.floor(now/1000)*1000+950;
+    const response=await fetch(h.url(t));expect(response.status).toBe(200);
+    clock+=3_600_000;h.resolver[field]=false;
+    await expect(response.arrayBuffer()).rejects.toThrow();
+    for(let n=0;n<40&&h.gateway.activeStreams;n++)await tick(5);
+    expect(h.gateway.activeStreams).toBe(0);expect(h.reader.inFlight).toBe(0);
+  });
+  it("one capability serves several requests in its lifetime, and every request is authorized on arrival",async()=>{
+    const h=await start();const t=h.token();
+    const full=await get(h.url(t));expect(full.response.status).toBe(200);
+    const etag=full.response.headers.get("etag")!;
+    const part=await get(h.url(t),{Range:'bytes=1000-',"If-Range":etag});expect(part.response.status).toBe(206);
+    expect(hash(Buffer.concat([full.bytes.subarray(0,1000),part.bytes]))).toBe(hash(expectedBytes(0,SIZE)));
+    expect(h.resolver.downloadCalls).toBe(2); // each request resolved publication and the user afresh
+    const reads=h.reader.calls;
+    h.resolver.userAllowed=false; // entitlement revoked between requests
+    expect((await get(h.url(t),{Range:'bytes=1000-',"If-Range":etag})).response.status).toBe(404);
+    h.resolver.userAllowed=true;h.resolver.available=false; // unpublished between requests
+    expect((await get(h.url(t),{Range:'bytes=1000-',"If-Range":etag})).response.status).toBe(404);
+    expect(h.reader.calls).toBe(reads);
+  });
+  it("the download duration limit is four hours, cuts an over-long transfer mid-body and frees admission",async()=>{
+    expect(DOWNLOAD_LIMITS.requestTimeoutMs).toBe(4*60*60*1000);expect(DOWNLOAD_MAX_DURATION_MS).toBe(14_400_000);
+    const h=await start({reader:new FakeReader({delayMs:30}),downloadLimits:{requestTimeoutMs:150}});
+    h.resolver.current.fileSize=16*1024*1024; // sixteen reads: far longer than the tightened limit
+    const response=await fetch(h.url());expect(response.status).toBe(200);
+    await expect(response.arrayBuffer()).rejects.toThrow();
+    for(let n=0;n<40&&h.gateway.activeStreams;n++)await tick(5);
+    expect(h.gateway.activeStreams).toBe(0);expect(h.reader.inFlight).toBe(0);
+    expect(h.reader.calls).toBeLessThan(16);
+  });
+  it("the playback stream deadline is unchanged and independent of the download duration limit",async()=>{
+    expect(DEFAULT_LIMITS.requestTimeoutMs).toBe(120_000);
+    const h=await start({reader:new FakeReader({delayMs:200}),limits:{requestTimeoutMs:20}});
+    expect((await get(h.url(h.token("stream"),1,"stream"),{Range:'bytes=0-1023'})).response.status).toBe(504);
+    await tick(10);expect(h.gateway.activeStreams).toBe(0);
   });
   it("one download per user; stream admission remains independent; disconnect releases the slot",async()=>{
     const h=await start({reader:new FakeReader({delayMs:100})});
@@ -210,6 +261,72 @@ describe("download security and resource safety",()=>{
     expect(digest.digest('hex')).toBe(expected.digest('hex'));
     expect(received).toBe(128*1024*1024);expect(readCalls).toBe(128);expect(maxRead).toBe(1024*1024);
     expect(maxChunk).toBeLessThanOrEqual(2*1024*1024);expect(h.gateway.activeStreams).toBe(0);
+  });
+});
+
+describe("download slots and client identity",()=>{
+  const user=(n:number)=>`00000000-0000-4000-8000-0000000000${String(n).padStart(2,"0")}`;
+  const LONG=64*1024*1024; // slot tests hold transfers open, so the file must outlast the test
+  // A slow reader that costs no CPU: these tests count slots, and several transfers run at once.
+  const slowReader=()=>{const reader=new FakeReader();reader.readPart=(_locator,_offset,limit,signal)=>new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>resolve({bytes:Buffer.alloc(limit),rpcCount:1}),100);
+    signal.addEventListener("abort",()=>{clearTimeout(timer);reject(signal.reason);},{once:true});});return reader;};
+  const anyUser=()=>{const resolver=new DownloadResolver();resolver.resolveDownload=async()=>({...locator,fileSize:LONG});return resolver;};
+  const settle=async(h:{gateway:{activeStreams:number}})=>{for(let n=0;n<60&&h.gateway.activeStreams;n++)await tick(5);};
+
+  it("counts per-address slots by the socket peer and ignores every forwarding header",async()=>{
+    const h=await start({resolver:anyUser(),reader:slowReader()});
+    const aborts=[1,2,3].map(()=>new AbortController());
+    const open=(i:number)=>fetch(h.url(h.token("download",1,user(i))),{signal:aborts[i-1].signal,
+      headers:{"X-Forwarded-For":`203.0.113.${i}`,"X-Real-IP":`203.0.113.${i}`,Forwarded:`for=203.0.113.${i}`}});
+    // Hold every open response: an unreferenced one is closed by the client's garbage collector, which frees its slot.
+    const held=[await open(1),await open(2)];expect(held.map(r=>r.status)).toEqual([200,200]);
+    // Three users, three claimed addresses, one real peer: the per-address limit of two holds.
+    const third=await open(3);expect(third.status).toBe(429);await third.arrayBuffer();
+    for(const abort of aborts)abort.abort();await settle(h);expect(h.gateway.activeStreams).toBe(0);expect(held).toHaveLength(2);
+  });
+  it("counts the identity the deployment supplies, and holds four slots for the whole gateway",async()=>{
+    // Stands in for a deployment's trusted-proxy adapter; the gateway itself never reads a header.
+    const h=await start({resolver:anyUser(),reader:slowReader(),clientIp:request=>String(request.headers["x-test-client"])});
+    const aborts=[1,2,3,4,5].map(()=>new AbortController());
+    const open=(i:number)=>fetch(h.url(h.token("download",1,user(i))),{signal:aborts[i-1].signal,headers:{"X-Test-Client":`client-${i}`}});
+    const held:Response[]=[];for(const i of [1,2,3,4])held.push(await open(i)); // held, so the client keeps them open
+    expect(held.map(r=>r.status)).toEqual([200,200,200,200]);
+    const fifth=await open(5);expect(fifth.status).toBe(429);await fifth.arrayBuffer(); // gateway-wide limit
+    expect(h.gateway.activeStreams).toBe(4);
+    aborts[0].abort();for(let n=0;n<60&&h.gateway.activeStreams>3;n++)await tick(5);
+    expect(h.gateway.activeStreams).toBe(3);
+    const again=await fetch(h.url(h.token("download",1,user(5))),{headers:{"X-Test-Client":"client-5","Range":"bytes=0-10"}});
+    expect(again.status).toBe(206);await again.arrayBuffer(); // the freed slot is usable at once
+    for(const abort of aborts)abort.abort();await settle(h);expect(h.gateway.activeStreams).toBe(0);expect(held).toHaveLength(4);
+  });
+  it("one user holds one slot whatever address or capability the second request uses",async()=>{
+    const h=await start({reader:slowReader(),clientIp:request=>String(request.headers["x-test-client"]??"a")});h.resolver.current.fileSize=LONG;
+    const abort=new AbortController();const t=h.token();
+    const first=await fetch(h.url(t),{signal:abort.signal,headers:{"X-Test-Client":"a"}});expect(first.status).toBe(200);
+    for(const url of [h.url(t),h.url()]){const r=await fetch(url,{headers:{"X-Test-Client":"b"}});expect(r.status).toBe(429);await r.arrayBuffer();}
+    abort.abort();await settle(h);expect(h.gateway.activeStreams).toBe(0);
+  });
+});
+
+describe("download limits from the environment",()=>{
+  it("keeps every default when nothing is set",()=>expect(downloadLimitsFromEnv({})).toEqual({}));
+  it("accepts settings that tighten a default",()=>{
+    expect(downloadLimitsFromEnv({MEDIA_GATEWAY_DOWNLOAD_MAX_DURATION_MS:"3600000",MEDIA_GATEWAY_DOWNLOAD_MAX_ACTIVE:"2",MEDIA_GATEWAY_DOWNLOAD_MAX_PER_USER:"1",MEDIA_GATEWAY_DOWNLOAD_MAX_PER_IP:"1"}))
+      .toEqual({requestTimeoutMs:3_600_000,maxActiveStreams:2,maxStreamsPerSubject:1,maxStreamsPerIp:1});
+    expect(downloadLimitsFromEnv({MEDIA_GATEWAY_DOWNLOAD_MAX_DURATION_MS:"14400000",MEDIA_GATEWAY_DOWNLOAD_MAX_ACTIVE:"4"})).toEqual({requestTimeoutMs:14_400_000,maxActiveStreams:4});
+  });
+  it.each([["MEDIA_GATEWAY_DOWNLOAD_MAX_DURATION_MS","14400001"],["MEDIA_GATEWAY_DOWNLOAD_MAX_DURATION_MS","59999"],["MEDIA_GATEWAY_DOWNLOAD_MAX_ACTIVE","5"],
+    ["MEDIA_GATEWAY_DOWNLOAD_MAX_ACTIVE","0"],["MEDIA_GATEWAY_DOWNLOAD_MAX_PER_USER","2"],["MEDIA_GATEWAY_DOWNLOAD_MAX_PER_IP","3"],
+    ["MEDIA_GATEWAY_DOWNLOAD_MAX_ACTIVE","four"],["MEDIA_GATEWAY_DOWNLOAD_MAX_DURATION_MS","1e9"],["MEDIA_GATEWAY_DOWNLOAD_MAX_ACTIVE","-1"]])("refuses %s=%s: a setting can never raise a limit",(name,value)=>{
+    expect(()=>downloadLimitsFromEnv({[name]:value})).toThrow(name);
+  });
+  it("names exactly the four documented settings",()=>{
+    expect([...DOWNLOAD_ENV_NAMES].sort()).toEqual(["MEDIA_GATEWAY_DOWNLOAD_MAX_ACTIVE","MEDIA_GATEWAY_DOWNLOAD_MAX_DURATION_MS","MEDIA_GATEWAY_DOWNLOAD_MAX_PER_IP","MEDIA_GATEWAY_DOWNLOAD_MAX_PER_USER"]);
+  });
+  it("the gateway itself refuses a limit looser than its default, however it is passed in",async()=>{
+    for(const downloadLimits of [{requestTimeoutMs:14_400_001},{maxActiveStreams:5},{maxStreamsPerSubject:2},{maxStreamsPerIp:3},{maxTokenLifetimeSeconds:601}])
+      await expect(start({downloadLimits})).rejects.toThrow("must tighten the default");
   });
 });
 

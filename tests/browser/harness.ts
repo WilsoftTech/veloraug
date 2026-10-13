@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { open, readFile, type FileHandle } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
+import type { DownloadLimits } from "@/lib/media-gateway/download";
 import { DEFAULT_LIMITS, type GatewayLimits } from "@/lib/media-gateway/limits";
 import type { CatalogueMediaResolver, MediaLocator, MediaReader } from "@/lib/media-gateway/ports";
 import { createMediaGateway } from "@/lib/media-gateway/server";
@@ -63,6 +64,15 @@ export interface MediaRequest {
   bytesSent: number;
 }
 
+/** One request to the download route: what a browser's download manager asked for, and the answer. */
+export interface DownloadRequest extends MediaRequest {
+  ifRange: string | null;
+  /** The validator the gateway sent, which a resume has to quote in If-Range. */
+  etag: string | null;
+  /** The capability the request carried, to tell a reused link from a newly issued one. */
+  token: string | null;
+}
+
 export interface HarnessOptions {
   /** Optional original-download adapter for the frontend fixture tests; never contacts Telegram. */
   downloads?: boolean;
@@ -75,6 +85,10 @@ export interface HarnessOptions {
   maxResponseBytes?: number;
   /** Delay before each read of up to 1 MiB: a slow origin, for startup measurements. */
   readDelayMs?: number;
+  /** The gateway's clock, to move a running transfer past its capability's expiry. */
+  now?: () => number;
+  /** Download limits to tighten (the gateway refuses anything looser than its defaults). */
+  downloadLimits?: Partial<DownloadLimits>;
 }
 
 export interface Harness {
@@ -83,6 +97,8 @@ export interface Harness {
   streamUrl(fixture: ServedFile, subject: string): string;
   /** Media requests since the last reset. */
   requests: MediaRequest[];
+  /** Download-route requests since the last reset, the readiness probe included. */
+  downloads: DownloadRequest[];
   reset(): void;
   close(): Promise<void>;
 }
@@ -125,14 +141,18 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
       return { bytes: bytes.subarray(0, bytesRead), rpcCount: 1 };
     },
   };
-  const gateway = createMediaGateway({ limits: limits(options.maxResponseBytes ?? HARNESS_MAX_RESPONSE_BYTES), tokenSecret: SECRET, resolver, reader, logger: SILENT, allowedOrigins: options.allowedOrigins });
+  const gateway = createMediaGateway({ limits: limits(options.maxResponseBytes ?? HARNESS_MAX_RESPONSE_BYTES), tokenSecret: SECRET, resolver, reader, logger: SILENT, allowedOrigins: options.allowedOrigins, now: options.now, downloadLimits: options.downloadLimits });
   const page = await readFile(join(__dirname, "probe.html"));
   const requests: MediaRequest[] = [];
+  const downloads: DownloadRequest[] = [];
   let resetAt = Date.now();
 
-  function observe(request: IncomingMessage, response: ServerResponse, versionId: number) {
+  function observe(request: IncomingMessage, response: ServerResponse, versionId: number, download: boolean) {
     const entry: MediaRequest = { versionId, range: typeof request.headers.range === "string" ? request.headers.range : null, status: 0, contentRange: null, contentLength: 0, contentType: null, startedMs: Date.now() - resetAt, bytesSent: 0 };
-    requests.push(entry);
+    if (download) {
+      const ifRange = request.headers["if-range"];
+      downloads.push(Object.assign(entry, { ifRange: typeof ifRange === "string" ? ifRange : null, etag: null, token: new URL(request.url ?? "/", "http://harness.invalid").searchParams.get("token") }));
+    } else requests.push(entry);
     // The gateway passes its headers to writeHead, so that is the only place they can be read.
     const writeHead = response.writeHead.bind(response) as (status: number, headers?: Record<string, string>) => ServerResponse;
     response.writeHead = ((status: number, headers?: Record<string, string>) => {
@@ -140,6 +160,7 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
       entry.contentRange = headers?.["Content-Range"] ?? null;
       entry.contentLength = Number(headers?.["Content-Length"] ?? 0);
       entry.contentType = headers?.["Content-Type"] ?? null;
+      if ("etag" in entry) entry.etag = headers?.ETag ?? null;
       return writeHead(status, headers);
     }) as ServerResponse["writeHead"];
     const write = response.write.bind(response) as (chunk: Uint8Array) => boolean;
@@ -156,8 +177,9 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
       response.end(page);
       return;
     }
-    const version = /^\/v1\/movie-versions\/(\d+)\/stream$/.exec(path);
-    if (version) observe(request, response, Number(version[1]));
+    const version = /^\/v1\/movie-versions\/(\d+)\/(stream|download)$/.exec(path);
+    // Stream requests are recorded as before; for downloads only the GETs count, not a preflight.
+    if (version && (version[2] === "stream" || request.method === "GET")) observe(request, response, Number(version[1]), version[2] === "download");
     gateway.handle(request, response);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -166,8 +188,10 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
   return {
     origin,
     requests,
+    downloads,
     reset() {
       requests.splice(0);
+      downloads.splice(0);
       resetAt = Date.now();
     },
     streamUrl(fixture, subject) {

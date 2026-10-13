@@ -65,6 +65,12 @@ describe("gatewayConfigFromEnv", () => {
     expect(failures({ ...valid, MEDIA_GATEWAY_DATABASE_URL: undefined })).toEqual(["MEDIA_GATEWAY_DATABASE_URL"]);
   });
 
+  it("keeps the download defaults unless the operator tightens them, and names the group when a value is refused", () => {
+    expect(gatewayConfigFromEnv(valid).downloadLimits).toEqual({});
+    expect(gatewayConfigFromEnv({ ...valid, MEDIA_GATEWAY_DOWNLOAD_MAX_DURATION_MS: "7200000", MEDIA_GATEWAY_DOWNLOAD_MAX_ACTIVE: "2" }).downloadLimits).toEqual({ requestTimeoutMs: 7_200_000, maxActiveStreams: 2 });
+    expect(failures({ ...valid, MEDIA_GATEWAY_DOWNLOAD_MAX_ACTIVE: "8" })).toEqual(["MEDIA_GATEWAY_DOWNLOAD_* limits"]);
+  });
+
   it("refuses a short token secret", () => {
     expect(failures({ ...valid, MEDIA_GATEWAY_TOKEN_SECRET: Buffer.alloc(16).toString("base64url") })).toContain("MEDIA_GATEWAY_TOKEN_SECRET");
   });
@@ -91,6 +97,9 @@ describe("gatewayConfigFromEnv", () => {
     ["MEDIA_GATEWAY_DATABASE_URL", "mysql://x"],
     ["MEDIA_GATEWAY_DATABASE_URL", "postgresql://postgres:pw@localhost:5432/postgres"],
     ["MEDIA_GATEWAY_MAX_READS_IN_FLIGHT", "1000"],
+    ["MEDIA_GATEWAY_DOWNLOAD_MAX_ACTIVE", "5"],
+    ["MEDIA_GATEWAY_DOWNLOAD_MAX_DURATION_MS", "14400001"],
+    ["MEDIA_GATEWAY_DOWNLOAD_MAX_PER_USER", "2"],
   ])("fails closed on bad %s", (name, value) => {
     expect(failures({ ...valid, [name]: value }).length).toBeGreaterThan(0);
   });

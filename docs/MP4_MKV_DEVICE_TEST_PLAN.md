@@ -1,6 +1,7 @@
 # MP4/MKV real-device test plan
 
-Prepared at Checkpoint 7, 2026-10-12. **No test in sections 4 to 8 has been run.**
+Prepared at Checkpoint 7, 2026-10-12; sections 1 and 8 updated at Checkpoint 8,
+2026-10-13. **No test in sections 4 to 8 has been run.**
 This plan says what to test on physical devices, how, and what counts as a pass.
 It keeps the tests already executed apart from the ones that need a device.
 
@@ -29,12 +30,19 @@ What none of this shows:
   Safari. It decoded no audio and loaded no MKV on Windows, which says nothing
   about Safari.
 - **Chrome and Firefox on Android: not tested.**
-- **Edge on Windows** is covered by automation for playback. Its download manager
-  (pause, resume, interrupted transfers, the saved file) was exercised only for
-  small files that complete at once.
+- **Edge on Windows** is covered by automation for playback. Its download
+  manager was exercised with small files that complete at once and, at
+  Checkpoint 8, with one 6 MiB synthetic file whose transfer the test harness
+  cut on loopback. Its pause and resume buttons were never pressed.
+- **Interrupted downloads (Checkpoint 8, automated, loopback).** Chrome, Edge
+  and Chromium resumed by themselves on the same link and saved a byte-identical
+  file. Playwright's WebKit and Firefox builds sent no resume request. Those are
+  results for these builds under automation, with a harness-made cut. They are
+  not results for a lost mobile connection, for Safari or for real Firefox.
 - No feature-length MKV, no HEVC or AC-3 real movie, no mobile network, no
-  transfer that outlives a ten-minute capability, no real download manager
-  resume, no battery-saver or data-saver mode.
+  transfer that really outlives a ten-minute capability (the automated test
+  moves the gateway's clock instead of waiting), no resume started by a person
+  in a download manager, no battery-saver or data-saver mode.
 - The refused-automatic-start case (Checkpoint 7) is a deterministic model of
   what iOS Safari is documented to do. It is not a Safari result.
 
@@ -52,7 +60,7 @@ Both need approval; neither exists today.
   Telegram throughput or real sign-in.
 - **Route B, staging.** A hosted gateway on HTTPS with its allowed origins set,
   and a web deployment that points at it. It covers real movies, real sign-in,
-  long transfers and the ten-minute deadline. It depends on the gateway hosting
+  long transfers, the ten-minute link lifetime and the four-hour maximum. It depends on the gateway hosting
   decision and on migration 9 (`MP4_MKV_ACTIVATION_READINESS.md`).
 
 Larger MKV, HEVC and AC-3 files for Route B must be files Velora has the right to
@@ -151,28 +159,29 @@ player that supports the format (VLC).
 | D7 | Keyboard on desktop: Tab to Download, Enter | Download starts. Focus ring visible |
 | D8 | Phone, portrait and landscape | Button at least 44 px high, no horizontal scrolling |
 
-## 8. Interrupted transfers and the ten-minute deadline (Route B, large files)
+## 8. Interrupted transfers and the ten-minute link (Route B, large files)
 
 These are the cases the checklist marks as a blocker. They need a file large
 enough to take several minutes.
 
-**The expected results below describe the code as built at Checkpoint 7.** The
-download continuation policy decided on 2026-10-12 (`MP4_MKV_CHECKPOINT_7.md`,
-section 11) is implemented at Checkpoint 8 and changes I5: a transfer that
-started before the link expired then continues past ten minutes. I3 stays as
-written, because a resumed request still needs a link that has not expired. Run
-this section against a Checkpoint 8 build, and record which build was tested.
+**The expected results below describe a Checkpoint 8 build**
+(`MP4_MKV_CHECKPOINT_8.md`): a link can start or resume a download for ten
+minutes, a transfer that has started continues past that, up to four hours, and
+a new link starts a new download. Record which build was tested. A gateway
+image built before Checkpoint 8 still cuts every transfer at ten minutes.
 
 | ID | Steps | Record |
 | --- | --- | --- |
-| I1 | Start a large download. Record size, time and average speed | Whether it finishes inside ten minutes |
-| I2 | Start it, switch the network off after one minute, switch it on after 30 seconds, then use the **browser's own** resume | Does the browser resume from where it stopped (the gateway supports `Range` and `If-Range`) or fail? What does it show? |
-| I3 | As I2, but wait until more than ten minutes after the first press before resuming | Expected: the browser's resume fails, because the link has expired. Record the browser's message |
-| I4 | After I3, press **Resume/Retry Download** on the page | Does the browser continue the partial file or start a second file from zero? Record which. This decides whether a slow connection can ever finish |
-| I5 | Let a download run past ten minutes without interruption on a link too slow to finish | The transfer is cut at ten minutes. Record what the browser shows and whether the partial file is kept |
-| I6 | During a download, have an administrator unpublish the version on the test catalogue | The transfer stops within about 35 seconds |
+| I1 | Start a large download on a link slow enough to need more than ten minutes. Record size, time and average speed | Expected: it runs past ten minutes and completes. Size and hash match |
+| I2 | Start it, switch the network off after one minute, switch it on after 30 seconds, then use the **browser's own** resume | Does the browser resume from where it stopped, by itself or when asked, or fail? What does it show? Automated Chrome and Edge resumed by themselves after a server-side cut; a lost network is a different interruption |
+| I3 | As I2, but wait until more than ten minutes after the first press before resuming | Expected: the browser's resume fails, because the link has expired. Record the browser's message and whether it keeps the partial file |
+| I4 | After I3, press **Resume/Retry Download** on the page | Expected from every automated browser: a second download from zero, not a continuation. Record which the device does. If it is from zero, a connection that drops after ten minutes can only finish by starting again |
+| I5 | Let a download run past ten minutes without interruption | Expected: it continues and completes. Record the total time |
+| I6 | During a download that is already past ten minutes, have an administrator unpublish the version on the test catalogue | The transfer stops within about 35 seconds |
 | I7 | Phone: lock the screen during a download for two minutes | Whether the download continues, pauses or fails |
-| I8 | Phone: switch from Wi-Fi to mobile data during a download | As I2 |
+| I8 | Phone: switch from Wi-Fi to mobile data during a download | As I2. The gateway may refuse a resume with "too many" for up to 30 seconds, until it notices the first connection is dead; record whether the browser tries again |
+| I9 | After a download has failed, press **Resume/Retry Download** with a mouse or a finger | The page reacts. Under automation the Firefox build stopped delivering pointer clicks to the page after a cut transfer, while the keyboard still worked; the cause is not known. Check real Firefox on desktop and Android |
+| I10 | While a download is running, press Download again in a second tab | A clear message, not a second transfer (one download per account). After the first finishes, it works |
 
 ## 9. Pass criteria for the launch gate
 
@@ -184,7 +193,8 @@ this section against a Checkpoint 8 build, and record which build was tested.
 - D1 passes on every device. D2 is recorded for every device, pass or fail.
 - Every case in sections 4 to 8 has a recorded result or an explicit **not run**
   with the reason.
-- I4 and I5 have recorded results before downloads are enabled for viewers.
+- I1, I3, I4 and I5 have recorded results before downloads are enabled for
+  viewers.
 
 A failure is a finding, not a reason to change a test. Record it, with the device
 details, in the next checkpoint report.

@@ -3,11 +3,17 @@ import type { AddressInfo } from "node:net";
 import { resolve } from "node:path";
 import { createStreamTokenHandler } from "@/lib/playback/stream-token";
 import { GatewayError } from "@/lib/media-gateway/errors";
-import { FIXTURES, startHarness } from "./harness";
+import { FIXTURES, startHarness, type HarnessOptions } from "./harness";
 
 /** Isolated actual-player host, actual issuer/gateway, synthetic identity and local fixture media. */
-export async function startPlayerHarness() {
-  const state = { signedIn: true, entitled: true, published: true, expiredOnce: false, gatewayUnavailable: false };
+export async function startPlayerHarness(gatewayOptions: Pick<HarnessOptions, "fixtures" | "fixtureDir" | "readDelayMs" | "downloadLimits"> = {}) {
+  const state = { signedIn: true, entitled: true, published: true, expiredOnce: false, gatewayUnavailable: false,
+    /** Added to the issuer's and the gateway's clock alike: moves both past a capability's expiry. */
+    clockOffsetMs: 0,
+    /** Cut the next transfer once, when it reaches this byte offset: a connection lost mid-body. */
+    cutAtOffset: null as number | null,
+    /** Runs at the moment of the cut, before the browser can react to it. */
+    onCut: null as (() => void) | null };
   const requests: { operation: string; versionId: number }[] = [];
   let gatewayOrigin = "";
   const handler = (operation: "stream" | "download") => createStreamTokenHandler({
@@ -20,7 +26,7 @@ export async function startPlayerHarness() {
     loadConfig: () => ({ secret: new Uint8Array(32).fill(7), gatewayOrigin }),
     now: () => {
       if (operation === "download" && state.expiredOnce) return Date.now() - 601_000;
-      return Date.now();
+      return Date.now() + state.clockOffsetMs;
     },
   }, operation);
   const stream = handler("stream"); const download = handler("download");
@@ -52,6 +58,7 @@ export async function startPlayerHarness() {
           if (path.pathname !== "/fixture") return next();
           const ids = (path.searchParams.get("versions") ?? "1,4").split(",").map(Number);
           const versions = ids.map((id) => {
+            // A file served only by this run (gatewayOptions.fixtures) has no manifest entry: request it with ?legacy.
             const file = FIXTURES.find((item) => item.id === id)!;
             return { id, label: `VJ Fixture ${id}`, profile: path.searchParams.has("legacy") ? null : {
               container: path.searchParams.has("unsupported") ? "other" : file.container,
@@ -67,10 +74,16 @@ export async function startPlayerHarness() {
   // No .env loading or Next.js service startup. Only this disposable loopback fixture host.
   await vite.listen();
   const origin = `http://127.0.0.1:${(vite.httpServer!.address() as AddressInfo).port}`;
-  const gateway = await startHarness({ downloads: true, allowedOrigins: [origin],
+  const gateway = await startHarness({ ...gatewayOptions, downloads: true, allowedOrigins: [origin],
+    now: () => Date.now() + state.clockOffsetMs,
     downloadAccess: () => state.signedIn && state.entitled && state.published,
-    beforeRead: () => {
+    beforeRead: (offset) => {
       if (state.gatewayUnavailable) throw new GatewayError("telegram_unavailable");
+      if (state.cutAtOffset !== null && offset >= state.cutAtOffset) {
+        state.cutAtOffset = null;
+        state.onCut?.();
+        throw new GatewayError("telegram_unavailable");
+      }
     },
   });
   gatewayOrigin = gateway.origin;

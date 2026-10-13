@@ -65,6 +65,9 @@ describe("browser-managed download authorization and bounded readiness", () => {
     expect(anchor).toMatchObject({ href: URL, target: "_blank", rel: "noopener noreferrer", referrerPolicy: "no-referrer" });
     expect(anchor).not.toHaveProperty("download"); expect(anchor.remove).toHaveBeenCalledOnce(); expect(anchor.click).toHaveBeenCalledOnce();
     expect(DOWNLOAD_GUIDANCE).toContain("may restart"); expect(DOWNLOAD_GUIDANCE).toContain("cannot track completion");
+    // A started download continues; a link only starts or resumes one for ten minutes. No seamless-resume promise.
+    expect(DOWNLOAD_GUIDANCE).toContain("keeps running"); expect(DOWNLOAD_GUIDANCE).toContain("start or resume a download for 10 minutes");
+    expect(DOWNLOAD_GUIDANCE).not.toMatch(/seamless|automatically|always resume/i);
   });
 });
 

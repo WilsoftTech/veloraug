@@ -3,11 +3,13 @@ export const DOWNLOAD_MESSAGES: Record<DownloadFailure, string> = {
   auth_required: "Sign in again to download or continue this movie.",
   not_entitled: "Download access has been revoked or is not included for this account.",
   unavailable: "This movie is no longer available to download.",
-  expired: "The download link expired. Resume/Retry Download requests fresh authorization.",
+  expired: "The download link expired before it could be used. Resume/Retry Download requests fresh authorization.",
   network: "Could not reach the download service. Check your connection, then use Resume/Retry Download.",
   temporarily_unavailable: "Download is temporarily unavailable. Try again in a moment.",
 };
-export const DOWNLOAD_GUIDANCE = "Downloads use the browser's download manager. Links last 10 minutes. If interrupted, use Resume/Retry Download for a fresh authorized link. Your browser may restart instead of resuming the partial file; check its download manager. This page cannot track completion.";
+// The gateway lets a transfer that started inside the link's ten minutes run on, up to four hours
+// (lib/media-gateway/download.ts). Only starting or resuming needs a link that has not expired.
+export const DOWNLOAD_GUIDANCE = "Downloads use the browser's download manager. A download that has started keeps running, for up to 4 hours. A link can start or resume a download for 10 minutes; after that, use Resume/Retry Download for a fresh authorized link. Your browser may restart instead of resuming the partial file; check its download manager. This page cannot track completion.";
 type DownloadResult = { ok: true; url: string; format: "MP4" | "MKV" } | { ok: false; failure: DownloadFailure };
 
 /** Every invocation authenticates again. Only a one-byte Range readiness probe is fetched by JavaScript. */

@@ -5,6 +5,7 @@
  * NEXT_PUBLIC_). The Next.js application reads only the shared token secret, to
  * issue stream capabilities (E2: lib/playback/stream-capability.ts).
  */
+import { downloadLimitsFromEnv, type DownloadLimits } from "@/lib/media-gateway/download";
 import { limitsFromEnv, type GatewayLimits } from "@/lib/media-gateway/limits";
 import { GATEWAY_DATABASE_ROLE } from "@/lib/media-gateway/resolver-sql";
 import { parseMediaTokenSecret } from "@/lib/media-gateway/token";
@@ -18,6 +19,8 @@ export interface GatewayConfig {
   allowBotLogin: boolean;
   allowedOrigins: string[];
   limits: GatewayLimits;
+  /** Download settings the operator tightened; absent keys keep the defaults (lib/media-gateway/download.ts). */
+  downloadLimits: Partial<DownloadLimits>;
   telegram: {
     apiId: number;
     apiHash: string;
@@ -86,8 +89,14 @@ export function gatewayConfigFromEnv(env: Env): GatewayConfig {
   } catch {
     bad.push("MEDIA_GATEWAY_* limits");
   }
+  let downloadLimits: Partial<DownloadLimits> | null = null;
+  try {
+    downloadLimits = downloadLimitsFromEnv(env);
+  } catch {
+    bad.push("MEDIA_GATEWAY_DOWNLOAD_* limits");
+  }
 
-  if (bad.length > 0 || !limits || !secret) throw new GatewayConfigError(bad);
+  if (bad.length > 0 || !limits || !downloadLimits || !secret) throw new GatewayConfigError(bad);
   return {
     host,
     port,
@@ -97,6 +106,7 @@ export function gatewayConfigFromEnv(env: Env): GatewayConfig {
     allowBotLogin,
     allowedOrigins: origins,
     limits,
+    downloadLimits,
     telegram: { apiId, apiHash, readerBotId, readerUsername, readerBotToken, moviesChannelId, ingestionBotIds },
   };
 }
