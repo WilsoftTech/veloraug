@@ -62,11 +62,26 @@ const REASONS: Record<string, string> = {
   video_metadata_incomplete: "The video track is missing its codec or dimensions.",
   audio_metadata_incomplete: "An audio track is missing its codec, channels or sample rate.",
   track_codec_unknown: "A track has no recognisable codec.",
+  // The verification contract (a whole-file inspection).
+  content_size_mismatch: "Fewer bytes could be read than the file's recorded size.",
+  content_truncated: "The film stops before the duration its container reports: the file is cut short.",
+  decode_failed: "The film did not decode from start to end without an error: the file is damaged.",
+  decode_timeout: "Decoding the film did not finish in time.",
+  media_not_decodable: "The file has no film stream or no duration to decode against.",
+  mp4_fragmented_untested: "The MP4 is fragmented, a layout the player has not been tested with.",
+  mp4_index_unusable: "The MP4 has no complete index to start playback from.",
+  seek_decode_failed: "The file did not decode after seeking into it, so a viewer could not skip forward or back.",
+  verification_storage_unavailable: "The verifier had nowhere to hold the file while reading it.",
+  mkv_tracks_incomplete: "The MKV's track list could not be read from the start of the file.",
 };
 export const reasonText = (code: string): string => REASONS[code] ?? `Not accepted by the media policy: ${code.replaceAll("_", " ")}.`;
 
 const verified = (candidate: ReviewCandidate): boolean =>
-  Boolean(candidate.evidence?.browser && candidate.evidence.container && candidate.evidence.gateway && candidate.evidence.accessible);
+  // The database's own media predicate where it reports one; the earlier policies' four findings otherwise.
+  candidate.evidence?.facts?.publishable === true
+  || Boolean(candidate.evidence?.browser && candidate.evidence.container && candidate.evidence.gateway && candidate.evidence.accessible);
+/** Whether the file's media passes, for the queue's one-word summary. */
+export const mediaPasses = verified;
 
 /**
  * A Policy 3 inspection that accepted the original file. That is recorded

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { classifyMedia, readMp4Layout, selectPlaybackStreams, verifyRemux, type MediaInspection, type PlaybackSelection } from "@/lib/ingestion/media";
 import { newJournalEntry, openJournal, type JournalEntry } from "@/lib/uploader/journal";
-import { digestPackets, freeBytes, probeMedia, remux, resolveMediaTools, runProcess, type MediaTools } from "@/lib/uploader/media-tools";
+import { decodeStreams, digestPackets, freeBytes, probeMedia, remux, resolveMediaTools, runProcess, spoolDocument, type MediaTools } from "@/lib/uploader/media-tools";
 import { normalizeEntry, type NormalizeDeps } from "@/lib/uploader/normalize";
 import { fingerprintFile, withReadRange } from "@/lib/uploader/scan";
 import type { SourceFingerprint } from "@/types/ingestion";
@@ -288,6 +288,67 @@ describe.skipIf(!tools)("real Class 2 normalization", () => {
     renameSync(`${path}.tmp`, path);
     expect(await fingerprintFile(path, bytes.length)).not.toBe(result.rendition.fingerprint as SourceFingerprint);
   }, 120_000);
+});
+
+// Checkpoint 10: the two helpers of the Policy 3 verification contract, on the committed synthetic browser fixtures.
+describe.skipIf(!tools)("real whole-file decode and seek (verification contract)", () => {
+  const fixture = (name: string) => join("tests/browser/fixtures", name);
+  it("decodes a whole fixture to its end, and after a seek, reporting how far it got", async () => {
+    for (const [name, audio] of [["mp4-h264-aac-moov-at-end.mp4", [1]], ["mkv-h264-aac-two-audio.mkv", [1, 2]]] as const) {
+      const whole = await decodeStreams(tools!.ffmpeg, fixture(name), { video: 0, audio });
+      expect(whole.outcome, name).toBe("decoded"); expect(whole.frames, name).toBeGreaterThan(100); expect(whole.seconds, name).toBeGreaterThan(11.5);
+      const seek = await decodeStreams(tools!.ffmpeg, fixture(name), { video: 0, audio: [1] }, { start: 9, seconds: 2 });
+      expect(seek, name).toMatchObject({ outcome: "decoded" }); expect(seek.frames, name).toBeGreaterThan(0); expect(seek.seconds, name).toBeLessThanOrEqual(2.2);
+    }
+  });
+  it("a truncated file, a damaged one and one that is not media are failures, never a shorter success", async () => {
+    const source = readFileSync(fixture("mkv-h264-aac.mkv"));
+    const truncated = join(work, "truncated.mkv"), damaged = join(work, "damaged.mkv"), noise = join(work, "noise.mkv");
+    writeFileSync(truncated, source.subarray(0, 150_000));
+    const broken = Buffer.from(source); broken.fill(0, 120_000, 140_000); writeFileSync(damaged, broken);
+    writeFileSync(noise, Buffer.alloc(50_000, 7));
+    const cut = await decodeStreams(tools!.ffmpeg, truncated, { video: 0, audio: [1] });
+    // FFmpeg exits 0 for a file that ends early; its message and the short decode are what give it away.
+    expect(cut.outcome).toBe("decode_failed"); expect(cut.seconds).toBeLessThan(10);
+    expect((await decodeStreams(tools!.ffmpeg, damaged, { video: 0, audio: [1] })).outcome).toBe("decode_failed");
+    expect((await decodeStreams(tools!.ffmpeg, noise, { video: 0, audio: [1] })).outcome).toBe("decode_failed");
+    expect((await decodeStreams(tools!.ffmpeg, fixture("mkv-h264-aac.mkv"), { video: 0, audio: [1] }, null, runProcess, 1)).outcome).toBe("decode_timeout");
+    // The source fixture was only read.
+    expect(createHash("sha256").update(readFileSync(fixture("mkv-h264-aac.mkv"))).digest("hex")).toBe(createHash("sha256").update(source).digest("hex"));
+  });
+});
+
+describe("spooling a document for verification (no real tools needed)", () => {
+  const spool = join(work, "spool");
+  const document = Buffer.from(Array.from({ length: 2_500_000 }, (_, index) => (index * 31 + 7) & 0xff));
+  const reader = (bytes: Buffer, calls: number[] = []) => async (offset: number, length: number) => { calls.push(length); return bytes.subarray(offset, offset + length); };
+  const leftovers = () => { try { return statSync(spool).isDirectory() ? readFileSync : null; } catch { return null; } };
+  it("reads the document once, in order, in bounded pieces, hashes every byte and removes its copy", async () => {
+    const calls: number[] = [];
+    let seen = "";
+    const result = await spoolDocument(spool, reader(document, calls), document.length, async (file) => {
+      seen = file.path;
+      expect(createHash("sha256").update(readFileSync(file.path)).digest("hex")).toBe(file.sha256);
+      return { sha256: file.sha256, bytes: file.bytes };
+    });
+    expect(result).toEqual({ sha256: createHash("sha256").update(document).digest("hex"), bytes: document.length });
+    expect(calls).toEqual([1_048_576, 1_048_576, 402_848]);
+    expect(() => statSync(seen)).toThrow(); expect(leftovers()).not.toBeNull();
+  });
+  it("reports a reader that stops short as fewer bytes, and removes the copy when the caller or the reader fails", async () => {
+    const short = await spoolDocument(spool, reader(document.subarray(0, 1_500_000)), document.length, async (file) => file.bytes);
+    expect(short).toBe(1_500_000);
+    let path = "";
+    await expect(spoolDocument(spool, reader(document), document.length, async (file) => { path = file.path; throw new Error("verification_failed_midway"); })).rejects.toThrow("verification_failed_midway");
+    expect(() => statSync(path)).toThrow();
+    await expect(spoolDocument(spool, async () => { throw new Error("media_read_failed"); }, document.length, async () => "unreached")).rejects.toThrow("media_read_failed");
+  });
+  it("refuses, before reading anything, a place it cannot use or a document the volume cannot hold", async () => {
+    const calls: number[] = [];
+    for (const [dir, size] of [["relative/spool", 1000], [spool, 0], [spool, Number.MAX_SAFE_INTEGER]] as const)
+      await expect(spoolDocument(dir, reader(document, calls), size, async () => "unreached")).rejects.toThrow("verification_storage_unavailable");
+    expect(calls).toEqual([]);
+  });
 });
 
 describe("tool discovery (no real tools needed)", () => {

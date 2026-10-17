@@ -28,7 +28,7 @@ export function MediaVerification({ report, id = "media", children }: { report: 
       <p className="mt-2 break-words text-body-sm text-muted">{status.detail}</p>
     </li>; })}</ul>
     <dl className="mt-4 grid grid-cols-1 gap-2 break-words text-body-md sm:grid-cols-2">
-      {report.details.map((detail) => <div key={detail.label} className="contents"><dt className="text-muted">{detail.label}</dt><dd className="min-w-0 break-all">{detail.value}</dd></div>)}
+      {[...report.details, ...report.provenance].map((detail) => <div key={detail.label} className="contents"><dt className="text-muted">{detail.label}</dt><dd className="min-w-0 break-all">{detail.value}</dd></div>)}
       {children}
     </dl>
     {report.reasons.length > 0 && <div className="mt-4">

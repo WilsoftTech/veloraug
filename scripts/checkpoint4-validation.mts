@@ -11,6 +11,9 @@ import { assessOriginalMedia } from "@/lib/ingestion/original-media";
 const base="20261011192618_original_media_evidence.sql";
 const admin="20261011192619_admin_original_media_evidence.sql";
 const downloads="20261011200813_original_media_download_resolver.sql";
+// Checkpoint 10: the verification contract. Applied last in the alternate order, as in the repository's.
+const verification="20261014090000_original_media_verification.sql";
+const adminVerification="20261014090001_admin_original_media_verification.sql";
 const pending=["20261011083200_admin_upload_sessions.sql","20261011084309_admin_upload_disk_chunks.sql",
   "20261011085220_admin_upload_inspection.sql","20261011093300_admin_upload_r2_staging.sql",
   "20261011094004_admin_upload_r2_worker.sql","20261011095632_admin_upload_r2_visibility.sql"];
@@ -32,7 +35,7 @@ const snapshotSql=`select jsonb_build_object(
   'movies',(select jsonb_agg(to_jsonb(x) order by id) from public.movies x),
   'versions',(select jsonb_agg(to_jsonb(x) order by id) from public.movie_versions x),
   'documents',(select jsonb_agg(to_jsonb(x) order by id) from private.telegram_media x),
-  'evidence',(select jsonb_agg(to_jsonb(x)-array['assessment','integrity_status','streaming_status','browser_profile','download_status','tracks','warnings'] order by id) from private.media_evidence x));`;
+  'evidence',(select jsonb_agg(to_jsonb(x)-array['assessment','integrity_status','streaming_status','browser_profile','download_status','tracks','warnings','content_sha256'] order by id) from private.media_evidence x));`;
 const schemaSql=`select jsonb_build_object(
   'functions',(select jsonb_agg(jsonb_build_array(n.nspname,p.proname,pg_get_function_identity_arguments(p.oid),pg_get_functiondef(p.oid),p.prosecdef,p.proconfig,(select jsonb_agg(a::text order by a::text) from unnest(p.proacl) a),pg_get_userbyid(p.proowner)) order by n.nspname,p.proname,pg_get_function_identity_arguments(p.oid)) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname in ('private','public','catalogue_access','catalogue_review','media_gateway')),
   'columns',(select jsonb_agg(to_jsonb(x) order by table_schema,table_name,ordinal_position) from information_schema.columns x where table_schema in ('private','public')),
@@ -41,8 +44,8 @@ const schemaSql=`select jsonb_build_object(
 
 try {
   // Hosted-equivalent migration set from the recorded audit, not a live claim.
-  assert.equal(readdirSync("supabase/migrations").filter(n=>n.endsWith(".sql")).length,26);
-  up({rest:false,seed:true,excludeMigrations:[...pending,base,admin,downloads]});
+  assert.equal(readdirSync("supabase/migrations").filter(n=>n.endsWith(".sql")).length,28);
+  up({rest:false,seed:true,excludeMigrations:[...pending,base,admin,downloads,verification,adminVerification]});
   sql(`insert into private.telegram_media(bot_type,chat_id,message_id,file_id,file_unique_id,media_kind,file_size_bytes,mime_type,telegram_date)
     values('movie',-1009990004444,1,'synthetic-only','synthetic-cp4', 'document',1000,'video/mp4',now());
     insert into private.media_evidence(telegram_media_id,media_identity,method,policy_version,media_class,reasons,container,video_codec,audio_codec,accessible,gateway_compatible,playback_ready,bytes_read)
@@ -61,6 +64,8 @@ try {
   for(const name of pending) apply(name);
   apply(admin);
   apply(downloads);
+  apply(verification);
+  apply(adminVerification);
   assert.equal(sql(snapshotSql),before,"pending/admin migration changed existing data");
   const alternate=sql(schemaSql);
   console.log("17 + channel + six pending + admin + additive download resolver: accepted");

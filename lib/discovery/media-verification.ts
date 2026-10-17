@@ -1,5 +1,7 @@
 import { audioStreams, inspectionFromProbe, matroskaDocType, completeMatroskaTracks, playableVideo, readMp4Layout, type MediaClass } from "@/lib/ingestion/media";
 import { assessOriginalMedia, classifyOriginalMovie, ORIGINAL_MEDIA_POLICY_VERSION } from "@/lib/ingestion/original-media";
+import { verifiedAssessment, verifyOriginal, WHOLE_FILE_METHOD, WHOLE_FILE_SCOPE, type VerificationDecoder } from "@/lib/discovery/original-verification";
+import type { MediaInspection } from "@/lib/ingestion/media";
 import type { ReadRange } from "@/lib/ingestion/fingerprint";
 import { channelIdentity } from "@/lib/discovery/events";
 import type { InspectionPorts } from "@/lib/discovery/pipeline";
@@ -14,7 +16,7 @@ function readFailure(error: unknown): string {
 }
 // Conditions of the reader or the probe that pass by themselves. A document
 // that does not resolve or is outside the policy needs another file, not a retry.
-const TRANSIENT_REASONS = new Set(["media_read_not_ready", "media_read_telegram_unavailable", "media_read_flood_wait", "media_read_mtproto_disconnected", "media_read_upstream_timeout", "probe_timeout"]);
+const TRANSIENT_REASONS = new Set(["media_read_not_ready", "media_read_telegram_unavailable", "media_read_flood_wait", "media_read_mtproto_disconnected", "media_read_upstream_timeout", "probe_timeout", "verification_storage_unavailable"]);
 
 /**
  * Read-only inspection of original MP4/MKV documents through the gateway reader.
@@ -44,8 +46,8 @@ export interface ChannelMediaEvidence {
   gateway_compatible: boolean;
   playback_ready: boolean;
   bytes_read: number;
-  assessment?: ReturnType<typeof assessOriginalMedia>;
-  inspection_scope?: "bounded";
+  assessment?: ReturnType<typeof assessOriginalMedia> | ReturnType<typeof verifiedAssessment>;
+  inspection_scope?: "bounded" | typeof WHOLE_FILE_SCOPE;
 }
 
 /**
@@ -183,6 +185,68 @@ export async function verifyChannelMedia(
   };
 }
 
+/** What a whole-file verification needs beyond the bounded ports: somewhere to hold the document while it is read, and the tools. */
+export interface WholeFilePorts extends VerificationPorts {
+  /** Reads the whole document once into a private temporary file, hashing it; the file is gone when `handle` returns. */
+  spool<T>(read: ReadRange, sizeBytes: number, handle: (file: { path: string; sha256: string; bytes: number }) => Promise<T>): Promise<T>;
+  /** A full probe of the spooled file, or null when it cannot be probed. */
+  inspect(path: string): Promise<MediaInspection | null>;
+  decoder(path: string): VerificationDecoder;
+  tools: { ffmpeg: string; ffprobe: string };
+  now: () => Date;
+}
+
+/**
+ * Whole-file verification of one channel document (the Policy 3 verification
+ * contract, lib/ingestion/original-verification.ts). The bounded inspection
+ * runs first and decides whether the document is worth reading whole. Then
+ * every byte is read through the same reader the gateway serves from, hashed
+ * and decoded. The document is never modified, and the temporary copy is
+ * removed whatever happens.
+ *
+ * The result is evidence for this identity only. A read that failed, a
+ * document shorter than recorded and a full disk are reported as what they
+ * are; none of them becomes a verdict on the file, and none is ever verified.
+ */
+export async function verifyChannelOriginal(document: { identity: string; sizeBytes: number; mediaType: string | null }, ports: WholeFilePorts,
+  budget: { maxHeadBytes: number; tailBytes: number } = DEFAULT_VERIFICATION_BUDGET): Promise<ChannelMediaEvidence> {
+  const bounded = await verifyChannelMedia(document, ports, budget);
+  if (bounded.media_class !== "original") return bounded;
+  let bytesRead = bounded.bytes_read;
+  const failed = (reasons: string[]): ChannelMediaEvidence => ({
+    identity: document.identity, method: WHOLE_FILE_METHOD, policy_version: ORIGINAL_MEDIA_POLICY_VERSION, media_class: "unverified", reasons,
+    container: null, video_codec: null, audio_codec: null, accessible: false, gateway_compatible: ports.gatewayCompatible, playback_ready: false, bytes_read: bytesRead, inspection_scope: WHOLE_FILE_SCOPE,
+  });
+  const counted: ReadRange = async (offset, length) => {
+    const bytes = await ports.read(offset, length);
+    bytesRead += bytes.byteLength;
+    return bytes;
+  };
+  try {
+    return await ports.spool(counted, document.sizeBytes, async (file) => {
+      // Fewer bytes than recorded: the digest would be of another file. Nothing about it is recorded as a finding.
+      if (file.bytes !== document.sizeBytes) return failed(["content_size_mismatch"]);
+      const inspection = await ports.inspect(file.path);
+      if (!inspection) return failed(["probe_failed"]);
+      const assessment = assessOriginalMedia(inspection);
+      const verification = await verifyOriginal({ inspection, assessment, sizeBytes: document.sizeBytes, sha256: file.sha256, bytesHashed: file.bytes,
+        mediaType: document.mediaType, tools: ports.tools, now: ports.now }, ports.decoder(file.path));
+      const result = verifiedAssessment(assessment, verification);
+      return {
+        identity: document.identity, method: WHOLE_FILE_METHOD, policy_version: ORIGINAL_MEDIA_POLICY_VERSION,
+        media_class: result.accepted ? "original" as const : "unverified" as const, reasons: result.reasons,
+        container: result.container, video_codec: token(playableVideo(inspection)[0]?.codec), audio_codec: token(audioStreams(inspection)[0]?.codec),
+        accessible: true, gateway_compatible: ports.gatewayCompatible,
+        // Browser readiness and publication approval are never asserted by inspection.
+        playback_ready: false, assessment: result, inspection_scope: WHOLE_FILE_SCOPE, bytes_read: bytesRead,
+      };
+    });
+  } catch (error) {
+    const code = (error as { message?: unknown } | null)?.message;
+    return failed([code === "verification_storage_unavailable" ? code : readFailure(error)]);
+  }
+}
+
 /** The exact document a verification reads: its private Telegram location and declared size. Never logged. */
 export interface ChannelDocument { chatId: number; messageId: number; fileUniqueId: string; sizeBytes: number; mimeType: string | null }
 
@@ -204,6 +268,18 @@ export function channelMediaPort(open: (document: ChannelDocument) => ReadRange,
     if (!identity || !sizeBytes) return { duplicateOf: null, source: null, evidence: null, verification: null };
     const read = open({ chatId: event.channelId, messageId: event.messageId, fileUniqueId: event.media.uniqueId, sizeBytes, mimeType: event.media.mime });
     const verification = await verifyChannelMedia({ identity, sizeBytes }, { read, probe, gatewayCompatible: options.gatewayCompatible ?? true }, options.budget ?? DEFAULT_VERIFICATION_BUDGET);
+    return { duplicateOf: null, source: null, evidence: null, verification };
+  };
+}
+
+/** The media port of a keyed whole-file verification (lib/discovery/database.ts, verifyOne). Same reader, same identity rules. */
+export function channelVerificationPort(open: (document: ChannelDocument) => ReadRange, ports: Omit<WholeFilePorts, "read">, budget?: { maxHeadBytes: number; tailBytes: number }): InspectionPorts["media"] {
+  return async (event) => {
+    const identity = channelIdentity(event);
+    const sizeBytes = event.media.size;
+    if (!identity || !sizeBytes) return { duplicateOf: null, source: null, evidence: null, verification: null };
+    const read = open({ chatId: event.channelId, messageId: event.messageId, fileUniqueId: event.media.uniqueId, sizeBytes, mimeType: event.media.mime });
+    const verification = await verifyChannelOriginal({ identity, sizeBytes, mediaType: event.media.mime }, { ...ports, read }, budget ?? DEFAULT_VERIFICATION_BUDGET);
     return { duplicateOf: null, source: null, evidence: null, verification };
   };
 }

@@ -6,6 +6,7 @@ import {
   INITIAL_PLAYER_STATE,
   MIN_RENEWAL_INTERVAL_MS,
   PLAYER_FAILURE_MESSAGES,
+  playerFailureMessage,
   RENEW_BEFORE_EXPIRY_MS,
   classifyMediaError,
   defaultVersion,
@@ -397,5 +398,21 @@ describe("capability renewal through the E2 issuer", () => {
     w.state.user = null;
     expect(await requestStreamCapability(1, w.fetchImpl)).toEqual({ ok: false, failure: "auth_required" });
     expect(w.calls.catalogue).toBe(0);
+  });
+});
+
+// Checkpoint 10: no advice to download where no download is offered.
+describe("failure text for a viewer with no Download control", () => {
+  it("never mentions downloading, and still says what went wrong", () => {
+    for (const failure of Object.keys(PLAYER_FAILURE_MESSAGES) as (keyof typeof PLAYER_FAILURE_MESSAGES)[]) {
+      const offered = playerFailureMessage(failure, true), withheld = playerFailureMessage(failure, false);
+      expect(offered, failure).toBe(PLAYER_FAILURE_MESSAGES[failure]);
+      expect(withheld, failure).not.toMatch(/download/i);
+      expect(withheld.length, failure).toBeGreaterThan(10);
+      // Where the full text gives no such advice, the two are the same text.
+      if (!/download/i.test(offered)) expect(withheld, failure).toBe(offered);
+    }
+    expect(playerFailureMessage("unsupported_container", false)).toBe("This browser player cannot play this container.");
+    expect(playerFailureMessage("slow_metadata", false)).toBe("Movie metadata is taking too long to load. Retry playback.");
   });
 });

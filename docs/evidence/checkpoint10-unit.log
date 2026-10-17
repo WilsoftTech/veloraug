@@ -1,0 +1,9 @@
+
+ RUN  v4.1.11 C:/Users/willi/veloraug
+
+
+ Test Files  67 passed (67)
+      Tests  1197 passed (1197)
+   Start at  01:42:29
+   Duration  28.88s (transform 3.63s, setup 0ms, import 13.86s, tests 93.01s, environment 9ms)
+

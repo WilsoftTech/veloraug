@@ -67,6 +67,23 @@ test("download switch off: no Download control, both server sides refuse a reque
   expect(host.gateway.requests.every((request) => request.status === 206)).toBe(true);
 });
 
+test("download switch off: a file the player cannot play is explained without suggesting a download", async ({ page, host }) => {
+  host.state.issuerDownloads = false; host.state.gatewayDownloads = false;
+  // An unsupported container, then MKV with AC-3: both carry advice to download when a download is offered.
+  for (const query of ["versions=1&unsupported", "versions=13"]) {
+    await page.goto(`${host.origin}/fixture?${query}`);
+    await expect(page.getByLabel("Playback compatibility")).toBeVisible();
+    await expect(page.getByRole("button", { name: /Download/ })).toHaveCount(0);
+    expect(await page.locator("body").innerText()).not.toMatch(/download/i);
+  }
+  await expect(page.getByText("This audio codec may play silently.", { exact: true })).toBeVisible();
+  // With the switch on, the same page gives the advice together with the control.
+  host.state.issuerDownloads = true; host.state.gatewayDownloads = true;
+  await page.goto(`${host.origin}/fixture?versions=13`);
+  await expect(page.getByRole("button", { name: "Download (MKV)", exact: true })).toBeVisible();
+  await expect(page.getByText("Download the original file to use a compatible player.")).toBeVisible();
+});
+
 test("a page opened before the switch went off cannot download, and says why", async ({ page, host }) => {
   await page.goto(`${host.origin}/fixture?versions=1`);
   const button = page.getByRole("button", { name: "Download (MP4)", exact: true });

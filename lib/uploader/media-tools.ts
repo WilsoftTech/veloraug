@@ -1,6 +1,7 @@
 import "server-only";
 import { spawn } from "node:child_process";
-import { mkdtemp, open, rm, stat, statfs, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, open, rm, stat, statfs, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, delimiter, isAbsolute, join } from "node:path";
 import { createPacketDigest, inspectionFromProbe, matroskaDocType, packetListArguments, readMp4Layout, remuxArguments, type MediaInspection, type PacketDigest, type PlaybackSelection } from "@/lib/ingestion/media";
@@ -219,6 +220,71 @@ export async function validatePlayback(ffmpeg: MediaTool,path: string,run: Runne
   const result=await run(ffmpeg.path,["-hide_banner","-v","error","-nostdin","-protocol_whitelist","file,pipe","-err_detect","explode","-xerror","-threads","2","-i",path,"-map","0:v:0","-map","0:a:0","-f","null","-"],{timeoutMs:60*60*1000,maxStdoutBytes:64*1024});
   if(result.timedOut)throw new Error("upload_decode_timeout");
   if(result.code!==0 || result.stderrTail.trim())throw new Error("upload_media_corrupt");
+}
+
+/**
+ * Reads a whole remote document once, in order, into a private temporary file
+ * under `dir`, hashing every byte (Policy 3 whole-file verification of a channel
+ * document). The file exists only while `handle` runs and is always removed. It
+ * refuses before reading when the volume cannot hold the document. A failed
+ * read is the reader's own error, unchanged.
+ */
+export async function spoolDocument<T>(dir: string, read: (offset: number, length: number) => Promise<Uint8Array>, sizeBytes: number,
+  handle: (file: { path: string; sha256: string; bytes: number }) => Promise<T>, chunkBytes = 1024 * 1024): Promise<T> {
+  if (!isAbsolute(dir) || !Number.isSafeInteger(sizeBytes) || sizeBytes <= 0) throw new Error("verification_storage_unavailable");
+  let folder: string;
+  try {
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    if ((await freeBytes(dir)) < sizeBytes + 256 * 1024 * 1024) throw new Error("verification_storage_unavailable");
+    folder = await mkdtemp(join(dir, "velora-verify-"));
+  } catch {
+    throw new Error("verification_storage_unavailable");
+  }
+  try {
+    const path = join(folder, "original");
+    const file = await open(path, "wx", 0o600);
+    const hash = createHash("sha256");
+    let bytes = 0;
+    try {
+      while (bytes < sizeBytes) {
+        const chunk = await read(bytes, Math.min(chunkBytes, sizeBytes - bytes));
+        // A short reply ends the read: the caller sees fewer bytes than the document's recorded size.
+        if (!chunk.byteLength) break;
+        hash.update(chunk);
+        let written = 0;
+        while (written < chunk.byteLength) written += (await file.write(chunk, written, chunk.byteLength - written, bytes + written)).bytesWritten;
+        bytes += chunk.byteLength;
+      }
+    } finally { await file.close(); }
+    return await handle({ path, sha256: hash.digest("hex"), bytes });
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
+}
+
+/** How far a decode got. `seconds` and `frames` are the film's video, as FFmpeg's own progress reports them. */
+export interface DecodeResult { outcome: "decoded" | "decode_failed" | "decode_timeout"; seconds: number; frames: number }
+
+/**
+ * Decodes the film's video and the named audio streams, with every decoder
+ * error fatal and nothing written (Policy 3 verification,
+ * lib/ingestion/original-verification.ts). `window` seeks first and decodes
+ * only that long: a test that the file can be entered at that point. A message
+ * on stderr is a failure even when FFmpeg exits 0, which is how it reports a
+ * file that ends early.
+ */
+export async function decodeStreams(ffmpeg: MediaTool, path: string, streams: { video: number; audio: readonly number[] }, window: { start: number; seconds: number } | null = null, run: Runner = runProcess, timeoutMs = 2 * 60 * 60 * 1000): Promise<DecodeResult> {
+  let seconds = 0, frames = 0;
+  const result = await run(ffmpeg.path, ["-hide_banner", "-v", "error", "-nostdin", "-protocol_whitelist", "file,pipe", "-err_detect", "explode", "-xerror", "-threads", "2",
+    ...(window ? ["-ss", window.start.toFixed(3)] : []), "-i", path, "-map", `0:${streams.video}`, ...streams.audio.flatMap((index) => ["-map", `0:${index}`]),
+    ...(window ? ["-t", window.seconds.toFixed(3)] : []), "-progress", "pipe:1", "-nostats", "-f", "null", "-"],
+  { timeoutMs, maxStdoutBytes: 0, onLine: (line) => {
+    const [key, value] = line.split("=");
+    if (key === "frame" && /^\d+$/.test(value ?? "")) frames = Number(value);
+    else if (key === "out_time_us" && /^\d+$/.test(value ?? "")) seconds = Number(value) / 1_000_000;
+  } });
+  if (result.timedOut) return { outcome: "decode_timeout", seconds, frames };
+  return { outcome: result.code === 0 && !result.stderrTail.trim() ? "decoded" : "decode_failed", seconds, frames };
 }
 
 /**

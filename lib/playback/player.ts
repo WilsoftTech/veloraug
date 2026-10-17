@@ -76,6 +76,19 @@ export const PLAYER_FAILURE_MESSAGES: Record<PlayerFailure, string> = {
   temporarily_unavailable: "Playback is temporarily unavailable. Try again in a moment.",
 };
 
+/** The same failures for a viewer who is offered no download (the server's switch is off, or they are signed out). */
+const WITHOUT_DOWNLOAD: Partial<Record<PlayerFailure, string>> = {
+  unsupported_container: "This browser player cannot play this container.",
+  unsupported_video: "This browser could not decode the video codec.",
+  unsupported_audio: "The audio codec may be unsupported.",
+  missing_video: "The browser loaded media without a decoded picture.",
+  missing_audio: "The browser reports no decoded audio. Sound may be missing.",
+  slow_metadata: "Movie metadata is taking too long to load. Retry playback.",
+};
+/** What to tell the viewer. Downloading is suggested only when a Download control is on the page. */
+export const playerFailureMessage = (failure: PlayerFailure, downloadOffered: boolean): string =>
+  (downloadOffered ? undefined : WITHOUT_DOWNLOAD[failure]) ?? PLAYER_FAILURE_MESSAGES[failure];
+
 export function playerReducer(state: PlayerState, event: PlayerEvent): PlayerState {
   switch (event.type) {
     case "play_requested":

@@ -26,7 +26,9 @@ const CHANNEL = -1007776665556;
 const REVIEW = "00000000-0000-4000-8000-0000000009a1", RIGHTS = "00000000-0000-4000-8000-0000000009a2", PUBLISH = "00000000-0000-4000-8000-0000000009a3", NOBODY = "00000000-0000-4000-8000-0000000009a4";
 const POLICY3 = ["20261011192618_original_media_evidence.sql", "20261011192619_admin_original_media_evidence.sql"];
 const NOT_ON_HOSTED = ["20261011083200_admin_upload_sessions.sql", "20261011084309_admin_upload_disk_chunks.sql", "20261011085220_admin_upload_inspection.sql", "20261011093300_admin_upload_r2_staging.sql",
-  "20261011094004_admin_upload_r2_worker.sql", "20261011095632_admin_upload_r2_visibility.sql", ...POLICY3, "20261011200813_original_media_download_resolver.sql"];
+  "20261011094004_admin_upload_r2_worker.sql", "20261011095632_admin_upload_r2_visibility.sql", ...POLICY3, "20261011200813_original_media_download_resolver.sql",
+  // Checkpoint 10: the verification contract, which builds on Policy 3.
+  "20261014090000_original_media_verification.sql", "20261014090001_admin_original_media_verification.sql"];
 const REST = `http://127.0.0.1:${ISOLATED.restPort}`;
 
 const sql = (statement: string) => { const result = psql(statement); assert.equal(result.code, 0, result.err); return result.out.trim(); };
@@ -91,7 +93,7 @@ const read = async (message: number) => (await reviewer(REVIEW).get(key(message)
 const leaks = (candidate: unknown) => JSON.stringify(candidate).includes("synthetic-bot-file");
 
 try {
-  assert.equal(readdirSync("supabase/migrations").filter((name) => name.endsWith(".sql")).length, 26);
+  assert.equal(readdirSync("supabase/migrations").filter((name) => name.endsWith(".sql")).length, 28);
   const tools = await resolveMediaTools();
   assert.ok(tools.ok, "VELORA_FFPROBE_PATH and VELORA_FFMPEG_PATH are required: the fixtures are inspected for real");
 
@@ -144,7 +146,7 @@ try {
   assert.equal(sql("select count(*) from public.movies where publication_status='published' and tmdb_id in (9910101,9910102)"), "1");
   console.log("hosted-equivalent 17: anonymous, non-reviewer, review-only, rights-only and publish-only accounts each refused outside their capability; the earlier publication path works; the refused file cannot be approved");
 
-  // 2. The repository's 26 migrations: real Policy 3 inspections of the committed fixtures.
+  // 2. Every migration in the repository: real bounded Policy 3 inspections of the committed fixtures.
   up({ rest: true });
   await reachable();
   setup();
@@ -195,5 +197,5 @@ try {
   assert.equal(sql("select count(*) from private.media_evidence where policy_version=3 and (verified or integrity_status='verified' or streaming_status='verified')"), "0");
   assert.equal(await refusal(() => createReviewClient(rpcAs({ role: "anon" })).get(key(201))), "review_not_authorized");
   assert.equal(await refusal(() => reviewer(NOBODY).list()), "review_not_authorized");
-  console.log(`repository 26: ${posts.length} originals inspected for real; Policy 3 facts reach the reviewer view; none is verified, none can be approved or published, and no dashboard value changed that`);
+  console.log(`whole repository chain: ${posts.length} originals inspected for real (bounded); Policy 3 facts reach the reviewer view; none is verified, none can be approved or published, and no dashboard value changed that`);
 } finally { down(); }

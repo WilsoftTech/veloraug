@@ -3,8 +3,9 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { assembleDiskUpload,diskManifestSchema,existingVerifiedUploadPath } from "@/lib/uploader/disk-transfer";
 import { fingerprintFile,hashFile } from "@/lib/uploader/scan";
-import { probeMedia,resolveMediaTools,validatePlayback } from "@/lib/uploader/media-tools";
+import { decodeStreams,probeMedia,resolveMediaTools,validatePlayback } from "@/lib/uploader/media-tools";
 import { assessOriginalMedia, classifyOriginalMovie } from "@/lib/ingestion/original-media";
+import { verifiedAssessment, verifyOriginal } from "@/lib/discovery/original-verification";
 import { classifyMedia } from "@/lib/ingestion/media";
 import { parseFilename } from "@/lib/ingestion/parser";
 import { decideMatch } from "@/lib/ingestion/match";
@@ -40,9 +41,18 @@ export async function inspectAdminUpload(root: string,ports: UploadInspectionPor
       if (!tools.ok) throw new Error("upload_media_tools_missing");
       const probe = await probeMedia(tools.tools.ffprobe,path);
       if (!probe.ok) throw new Error(probe.code);
-      const classification = session.metadata.kind === "movie" ? classifyOriginalMovie(probe.inspection, session.file_name) : classifyMedia(probe.inspection);
-      const assessment = session.metadata.kind === "movie" ? assessOriginalMedia(probe.inspection, session.file_name) : null;
+      let classification = session.metadata.kind === "movie" ? classifyOriginalMovie(probe.inspection, session.file_name) : classifyMedia(probe.inspection);
+      let assessment: ReturnType<typeof assessOriginalMedia> | ReturnType<typeof verifiedAssessment> | null = session.metadata.kind === "movie" ? assessOriginalMedia(probe.inspection, session.file_name) : null;
       if(session.storage==="r2" && classification.class==="canonical") await validatePlayback(tools.tools.ffmpeg,path);
+      // Policy 3: the worker holds every byte of the staged original, whose SHA-256 was matched above. It is decoded
+      // whole and after seeking before it can be called verified. The file is only read; a failed finding is recorded as one.
+      if(session.storage==="r2" && assessment?.accepted) {
+        const verification = await verifyOriginal({ inspection: probe.inspection,assessment,sizeBytes: session.size_bytes,sha256: session.verified_sha256,bytesHashed: session.size_bytes,
+          fileName: session.file_name,tools: { ffmpeg: tools.tools.ffmpeg.version,ffprobe: tools.tools.ffprobe.version },now: () => new Date() },
+          { decode: (streams,window) => decodeStreams(tools.tools.ffmpeg,path,streams,window) });
+        assessment = verifiedAssessment(assessment,verification);
+        classification = { class: assessment.accepted ? "original" : "manual_review",reasons: assessment.reasons,policyVersion: classification.policyVersion };
+      }
       const parsed = parseFilename(session.file_name);
       const vj = resolveVj(parsed.vjText,claim.vjs.map(({ active,...record }) => ({ ...record,isActive: active })));
       const query = { kind: session.metadata.kind,title: session.metadata.title || parsed.title || "",year: session.metadata.year ?? parsed.year };

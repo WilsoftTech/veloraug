@@ -31,6 +31,8 @@ export interface MediaFacts {
     integrity: string; streaming: string; browsers: Readonly<Record<string, string>> | null;
     audioTracks: number | null; subtitleTracks: number | null; warnings: readonly string[];
   };
+  /** How the file was inspected and its recorded download evidence. Undefined: not reported. */
+  inspection?: { scope: "bounded" | "whole_file"; download: string; sha256: string | null };
 }
 /** The server's download setting and whether this version is published. Never a client-side decision. */
 export interface DownloadContext { enabled: boolean; published: boolean }
@@ -39,6 +41,8 @@ export interface MediaReport {
   basis: string;
   statuses: MediaStatus[];
   details: { label: string; value: string }[];
+  /** How the inspection was made: its scope, the file's digest and the download evidence. */
+  provenance: { label: string; value: string }[];
   reasons: string[];
   warnings: string[];
   browsers: { name: string; value: string }[];
@@ -50,7 +54,7 @@ const NEEDS_UPDATE = "Not reported by this source. On Supabase the separate fact
 const BOUNDED = "A bounded check of the index and samples. It is not proof that the whole file is intact.";
 
 /** The check could not read the file. That says nothing about the file itself. */
-const UNREAD = /^media_read_|^(media_unreadable|probe_timeout|moov_over_budget|no_evidence)$/;
+const UNREAD = /^media_read_|^(media_unreadable|probe_timeout|moov_over_budget|no_evidence|verification_storage_unavailable|decode_timeout)$/;
 const refused = (reasons: readonly string[]) => reasons.some((reason) => !UNREAD.test(reason));
 
 const WARNINGS: Record<string, string> = {
@@ -62,6 +66,11 @@ const WARNINGS: Record<string, string> = {
   firefox_mkv_streaming_unreliable: "Firefox does not stream MKV reliably.",
   audio_track_switching_not_available: "More than one audio track; the player plays only the default one.",
   embedded_subtitles_not_displayed: "Embedded subtitles are not shown by the player.",
+};
+const DOWNLOAD_EVIDENCE: Record<string, string> = {
+  original_servable: "The original can be served as it is",
+  not_servable: "The original cannot be served as a download",
+  not_implemented_authorization_required: "Not assessed by this inspection",
 };
 const BROWSER_NAMES: Record<string, string> = { chromium: "Chrome and Edge", firefox: "Firefox", safari: "Safari (macOS)", ios: "iPhone and iPad", android: "Android" };
 const BROWSER_VALUES: Record<string, string> = {
@@ -83,7 +92,8 @@ function integrity(facts: MediaFacts): Omit<MediaStatus, "label"> {
   if (!facts.inspected) return { value: "Not inspected", tone: "missing", detail: "No inspection evidence is recorded for this file." };
   const status = facts.policy3?.integrity;
   if (status === undefined) return { value: UNREPORTED, tone: "missing", detail: NEEDS_UPDATE };
-  if (status === "verified") return { value: "Verified", tone: "verified", detail: "The database records verified integrity for this file." };
+  if (status === "verified") return { value: "Verified", tone: "verified", detail: facts.inspection?.scope === "whole_file"
+    ? "Every byte was read and hashed, and the whole film decoded to its end without an error." : "The database records verified integrity for this file." };
   if (status === "metadata_consistent") return { value: "Metadata consistent, not verified", tone: "pending", detail: BOUNDED };
   if (status === "incomplete") return refused(facts.reasons)
     ? { value: "Failed", tone: "failed", detail: "The file was refused. See the reasons below." }
@@ -103,7 +113,8 @@ function streaming(facts: MediaFacts): Omit<MediaStatus, "label"> {
       : { value: "Inspection incomplete", tone: "pending", detail: "The check could not read enough of the file. This is not a verdict on the file." };
     return { value: UNREPORTED, tone: "missing", detail: NEEDS_UPDATE };
   }
-  if (status === "verified") return { value: "Verified", tone: "verified", detail: "The database records verified streaming for this file." };
+  if (status === "verified") return { value: "Verified", tone: "verified", detail: facts.inspection?.scope === "whole_file"
+    ? "The file has an index the player can start from, and it decoded after seeking to the start, the middle and near the end." : "The database records verified streaming for this file." };
   if (status === "potentially_playable") return { value: "Potentially playable, not verified", tone: "pending", detail: "The layout allows streaming. No playback of this file has been verified." };
   if (status === "potentially_playable_startup_warning") return { value: "Potentially playable, slow start, not verified", tone: "pending", detail: "The index is at the end of the file. No playback of this file has been verified." };
   if (status === "untested") return { value: "Untested layout, not verified", tone: "pending", detail: "This layout has not been tested in the player." };
@@ -127,6 +138,8 @@ function browsers(facts: MediaFacts): Omit<MediaStatus, "label"> {
 }
 
 function download(facts: MediaFacts, context: DownloadContext): Omit<MediaStatus, "label"> {
+  // Recorded evidence that the original cannot be served outranks the switch: turning downloads on would not help.
+  if (facts.inspection?.download === "not_servable") return { value: "Not available", tone: "warning", detail: "The inspection found that this original cannot be served as a download. This does not block publication." };
   if (!context.enabled) return { value: "Switched off", tone: "missing", detail: "Downloads are off on this server (MEDIA_GATEWAY_DOWNLOADS_ENABLED). No download link is issued for any movie." };
   if (!context.published) return { value: "Not available until published", tone: "missing", detail: "Only a published version can be downloaded." };
   if (facts.inspected && facts.container !== null && facts.container !== "mp4" && facts.container !== "mkv") return { value: "Not available", tone: "missing", detail: "Only MP4 and MKV originals are served as downloads." };
@@ -139,6 +152,7 @@ export function mediaReport(facts: MediaFacts, context?: DownloadContext): Media
   const count = (value: number | null | undefined) => (value === null || value === undefined ? UNREPORTED : String(value));
   return {
     basis: !facts.inspected ? "No inspection evidence is recorded for this file."
+      : facts.policyVersion === 3 && facts.inspection?.scope === "whole_file" ? "Policy 3: the whole original file was read, hashed and decoded. Each status below is its own finding."
       : facts.policyVersion === 3 ? "Policy 3: the original file, inspected in bounded reads. Metadata and potential playability are recorded; they are not verification."
       : facts.policyVersion === null ? "Inspection evidence with no recorded policy version."
       : `Policy ${facts.policyVersion}: the earlier fast-start MP4 check, in bounded reads.`,
@@ -158,6 +172,11 @@ export function mediaReport(facts: MediaFacts, context?: DownloadContext): Media
       { label: "Inspection policy", value: facts.policyVersion === null ? UNREPORTED : `Version ${facts.policyVersion}` },
       { label: "Inspected", value: facts.checkedAt ? `${facts.checkedAt.slice(0, 16).replace("T", " ")} UTC` : facts.inspected ? UNREPORTED : "Never" },
     ],
+    provenance: [
+      { label: "Inspection scope", value: !facts.inspected ? "None recorded" : !facts.inspection ? UNREPORTED : facts.inspection.scope === "whole_file" ? "Whole file" : "Bounded sample" },
+      { label: "Content SHA-256", value: facts.inspection?.sha256 ?? (facts.inspection?.scope === "bounded" ? "Not recorded by a bounded inspection" : UNREPORTED) },
+      { label: "Download evidence", value: DOWNLOAD_EVIDENCE[facts.inspection?.download ?? ""] ?? (facts.inspection ? `Unrecognised: ${human(facts.inspection.download)}` : UNREPORTED) },
+    ],
     reasons: facts.reasons.map(reasonText),
     warnings: (policy3?.warnings ?? []).map((code) => WARNINGS[code] ?? `${human(code)}.`),
     browsers: Object.entries(policy3?.browsers ?? {}).map(([name, value]) => ({ name: BROWSER_NAMES[name] ?? human(name), value: BROWSER_VALUES[value] ?? `Unrecognised: ${human(value)}` })),
@@ -170,7 +189,7 @@ export function candidateMedia(candidate: ReviewCandidate): MediaFacts {
   return {
     fileName: candidate.event.media.name, inspected: evidence !== null, policyVersion: evidence?.policyVersion ?? null, checkedAt: evidence?.checkedAt ?? null,
     container: evidence?.containerName ?? null, video: evidence?.video ?? null, audio: evidence?.audio ?? null,
-    reasons: evidence?.reasons ?? [], policy3: evidence?.facts,
+    reasons: evidence?.reasons ?? [], policy3: evidence?.facts, inspection: evidence?.inspection,
     // The offline fixture records four booleans in place of the database's verdict.
     passed: evidence ? evidence.passed ?? (evidence.browser && evidence.container && evidence.gateway && evidence.accessible) : null,
   };

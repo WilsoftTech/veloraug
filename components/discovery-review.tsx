@@ -7,7 +7,7 @@ import { EmptyState } from "@/components/empty-state";
 import { TabLinks } from "@/components/tab-links";
 import { PosterImage, BackdropImage } from "@/components/media-image";
 import { MediaVerification } from "@/components/media-verification";
-import { canReinspect, guidance, inspectionExhausted, lastFailure, mediaCheckAvailable, reviewOpen, verificationPending, REVIEW_GROUPS, type ReviewGroup, type ReviewGuidance } from "@/lib/discovery/guidance";
+import { canReinspect, guidance, inspectionExhausted, lastFailure, mediaCheckAvailable, mediaPasses, reviewOpen, verificationPending, REVIEW_GROUPS, type ReviewGroup, type ReviewGuidance } from "@/lib/discovery/guidance";
 import { candidateMedia, mediaReport, publicationRequirements } from "@/lib/discovery/media-report";
 import { cn } from "@/lib/utils";
 import type { ReviewCandidate, ReviewVj } from "@/lib/discovery/model";
@@ -19,7 +19,7 @@ type Action = (data: FormData) => Promise<void>;
 
 const human = (text: string) => text.replaceAll("_", " ");
 const size = (bytes: number | null) => bytes === null ? "Unknown size" : `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
-const readiness = (candidate: ReviewCandidate) => candidate.evidence?.browser && candidate.evidence.container && candidate.evidence.gateway && candidate.evidence.accessible ? "Verified" : "Awaiting verification";
+const readiness = (candidate: ReviewCandidate) => mediaPasses(candidate) ? "Verified" : "Awaiting verification";
 const name = (candidate: ReviewCandidate) => candidate.title ?? candidate.event.media.name ?? "Untitled document";
 const when = (iso: string) => `${iso.slice(0, 16).replace("T", " ")} UTC`;
 

@@ -6,6 +6,7 @@ const calls: Record<string, readonly (readonly [string, string])[]> = {
   discovery_acquire_consumer: [["p_token", "uuid"], ["p_lease_seconds", "integer"]],
   discovery_receive: [["p_token", "uuid"], ["p_chat_id", "bigint"], ["p_deliveries", "jsonb"], ["p_reconciliation", "jsonb"]],
   discovery_claim: [["p_lease_seconds", "integer"]],
+  discovery_claim_verification: [["p_key", "text"], ["p_lease_seconds", "integer"]],
   discovery_complete: [["p_key", "text"], ["p_lease", "uuid"], ["p_revision", "integer"], ["p_result", "jsonb"]],
   discovery_fail: [["p_key", "text"], ["p_lease", "uuid"], ["p_revision", "integer"], ["p_code", "text"]],
   discovery_catalogue_lookup: [["p_title", "text"]], discovery_vjs: [], discovery_health: [], discovery_release_consumer: [["p_token", "uuid"]],

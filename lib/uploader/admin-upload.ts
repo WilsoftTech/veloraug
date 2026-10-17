@@ -35,6 +35,9 @@ const assessmentSchema = z.object({
   container: z.string().max(40).nullable(), integrity: z.string().max(60), streaming: z.string().max(60), compatibility: z.record(z.string(), z.unknown()),
   warnings: z.array(z.string().max(100)).max(50),
   tracks: z.array(z.object({ type: z.string(), codec: z.string().max(40).nullable().optional(), attachedPicture: z.boolean().optional() })).max(64),
+  // The verification contract (migration 20261014090001): download evidence and, once verified whole, the digest.
+  download: z.string().max(60).optional(),
+  verification: z.object({ digest: z.object({ value: z.string().regex(/^[a-f0-9]{64}$/) }) }).optional(),
 });
 
 export const uploadSessionSchema = z.object({
@@ -67,6 +70,8 @@ export function uploadMedia(session: UploadSession): MediaFacts {
     passed: inspection && version !== null && version < 3 ? inspection.classification.class === "canonical" : null,
     policy3: assessment ? { integrity: assessment.integrity, streaming: assessment.streaming, browsers: browserProfile(assessment.compatibility),
       audioTracks: count("audio"), subtitleTracks: count("subtitle"), warnings: assessment.warnings } : undefined,
+    // Reported once the staged original was verified whole; a bounded assessment records none of it.
+    inspection: assessment?.verification && assessment.download ? { scope: "whole_file", download: assessment.download, sha256: assessment.verification.digest.value } : undefined,
   };
 }
 

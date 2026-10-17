@@ -10,7 +10,7 @@ import { DOWNLOAD_GUIDANCE, DOWNLOAD_MESSAGES, launchBrowserDownload, prepareDow
 import {
   INITIAL_PLAYER_STATE,
   MIN_RENEWAL_INTERVAL_MS,
-  PLAYER_FAILURE_MESSAGES,
+  playerFailureMessage,
   classifyMediaError,
   defaultVersion,
   detachMediaSource,
@@ -56,7 +56,9 @@ export function MoviePlayer({ versions, signInHref, downloads }: MoviePlayerProp
   const session = useSession();
   const userAgent = useSyncExternalStore(subscribeBrowser, browserAgent, serverAgent);
   const profile = versions.find((version) => version.id === versionId)?.profile ?? null;
-  const compatibility = useMemo(() => mediaCompatibility(profile, userAgent ? browserSignals(profile, document.createElement("video"), userAgent, navigator.maxTouchPoints) : undefined), [profile, userAgent]);
+  // Downloading is suggested only to a viewer who has the Download control below.
+  const downloadOffered = downloads && session === "signed-in";
+  const compatibility = useMemo(() => mediaCompatibility(profile, userAgent ? browserSignals(profile, document.createElement("video"), userAgent, navigator.maxTouchPoints) : undefined, downloadOffered), [profile, userAgent, downloadOffered]);
   const [download, setDownload] = useState<{ busy: boolean; attempted: boolean; handedOff: boolean; failure: DownloadFailure | null; format: string | null }>({ busy: false, attempted: false, handedOff: false, failure: null, format: null });
   const downloadRequest = useRef<AbortController | null>(null);
   const [audioWarning, setAudioWarning] = useState(false);
@@ -245,7 +247,7 @@ export function MoviePlayer({ versions, signInHref, downloads }: MoviePlayerProp
           {busy ? "Starting…" : "Play"}
         </button>
       )}
-      {downloads && session === "signed-in" && (
+      {downloadOffered && (
         <button type="button" onClick={() => void startDownload()} disabled={download.busy} className={buttonClass(compatibility.blocked || state.status === "error" ? "primary" : "secondary")}>
           <Download aria-hidden className="size-4" />
           {download.busy ? "Preparing download…" : download.attempted ? "Resume/Retry Download" : "Download"}
@@ -283,13 +285,13 @@ export function MoviePlayer({ versions, signInHref, downloads }: MoviePlayerProp
           <p>{compatibility.message}</p>
           {compatibility.warnings.map((warning) => <p key={warning}>{warning}</p>)}
         </div>
-        {downloads && session === "signed-in" && <p className="mb-3 text-body-sm text-muted">{DOWNLOAD_GUIDANCE}</p>}
+        {downloadOffered && <p className="mb-3 text-body-sm text-muted">{DOWNLOAD_GUIDANCE}</p>}
         {download.handedOff && <p role="status" className="mb-3 text-body-md">{download.format} download handed to your browser. Check its download manager for progress or interruptions.</p>}
         {download.failure && <div role="alert" className="mb-3 flex flex-wrap items-center gap-3 rounded-default border border-destructive/40 px-4 py-3 text-body-md">
           <span className="text-destructive">{DOWNLOAD_MESSAGES[download.failure]}</span>
           {download.failure === "auth_required" && <Link href={signInHref} className={buttonClass("secondary")}>Sign in</Link>}
         </div>}
-        {audioWarning && <p role="status" className="mb-3 text-body-md">{PLAYER_FAILURE_MESSAGES.missing_audio}</p>}
+        {audioWarning && <p role="status" className="mb-3 text-body-md">{playerFailureMessage("missing_audio", downloadOffered)}</p>}
         {open && (
           <div className="flex flex-col gap-3">
             <video
@@ -331,7 +333,7 @@ export function MoviePlayer({ versions, signInHref, downloads }: MoviePlayerProp
         )}
         {state.status === "error" && state.failure && (
           <div role="alert" className="mt-3 flex flex-wrap items-center gap-3 rounded-default border border-destructive/40 px-4 py-3 text-body-md">
-            <span className="text-destructive">{PLAYER_FAILURE_MESSAGES[state.failure]}</span>
+            <span className="text-destructive">{playerFailureMessage(state.failure, downloadOffered)}</span>
             {state.failure === "auth_required" && (
               <Link href={signInHref} className={buttonClass("secondary")}>
                 Sign in

@@ -1,0 +1,9 @@
+
+> velora@0.1.0 typecheck
+> next typegen && tsc --noEmit
+
+Generating route types...
+✓ Types generated successfully
+services/media-gateway/tsconfig.json exit=0
+services/media-gateway/tsconfig.discovery.json exit=0
+services/media-gateway/tsconfig.upload.json exit=0

@@ -31,6 +31,9 @@ export const evidenceSchema = z.strictObject({
     audioTracks: z.number().int().nonnegative().nullable(), subtitleTracks: z.number().int().nonnegative().nullable(),
     warnings: z.array(z.string().max(100)).max(50), publishable: z.boolean(),
   }).optional(),
+  // How the file was inspected and what that recorded about downloading (migration 20261014090000 adds the
+  // whole-file scope and the digest). Absent where the database reports none of it.
+  inspection: z.strictObject({ scope: z.enum(["bounded", "whole_file"]), download: z.string().max(60), sha256: z.string().regex(/^[a-f0-9]{64}$/).nullable() }).optional(),
 });
 export type MediaEvidence = z.infer<typeof evidenceSchema>;
 const auditSchema = z.strictObject({ at: instant, actor: z.string().min(1).max(128), action: z.string().max(100), revision: z.number().int().positive() });

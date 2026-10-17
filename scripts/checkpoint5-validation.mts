@@ -18,7 +18,9 @@ const migration="20261011200813_original_media_download_resolver.sql";
 const pending=["20261011083200_admin_upload_sessions.sql","20261011084309_admin_upload_disk_chunks.sql",
   "20261011085220_admin_upload_inspection.sql","20261011093300_admin_upload_r2_staging.sql",
   "20261011094004_admin_upload_r2_worker.sql","20261011095632_admin_upload_r2_visibility.sql",
-  "20261011192618_original_media_evidence.sql","20261011192619_admin_original_media_evidence.sql"];
+  "20261011192618_original_media_evidence.sql","20261011192619_admin_original_media_evidence.sql",
+  // Checkpoint 10: the verification contract, which builds on the two above.
+  "20261014090000_original_media_verification.sql","20261014090001_admin_original_media_verification.sql"];
 const subject="00000000-0000-4000-8000-000000000051";
 const quote=(s:string)=>`'${s.replaceAll("'","''")}'`;
 const sql=(statement:string)=>{const r=psql(statement);assert.equal(r.code,0,r.err);return r.out.trim();};

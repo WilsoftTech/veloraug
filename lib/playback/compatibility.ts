@@ -67,19 +67,20 @@ export function browserSignals(profile: MediaProfile | null, media: Pick<HTMLVid
 }
 
 /** CP1 Windows fixture evidence outranks negative MIME hints (notably Chromium MKV). */
-export function mediaCompatibility(profile: MediaProfile | null, signals?: BrowserSignals): Compatibility {
+/** `downloadOffered`: whether this viewer has a Download control. Without one, nothing here suggests downloading. */
+export function mediaCompatibility(profile: MediaProfile | null, signals?: BrowserSignals, downloadOffered = true): Compatibility {
   const warnings = ["If this file has multiple audio tracks, only the default track is expected. Embedded subtitles may not display."];
   const result = (kind: CompatibilityKind, message: string, blocked = false, failure?: Compatibility["failure"]): Compatibility => ({ kind, message, warnings, blocked, failure });
   if (!profile?.container || !signals) return result("unknown", "Compatibility is untested for this file and browser.");
   if (profile.startupWarning) warnings.push("This MP4 stores its index at the end. Startup may take longer; this does not mean the file is defective.");
   if (profile.container === "other") return result("unsupported", "This player supports MP4 and MKV containers only.", true, "unsupported_container");
-  if (profile.audioCodec === "ac3" || profile.audioCodec === "eac3") warnings.push("This audio codec may play silently. Download the original file to use a compatible player.");
+  if (profile.audioCodec === "ac3" || profile.audioCodec === "eac3") warnings.push(downloadOffered ? "This audio codec may play silently. Download the original file to use a compatible player." : "This audio codec may play silently.");
   if (profile.videoCodec === "hevc") warnings.push("HEVC playback depends on the device decoder; audio may play without a picture.");
   if (signals.platform === "ios" || signals.engine === "webkit") return result("unknown", "Safari and iOS playback require real-device testing. Playwright WebKit does not establish support.");
   if (profile.container === "mkv" && signals.engine === "firefox") {
     warnings.push("Firefox MKV streaming is unreliable and may wait for the whole file before starting.");
     if (profile.audioCodec === "mp3") warnings.push("Firefox MKV/MP3 fixtures played video without audio.");
-    return result("browser-dependent", "MKV playback in Firefox is browser-dependent. Download is the reliable fallback.");
+    return result("browser-dependent", downloadOffered ? "MKV playback in Firefox is browser-dependent. Download is the reliable fallback." : "MKV playback in Firefox is browser-dependent.");
   }
   if (profile.videoCodec === "hevc") return result("browser-dependent", "HEVC needs a compatible device decoder. Some tested browsers played audio without a picture.");
   if (!profile.videoCodec || !profile.audioCodec || profile.videoCodec === "unknown" || profile.audioCodec === "unknown") return result("unknown", "Codec metadata is incomplete. Playback compatibility is unknown.");
@@ -88,7 +89,7 @@ export function mediaCompatibility(profile: MediaProfile | null, signals?: Brows
   const tested = signals.platform === "windows" && (signals.engine === "chromium" || (signals.engine === "firefox" && profile.container === "mp4"));
   if (common && tested) return result("tested-combination", "This container/codec combination played in Windows fixture tests. This file and device have not been tested.");
   if (common && signals.container && signals.video && signals.audio) return result("expected", "Browser signals suggest playback may work. This device and file are untested.");
-  return result("browser-dependent", "Browser signals do not confirm these codecs. Try playback or download the original file.");
+  return result("browser-dependent", downloadOffered ? "Browser signals do not confirm these codecs. Try playback or download the original file." : "Browser signals do not confirm these codecs. Playback may not work.");
 }
 
 /** Native media errors cannot identify a codec reliably; apply known facts only after a successful gateway probe. */

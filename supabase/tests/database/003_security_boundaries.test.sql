@@ -127,7 +127,7 @@ select is(
         'public.admin_upload_r2_command', 'public.admin_upload_r2_create', 'public.admin_upload_r2_housekeeping', 'public.admin_upload_r2_review', 'public.admin_upload_r2_worker_claim', 'public.admin_upload_r2_worker_finish', 'public.admin_upload_r2_worker_ingest',
         'public.admin_upload_worker_chunk', 'public.admin_upload_worker_claim', 'public.admin_upload_worker_finish', 'public.admin_upload_worker_manifest',
         'public.catalogue_admin_add_vj', 'public.catalogue_admin_edit_movie', 'public.catalogue_admin_movies', 'public.catalogue_admin_set_movie',
-        'public.discovery_acquire_consumer', 'public.discovery_catalogue_lookup', 'public.discovery_claim',
+        'public.discovery_acquire_consumer', 'public.discovery_catalogue_lookup', 'public.discovery_claim', 'public.discovery_claim_verification',
         'public.discovery_complete', 'public.discovery_fail', 'public.discovery_health', 'public.discovery_receive',
         'public.discovery_release_consumer',
         'public.discovery_review_approve', 'public.discovery_review_capabilities',

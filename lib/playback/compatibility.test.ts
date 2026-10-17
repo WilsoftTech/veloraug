@@ -61,3 +61,19 @@ describe("optional safe public media projection", () => {
     expect(await readMediaProfile(async () => ({ data: { container: "mp4", video_codec: "h264", audio_codec: "aac" }, error: null }))).toEqual(MP4);
   });
 });
+
+// Checkpoint 10: no advice to download where no download is offered.
+describe("compatibility text for a viewer with no Download control", () => {
+  it("keeps every finding and drops only the advice to download", () => {
+    const cases = [{ ...MP4, container: "mkv" as const, audioCodec: "ac3" }, { ...MP4, audioCodec: "ac3" }, { ...MP4, videoCodec: "vp9", audioCodec: "opus" }, { ...MP4, container: "mkv" as const }, MP4];
+    for (const profile of cases) for (const signals of [WIN, { ...WIN, engine: "firefox" as const }]) {
+      const offered = mediaCompatibility(profile, signals), withheld = mediaCompatibility(profile, signals, false);
+      expect([...withheld.warnings, withheld.message].join(" ")).not.toMatch(/download/i);
+      expect(withheld).toMatchObject({ kind: offered.kind, blocked: offered.blocked, failure: offered.failure });
+      expect(withheld.warnings).toHaveLength(offered.warnings.length);
+    }
+    expect(mediaCompatibility({ ...MP4, container: "mkv" }, { ...WIN, engine: "firefox" }, false).message).toBe("MKV playback in Firefox is browser-dependent.");
+    // Offered, the advice is exactly what it was.
+    expect(mediaCompatibility({ ...MP4, container: "mkv" }, { ...WIN, engine: "firefox" }).message).toBe("MKV playback in Firefox is browser-dependent. Download is the reliable fallback.");
+  });
+});

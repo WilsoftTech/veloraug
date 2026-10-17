@@ -144,7 +144,8 @@ const toTmdb = (snapshot: ReviewCandidate["choices"][number]) => ({ tmdbId: snap
  * recorded only while it is held (a second worker fails with
  * discovery_consumer_busy instead of consuming the same updates).
  */
-export function databasePersistence(rpc: DiscoveryRpc, options: { channelId: number; consumer?: string; leaseSeconds?: number; inspectionLeaseSeconds?: number }): DiscoveryPersistence & { consumer: string; release(): Promise<void>; health(now: Date): Promise<DiscoveryHealth> } {
+export function databasePersistence(rpc: DiscoveryRpc, options: { channelId: number; consumer?: string; leaseSeconds?: number; inspectionLeaseSeconds?: number }): DiscoveryPersistence & { consumer: string; release(): Promise<void>; health(now: Date): Promise<DiscoveryHealth>;
+  verifyOne(key: string, media: InspectionPorts["media"], now: () => Date, leaseSeconds?: number): Promise<{ outcome: string; evidence: ChannelMediaEvidence | null }> } {
   const consumer = options.consumer ?? randomUUID();
   const leaseSeconds = options.leaseSeconds ?? 120;
   const inspectionLease = options.inspectionLeaseSeconds ?? 120;
@@ -176,6 +177,35 @@ export function databasePersistence(rpc: DiscoveryRpc, options: { channelId: num
       return { cursor: row.reconciliation_cursor, checkedAt: row.reconciliation_checked_at ? new Date(row.reconciliation_checked_at).toISOString() : null, incomplete: row.reconciliation_incomplete };
     },
     async receiveHistory(updates, position) { await record(updates, position); },
+    /**
+     * One whole-file verification of exactly the candidate named (migration 20261014090000). It is claimed by key,
+     * never as "the next one due", only once a reviewer has confirmed its film and VJ, and under its own long lease,
+     * so the listener's polling is not involved. Only the media is read; the confirmation stays as it is.
+     * Returns what the database made of it, or `stale` when the lease was lost meanwhile.
+     */
+    async verifyOne(key: string, media: InspectionPorts["media"], now: () => Date, leaseSeconds = 14_400): Promise<{ outcome: string; evidence: ChannelMediaEvidence | null }> {
+      const claim = claimSchema.parse(await call(rpc, "discovery_claim_verification", { p_key: key, p_lease_seconds: leaseSeconds }));
+      const selected = claim.confirmed_selection;
+      if (!selected) throw new DiscoveryStoreError("discovery_verification_not_claimable");
+      const event = eventSchema.parse({ id: claim.event_id, messageKey: claim.key, updateId: claim.update_id, channelId: claim.chat_id, messageId: claim.message_id,
+        kind: claim.kind ?? "reconciliation", timestamp: claim.observed_at, digest: claim.payload_digest,
+        media: { uniqueId: claim.file_unique_id, size: claim.size, name: claim.name, mime: claim.mime, caption: claim.caption } });
+      const fail = async (code: string) => ({ outcome: String(await call(rpc, "discovery_fail", { p_key: claim.key, p_lease: claim.lease, p_revision: claim.revision, p_code: code })), evidence: null });
+      let verification: ChannelMediaEvidence | null;
+      try {
+        verification = (await media(event)).verification ?? null;
+      } catch {
+        // Never persist provider exception text (tokens/URLs can appear there).
+        return fail("inspection_provider_failed");
+      }
+      // Nothing was learnt about the document: scheduled as a failed attempt, never recorded as evidence.
+      const transient = verification ? transientMediaFailure(verification) : null;
+      if (!verification || transient) return fail(transient ?? "inspection_provider_failed");
+      const result: ReviewCandidate = { ...newCandidate(event, now().toISOString()), revision: claim.revision, attempts: claim.attempts, title: selected.title, year: selected.year,
+        vjText: selected.vj_text, vjId: selected.vj_id, tmdbId: selected.tmdb_id, identity: "proposed", choices: [selected.snapshot], snapshot: selected.snapshot };
+      const outcome = String(await call(rpc, "discovery_complete", { p_key: claim.key, p_lease: claim.lease, p_revision: claim.revision, p_result: completionPayload(result, verification, claim.identity) }));
+      return { outcome, evidence: verification };
+    },
     async inspectNext(ports, now) {
       const claim = claimSchema.nullable().parse(await call(rpc, "discovery_claim", { p_lease_seconds: inspectionLease }));
       if (!claim) return false;
@@ -245,7 +275,7 @@ export function databaseCataloguePorts(rpc: DiscoveryRpc): Pick<InspectionPorts,
 
 const stamp = z.string().transform((value) => new Date(value).toISOString());
 const evidenceView = z.object({
-  identity: z.string(), verified: z.boolean(), method: z.string(), scope: z.literal("bounded"), policy_version: z.number(), media_class: z.string(),
+  identity: z.string(), verified: z.boolean(), method: z.string(), scope: z.enum(["bounded", "whole_file"]), policy_version: z.number(), media_class: z.string(),
   reasons: z.array(z.string()), container: z.string().nullable(), video_codec: z.string().nullable(), audio_codec: z.string().nullable(),
   accessible: z.boolean(), gateway_compatible: z.boolean(), playback_ready: z.boolean(), bytes_read: z.number(), checked_at: stamp,
   // Migration 20261011192618 (Policy 3). Absent on a database without it. A value that does not have the
@@ -255,6 +285,9 @@ const evidenceView = z.object({
   tracks: z.array(z.object({ type: z.string() })).max(64).nullable().optional().catch(undefined),
   warnings: z.array(z.string().max(100)).max(50).nullable().optional().catch(undefined),
   publishable_media: z.boolean().optional().catch(undefined),
+  // Download evidence (migration 20261011192618) and, for a whole-file inspection, the digest (migration 20261014090000).
+  download_status: z.string().max(60).optional().catch(undefined),
+  assessment: z.object({ verification: z.object({ digest: z.object({ value: z.string().regex(/^[a-f0-9]{64}$/) }) }).optional() }).nullable().optional().catch(undefined),
 });
 type EvidenceView = z.infer<typeof evidenceView>;
 /** The Policy 3 facts of an evidence row, or undefined when this database does not report them. */
@@ -325,9 +358,10 @@ export function toCandidate(input: unknown): ReviewCandidate {
     choices: view.choices ?? (snapshot ? [snapshot] : []), snapshot, warnings: view.warnings.slice(0, 50),
     evidence: ev ? { mediaKey: ev.identity.slice(4), container: ev.container === "mp4" && ev.media_class !== "unverified", gateway: ev.gateway_compatible,
       browser: ev.playback_ready, accessible: ev.accessible, checkedAt: ev.checked_at,
-      reference: `${ev.method}: ${ev.bytes_read} bytes read (bounded check, not full-file integrity)`.slice(0, 200),
+      reference: `${ev.method}: ${ev.bytes_read} bytes read (${ev.scope === "whole_file" ? "whole file read and decoded" : "bounded check, not full-file integrity"})`.slice(0, 200),
       identity: ev.identity, mediaClass: ev.media_class, reasons: ev.reasons.slice(0, 50), video: ev.video_codec, audio: ev.audio_codec, bytesRead: ev.bytes_read,
-      policyVersion: ev.policy_version, containerName: ev.container, passed: ev.verified, facts: mediaFacts(ev) } : null,
+      policyVersion: ev.policy_version, containerName: ev.container, passed: ev.verified, facts: mediaFacts(ev),
+      inspection: ev.download_status === undefined ? undefined : { scope: ev.scope, download: ev.download_status, sha256: ev.assessment?.verification?.digest.value ?? null } } : null,
     rights: view.rights ? { actor: view.rights.cleared_by, at: view.rights.cleared_at, reference: view.rights.reference, revision: view.rights.revision } : null,
     approval: view.approval ? { actor: view.approval.by, at: view.approval.at, revision: view.approval.revision } : null,
     uploaderSource: null, duplicateOf: view.duplicate_of,
