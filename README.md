@@ -48,7 +48,8 @@ npm run dev
 ```
 
 - Both read `.env.local`, so they share `MEDIA_GATEWAY_TOKEN_SECRET`. `MEDIA_GATEWAY_PUBLIC_ORIGIN` is the gateway's loopback origin (for example `http://127.0.0.1:8787`), and `MEDIA_GATEWAY_SESSION_FILE` names the existing reader session. The command never logs in to Telegram.
-- `npm run gateway:dev -- --stop` stops it; `-- --build` rebuilds the image after gateway code changes.
+- Run it once: the container restarts by itself whenever Docker Desktop starts, so it survives reboots. `npm run gateway:dev -- --stop` stops it until the next `npm run gateway:dev`; `-- --build` rebuilds the image after gateway code changes. Run `npm run gateway:dev` again after changing a gateway value in `.env.local`, because the container keeps the values it was started with.
+- Without Docker, `npm run gateway:dev -- --native` runs the same gateway code with Node in the foreground (install its dependencies once with `npm ci --prefix services/media-gateway --omit=dev --ignore-scripts`). It stops when its terminal closes and does not come back after a reboot. It stops the Docker gateway first if Docker is running; run `npm run gateway:dev` afterwards to go back to the container.
 - Without the gateway, Play shows "Playback is temporarily unavailable", and `npm run dev` prints a warning at startup.
 - Original-file downloads are off by default. They need `MEDIA_GATEWAY_DOWNLOADS_ENABLED=true` in `.env.local` (both commands read it; restart both after changing it) and a database with the download resolver. See [the download switch](docs/MP4_MKV_DOWNLOAD_EMERGENCY_STOP.md).
 - Open the app at `http://localhost:3000`. On another host name such as `127.0.0.1`, Next.js development refuses its dev connection and the page never becomes interactive, so Play does nothing.

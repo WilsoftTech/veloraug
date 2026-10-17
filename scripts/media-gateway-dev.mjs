@@ -4,11 +4,13 @@
  *   npm run gateway:dev            start (builds the image the first time)
  *   npm run gateway:dev -- --build rebuild the image from this checkout, then start
  *   npm run gateway:dev -- --stop  stop it
+ *   npm run gateway:dev -- --native run it with this Node instead, in the foreground (no Docker)
  *
  * The gateway is a separate long-running service (services/media-gateway), so
  * `npm run dev` alone cannot play movies. This starts the existing Docker image
  * with the existing reader session and waits for /readyz. Docker Desktop must
- * already be running; this never starts it.
+ * already be running; this never starts it. The container restarts with Docker
+ * Desktop, so this is needed once, not after every reboot.
  *
  * Values come from .env.local (the same file Next.js reads, so both hold the
  * same MEDIA_GATEWAY_TOKEN_SECRET). Only the gateway's own variables are passed
@@ -16,7 +18,7 @@
  * reader bot token and MEDIA_GATEWAY_ALLOW_BOT_LOGIN are never passed: this
  * reuses the existing session and can never log in to Telegram.
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { basename, dirname, resolve } from "node:path";
 import { existsSync } from "node:fs";
 
@@ -67,11 +69,17 @@ const fail = (message) => {
 };
 const docker = (dockerArgs, options = {}) => spawnSync("docker", dockerArgs, { encoding: "utf8", ...options });
 
-if (docker(["info", "--format", "{{.ServerVersion}}"]).status !== 0) fail("Docker is not running. Start Docker Desktop, then run this again.");
+const native = args.has("--native");
+const dockerRunning = docker(["info", "--format", "{{.ServerVersion}}"]).status === 0;
+if (!dockerRunning && !native) fail("Docker is not running. Start Docker Desktop and run this again, or use --native.");
+if (native && args.has("--build")) fail("--build rebuilds the Docker image; --native runs this checkout directly.");
 
 // SIGTERM first: the gateway drains its streams and persists the reader session (main.mts).
-docker(["stop", "-t", "20", CONTAINER]);
-docker(["rm", "-f", CONTAINER]);
+// --native stops the container too: it would hold the port and the reader session.
+if (dockerRunning) {
+  docker(["stop", "-t", "20", CONTAINER]);
+  docker(["rm", "-f", CONTAINER]);
+}
 if (args.has("--stop")) {
   console.log("gateway:dev: stopped");
   process.exit(0);
@@ -90,40 +98,74 @@ const port = url.port || "80";
 const sessionFile = process.env.MEDIA_GATEWAY_SESSION_FILE ? resolve(process.env.MEDIA_GATEWAY_SESSION_FILE) : null;
 if (!sessionFile || !existsSync(sessionFile)) fail("MEDIA_GATEWAY_SESSION_FILE must name the existing reader session file. This command never logs in.");
 
-if (args.has("--build") || docker(["image", "inspect", IMAGE]).status !== 0) {
-  console.log(`gateway:dev: building ${IMAGE} from this checkout`);
-  if (docker(["build", "-f", "services/media-gateway/Dockerfile", "-t", IMAGE, "."], { stdio: "inherit" }).status !== 0) fail("image build failed");
-}
-
 const env = { ...process.env, MEDIA_GATEWAY_ALLOWED_ORIGINS: process.env.MEDIA_GATEWAY_ALLOWED_ORIGINS || DEV_APP_ORIGINS };
 const names = PASSED.filter((name) => env[name]);
-const run = docker(
-  [
-    "run", "-d", "--rm", "--name", CONTAINER,
-    "--read-only", "--tmpfs", "/tmp", "--memory", "256m", "--memory-swap", "256m", "--cpus", "1",
-    "-p", `127.0.0.1:${port}:8787`,
-    "-v", `${dirname(sessionFile)}:${CONTAINER_SESSION_DIR}`,
-    "-e", `MEDIA_GATEWAY_SESSION_FILE=${CONTAINER_SESSION_DIR}/${basename(sessionFile)}`,
-    ...names.flatMap((name) => ["-e", name]),
-    IMAGE,
-  ],
-  { env },
-);
-if (run.status !== 0) fail(`the container did not start: ${(run.stderr ?? "").trim().slice(0, 300)}`);
 
 // Readiness covers the reader's identity, the Movies channel and the restricted database role.
-let state = "unreachable";
-for (let attempt = 0; attempt < 45; attempt += 1) {
-  try {
-    const response = await fetch(`${url.origin}/readyz`, { signal: AbortSignal.timeout(2_000) });
-    state = (await response.json()).state ?? String(response.status);
-    if (response.ok) {
-      console.log(`gateway:dev: ready at ${url.origin} (stop with: npm run gateway:dev -- --stop)`);
-      process.exit(0);
+async function waitUntilReady(isRunning = () => true) {
+  let state = "unreachable";
+  for (let attempt = 0; attempt < 45 && isRunning(); attempt += 1) {
+    try {
+      const response = await fetch(`${url.origin}/readyz`, { signal: AbortSignal.timeout(2_000) });
+      state = (await response.json()).state ?? String(response.status);
+      if (response.ok) return { ready: true, state };
+    } catch {
+      // Not listening yet.
     }
-  } catch {
-    // Not listening yet.
+    await new Promise((wait) => setTimeout(wait, 2_000));
   }
-  await new Promise((wait) => setTimeout(wait, 2_000));
+  return { ready: false, state };
 }
-fail(`not ready after 90 s (state: ${state}). See: docker logs ${CONTAINER}`);
+
+if (native) {
+  // The same gateway code as the image, run by this Node in the foreground, so
+  // it plays without Docker but stops with this terminal (Ctrl+C drains it).
+  const serviceDir = resolve(import.meta.dirname, "../services/media-gateway");
+  if (!existsSync(resolve(serviceDir, "node_modules/@mtcute/node"))) fail("the gateway's dependencies are missing. Run: npm ci --prefix services/media-gateway --omit=dev --ignore-scripts");
+  // Only the gateway's variables plus what Node needs to run, never the whole .env.local.
+  const childEnv = Object.fromEntries(names.map((name) => [name, env[name]]));
+  for (const name of ["PATH", "SystemRoot", "TEMP", "TMP"]) if (process.env[name]) childEnv[name] = process.env[name];
+  Object.assign(childEnv, {
+    NODE_ENV: "production",
+    MEDIA_GATEWAY_HOST: url.hostname === "[::1]" ? "::1" : "127.0.0.1",
+    MEDIA_GATEWAY_PORT: port,
+    MEDIA_GATEWAY_SESSION_FILE: sessionFile,
+  });
+  const child = spawn(process.execPath, ["--import", "../../scripts/ingest/register.mjs", "main.mts"], { cwd: serviceDir, env: childEnv, stdio: "inherit" });
+  let running = true;
+  child.on("exit", (code) => {
+    running = false;
+    process.exit(code ?? 1);
+  });
+  // On Windows, Ctrl+C already reaches the gateway, and kill() there would end it
+  // without its graceful shutdown; elsewhere, pass the signal on.
+  for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => process.platform !== "win32" && child.kill(signal));
+  const { ready, state } = await waitUntilReady(() => running);
+  if (ready) console.log(`gateway:dev: ready at ${url.origin} without Docker (stop with Ctrl+C; it stops when this terminal closes)`);
+  else if (running) console.error(`gateway:dev: not ready after 90 s (state: ${state}); still running, see the log above`);
+} else {
+  if (args.has("--build") || docker(["image", "inspect", IMAGE]).status !== 0) {
+    console.log(`gateway:dev: building ${IMAGE} from this checkout`);
+    if (docker(["build", "-f", "services/media-gateway/Dockerfile", "-t", IMAGE, "."], { stdio: "inherit" }).status !== 0) fail("image build failed");
+  }
+  const run = docker(
+    [
+      // Like the Bot API and the listener, the gateway comes back whenever Docker
+      // Desktop starts (after a reboot, for example). --rm would delete it instead,
+      // leaving Play on "temporarily unavailable". --stop still keeps it down.
+      "run", "-d", "--restart", "unless-stopped", "--name", CONTAINER,
+      "--read-only", "--tmpfs", "/tmp", "--memory", "256m", "--memory-swap", "256m", "--cpus", "1",
+      "-p", `127.0.0.1:${port}:8787`,
+      "-v", `${dirname(sessionFile)}:${CONTAINER_SESSION_DIR}`,
+      "-e", `MEDIA_GATEWAY_SESSION_FILE=${CONTAINER_SESSION_DIR}/${basename(sessionFile)}`,
+      ...names.flatMap((name) => ["-e", name]),
+      IMAGE,
+    ],
+    { env },
+  );
+  if (run.status !== 0) fail(`the container did not start: ${(run.stderr ?? "").trim().slice(0, 300)}`);
+  const { ready, state } = await waitUntilReady();
+  if (!ready) fail(`not ready after 90 s (state: ${state}). See: docker logs ${CONTAINER}`);
+  console.log(`gateway:dev: ready at ${url.origin} (stop with: npm run gateway:dev -- --stop)`);
+  process.exit(0);
+}
