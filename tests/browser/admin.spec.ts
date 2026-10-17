@@ -99,3 +99,30 @@ test("the download setting is shown, not controlled, and the browser detail open
   // The page made no request beyond its own host: nothing to the gateway, no issuer call.
   expect(host.requests).toEqual([]); expect(host.gateway.requests).toEqual([]); expect(host.gateway.downloads).toEqual([]);
 });
+
+test("a historical policy 2 refusal and an inconclusive decode are not shown as failed files, and fit from 360 px to 1440 px", async ({ page, host }, info) => {
+  const panel = page.getByRole("region", { name: "Media inspection" });
+  const gates = page.getByRole("region", { name: "Publication gates" });
+  for (const width of [360, 390, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`${host.origin}/admin-fixture?scenario=historical`);
+    await expect(page.getByRole("heading", { name: "Awaiting Policy 3 inspection" })).toBeVisible();
+    await expect(panel.getByText("Awaiting Policy 3 inspection", { exact: true })).toHaveCount(3);
+    await expect(panel.getByText("Failed", { exact: true })).toHaveCount(0);
+    await expect(panel.getByRole("heading", { name: "Historical result (not a current verdict)" })).toBeVisible();
+    await expect(panel.getByRole("heading", { name: "Why the inspection did not pass" })).toHaveCount(0);
+    await expect(panel.getByText(/index at the end.*Policy 3 accepts that layout/)).toBeVisible();
+    for (const label of REQUIREMENTS) await expect(gates.getByText(label, { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Approve|Publish/ })).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `historical ${width}`).toBe(true);
+    if (info.project.name === "chromium" && width === 390) await page.screenshot({ path: info.outputPath("dashboard-historical-390.png"), fullPage: true });
+
+    await page.goto(`${host.origin}/admin-fixture?scenario=inconclusive`);
+    await expect(page.getByRole("heading", { name: "Verification inconclusive" })).toBeVisible();
+    await expect(panel.getByText("Not verified", { exact: true })).toHaveCount(2);
+    await expect(panel.getByText("Failed", { exact: true })).toHaveCount(0);
+    await expect(panel.getByText(/not evidence of damage/).first()).toBeVisible();
+    await expect(page.getByRole("button", { name: /Approve|Publish/ })).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `inconclusive ${width}`).toBe(true);
+  }
+});

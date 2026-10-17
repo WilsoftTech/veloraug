@@ -37,7 +37,12 @@ const DOWNLOAD_MAX_BYTES = 2000 * 1024 * 1024;
 const MEDIA_TYPES: Record<string, string> = { mp4: "video/mp4", mkv: "video/x-matroska" };
 
 type Assessment = ReturnType<typeof assessOriginalMedia>;
-export type DecodeOutcome = { outcome: "decoded" | "decode_failed" | "decode_timeout"; seconds: number; frames: number };
+/**
+ * `exitCode` and `errors` (FFmpeg's error lines, kept in memory only) let a
+ * failure be named. A decoder that does not report them leaves it unnamed:
+ * `decode_failed`, which says nothing about whether the file is damaged.
+ */
+export type DecodeOutcome = { outcome: "decoded" | "decode_failed" | "decode_timeout"; seconds: number; frames: number; exitCode?: number | null; errors?: readonly string[] };
 export interface VerificationDecoder {
   /** Decodes the film's video and these audio streams, whole (`window` null) or after a seek. */
   decode(streams: { video: number; audio: readonly number[] }, window: { start: number; seconds: number } | null): Promise<DecodeOutcome>;
@@ -73,6 +78,34 @@ const toolToken = (version: string) => version.replace(/[^A-Za-z0-9._+:-]/g, "_"
 /** The decode is complete when it comes within a second, or 2% for a long film, of the container's duration. */
 export const decodeReaches = (decodedSeconds: number, durationSeconds: number): boolean => decodedSeconds >= durationSeconds - Math.max(1, durationSeconds * 0.02);
 
+/** An error this close to the container's duration comes after the whole film has been decoded. */
+const END_WINDOW_SECONDS = 1;
+// FFmpeg 9 wording, from the committed fixtures damaged on purpose (lib/uploader/media-ffmpeg.test.ts).
+const NO_DECODER = /no decoder found for|Decoder \(codec [^)]*\) not found|is not implemented|Unsupported codec/i;
+const NOT_OPENED = /Error opening input|EBML header parsing failed|moov atom not found/i;
+const ENDED_EARLY = /File ended prematurely|Truncating packet|partial file|End of file/i;
+const DAMAGED = /error while decoding|Invalid NAL unit|corrupt (input packet|decoded frame)|Error submitting packet to decoder|invalid as first byte of an EBML number|missing picture|concealing|Reference \d+ >=|non-existing PPS|Header missing|invalid (new )?backstep|overread/i;
+
+/**
+ * Names a whole-file decode that did not succeed, from what FFmpeg reported and
+ * where it stopped. Only data the decoder itself called damaged, before the
+ * end of the film, is `decode_corrupt_data`. Anything that cannot be told
+ * apart stays `decode_failed`: a failure with no verdict on the file.
+ */
+export function decodeFailureReason(decode: DecodeOutcome, durationSeconds: number): string {
+  if (decode.outcome === "decode_timeout") return "decode_timeout";
+  if (decode.errors === undefined) return "decode_failed";
+  const text = decode.errors.join("\n");
+  // Stopped by the machine (killed, could not start, output over its limit), or exited non-zero naming nothing in the file.
+  if (decode.exitCode === null || (!text.trim() && decode.exitCode !== 0)) return "decode_tool_failed";
+  if (NO_DECODER.test(text)) return "decode_codec_unsupported";
+  if (decode.seconds === 0 && decode.frames === 0 && NOT_OPENED.test(text)) return "decode_container_unparsable";
+  if (decode.seconds >= durationSeconds - END_WINDOW_SECONDS) return "decode_error_at_end";
+  if (DAMAGED.test(text)) return "decode_corrupt_data";
+  if (ENDED_EARLY.test(text)) return "content_truncated";
+  return "decode_failed";
+}
+
 export async function verifyOriginal(input: VerificationInput, decoder: VerificationDecoder): Promise<OriginalVerification> {
   const started = input.now().toISOString();
   const { inspection, assessment } = input;
@@ -89,7 +122,7 @@ export async function verifyOriginal(input: VerificationInput, decoder: Verifica
     else {
       const whole = await decoder.decode({ video: video.index, audio: audio.map((track) => track.index) }, null);
       integrity.decoded_seconds = whole.seconds;
-      if (whole.outcome !== "decoded") integrity.reasons.push(whole.outcome);
+      if (whole.outcome !== "decoded") integrity.reasons.push(decodeFailureReason(whole, duration));
       else if (!decodeReaches(whole.seconds, duration)) integrity.reasons.push("content_truncated");
     }
   }

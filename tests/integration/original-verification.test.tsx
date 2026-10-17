@@ -267,7 +267,7 @@ describe.skipIf(skip)("Policy 3 verification contract, end to end (isolated)", (
       const damaged = await verify(311);
       expect(damaged.evidence).toMatchObject({ media_class: "unverified", inspection_scope: "whole_file", assessment: { accepted: false, integrity: "incomplete", streaming: "unverified",
         verification: { integrity: { status: "failed" }, streaming: { status: "not_attempted", samples: [] }, digest: { value: sha256(corrupt) } } } });
-      expect(damaged.evidence!.reasons).toEqual(["decode_failed"]);
+      expect(damaged.evidence!.reasons).toEqual(["decode_corrupt_data"]);
       const failed = await read(311);
       expect(failed).toMatchObject({ status: "awaiting_media", gates: ["media_verification_required", "rights_clearance_required"] });
       const report = mediaReport(candidateMedia(failed));
@@ -427,6 +427,85 @@ describe.skipIf(skip)("Policy 3 verification contract, end to end (isolated)", (
       expect(await refusal(() => verify(301))).toBe("discovery_verification_not_claimable");
       // Nothing was left in the spool, and the reviewer's choice is unchanged.
       expect(isolatedSql(`select r.identity_state || ':' || r.tmdb_id from private.channel_reviews r where r.discovery_key='${key(371)}'`)).toBe("confirmed:9930371");
+    });
+
+    // Legacy media check fix (2026-10-17). The latest evidence is a refusal by the earlier MP4-only policy, recorded
+    // exactly as the hosted rows of 2026-10-11 were (bounded, policy 2, no assessment), on a database that applies Policy 3.
+    const legacyRefusal = (message: number, reason: string, container: string | null) => isolatedSql(`
+      insert into private.media_evidence (telegram_media_id, media_identity, method, scope, policy_version, media_class, reasons, container, accessible, gateway_compatible,
+        playback_ready, bytes_read, checked_at, assessment)
+      select m.id, private.channel_media_identity(m.chat_id, m.message_id, m.file_unique_id, m.file_size_bytes), 'bounded_mtproto_v1', 'bounded', 2, 'unverified',
+        array['${reason}'], ${container ? `'${container}'` : "null"}, true, true, false, ${container ? 64 : 16}, now(), null
+      from private.telegram_media m where m.chat_id=${CHANNEL} and m.message_id=${message}`);
+    // The statuses are generated from the policy version: a policy 2 row is legacy_unassessed, as on hosted.
+    const identity = (message: number) => isolatedSql(`select r.identity_state || ':' || r.tmdb_id || ':' || r.vj_id from private.channel_reviews r where r.discovery_key='${key(message)}'`);
+    const legacyRows = (message: number) => Number(isolatedSql(`select count(*) from private.media_evidence ev join private.telegram_media m on m.id=ev.telegram_media_id
+      where m.chat_id=${CHANNEL} and m.message_id=${message} and ev.policy_version=2`));
+
+    it("a historical policy 2 refusal is shown as history, then a Policy 3 reinspection verifies the same document without touching rights or approval", async () => {
+      // In Cold Light's case (index at the end) and Hunting Grounds' case (MKV).
+      await post([doc(391, "Papa Original", "mp4-h264-aac-moov-at-end.mp4", "mp4"), doc(392, "Quebec Original", "mkv-h264-aac.mkv", "mkv")]);
+      legacyRefusal(391, "mp4_not_fast_start", "mp4"); legacyRefusal(392, "container_not_mp4", null);
+      for (const [message, history] of [[391, "index at the end"], [392, "not an MP4"]] as const) {
+        const before = await read(message);
+        expect(before.evidence!.policyVersion, String(message)).toBe(2);
+        expect(guidance(before).label).toBe("Awaiting Policy 3 inspection");
+        const report = mediaReport(candidateMedia(before));
+        expect([status(report, "Media integrity").value, status(report, "Streaming readiness").value]).toEqual(["Awaiting Policy 3 inspection", "Awaiting Policy 3 inspection"]);
+        expect(report.reasons).toEqual([]); expect(report.history.join(" ")).toContain(history);
+        const html = page(before);
+        expect(html).not.toContain(">Failed<"); expect(html).toContain("Historical result (not a current verdict)"); expect(html).not.toContain('value="approve"');
+        expect(before.gates).toEqual(["media_verification_required", "rights_clearance_required"]);
+      }
+      const confirmed = [identity(391), identity(392)];
+      for (const [message, layout] of [[391, "mp4_tail_index"], [392, "matroska"]] as const) {
+        const result = await verify(message);
+        expect(result.outcome, String(message)).toBe("needs_review");
+        expect(result.evidence).toMatchObject({ inspection_scope: "whole_file", assessment: { integrity: "verified", streaming: "verified", verification: { streaming: { layout } } } });
+        const after = await read(message);
+        // Fresh Policy 3 evidence is current; the historical refusal is kept, and is not the result.
+        expect(after.evidence).toMatchObject({ policyVersion: 3, facts: { integrity: "verified", streaming: "verified", publishable: true } });
+        expect(legacyRows(message)).toBe(1);
+        expect(mediaReport(candidateMedia(after)).history).toEqual([]);
+        // Technical verification opened the media gate only: rights and approval still block, and nothing is published.
+        expect(after.gates).toEqual(["rights_clearance_required"]);
+        expect(await refusal(() => reviewer(REVIEW).approve(after.id, after.revision))).toBe("review_gates_not_met");
+        expect(await refusal(() => reviewer(PUBLISH).publish(after.id, after.revision))).toBe("catalogue_not_approved");
+      }
+      expect([identity(391), identity(392)]).toEqual(confirmed);
+      expect(isolatedSql(`select count(*) from public.movies where tmdb_id in (9930391, 9930392)`)).toBe("0");
+      // Approval is still required after rights are cleared.
+      const cleared = await reviewer(RIGHTS).clearRights((await read(391)).id, (await read(391)).revision, "licence LEGACY-391");
+      expect(cleared.gates).toEqual([]);
+      expect(await refusal(() => reviewer(PUBLISH).publish(cleared.id, cleared.revision))).toBe("catalogue_not_approved");
+      expect(isolatedSql(`select count(*) from public.movies where tmdb_id = 9930391`)).toBe("0");
+    });
+
+    it("a failed Policy 3 reinspection names its finding: damage, an error after the whole film, or a file cut short, and never opens the gate", async () => {
+      const mp3 = readFileSync(join(FIXTURES, "mkv-h264-mp3.mkv")), aac = readFileSync(join(FIXTURES, "mkv-h264-aac.mkv"));
+      const damaged = Buffer.from(aac); for (let at = 100_000; at < 100_400; at += 1) damaged[at] ^= 0x5a;
+      // The size stays what the container records (as All the Devil's Men's did); only the final block is unreadable.
+      const tail = Buffer.from(mp3); tail.fill(0, tail.length - 1500, tail.length - 900);
+      await post([doc(393, "Romeo Original", tail, "mkv"), doc(394, "Sierra Original", damaged, "mkv"), doc(395, "Tango Original", aac.subarray(0, 150_000), "mkv")]);
+      for (const message of [393, 394, 395]) legacyRefusal(message, "container_not_mp4", null);
+      const cases = [[393, "decode_error_at_end", "Not verified", "Verification inconclusive"], [394, "decode_corrupt_data", "Failed", "Media check failed"], [395, "mkv_tracks_incomplete", "Failed", "Media check failed"]] as const;
+      // 395 is cut short: the bounded check refuses its structure, so it is never read whole.
+      for (const [message, reason, integrity, label] of cases) {
+        expect((await verify(message)).outcome, String(message)).toBe("needs_review");
+        const after = await read(message);
+        expect(after.evidence!.reasons, String(message)).toEqual([reason]);
+        expect(after.evidence!.facts, String(message)).toMatchObject({ integrity: "incomplete", streaming: "unverified", publishable: false });
+        expect(after.gates).toEqual(["media_verification_required", "rights_clearance_required"]);
+        expect(legacyRows(message)).toBe(1);
+        const report = mediaReport(candidateMedia(after));
+        expect(status(report, "Media integrity").value, String(message)).toBe(integrity);
+        expect(guidance(after).label, String(message)).toBe(label);
+        expect(identity(message)).toBe(`confirmed:${9930000 + message}:${vjId}`);
+      }
+      // The whole film decoded; only the final block was incomplete. Not called damaged, and not verified either.
+      const atEnd = await read(393);
+      expect(page(atEnd)).not.toContain(">Failed<"); expect(page(atEnd)).toContain("not evidence of damage");
+      expect(await refusal(() => reviewer(RIGHTS).clearRights(atEnd.id, atEnd.revision, "licence LEGACY-393").then((c) => reviewer(REVIEW).approve(c.id, c.revision)))).toBe("review_gates_not_met");
     });
   });
 

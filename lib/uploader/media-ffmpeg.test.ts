@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { classifyMedia, readMp4Layout, selectPlaybackStreams, verifyRemux, type MediaInspection, type PlaybackSelection } from "@/lib/ingestion/media";
+import { assessOriginalMedia } from "@/lib/ingestion/original-media";
+import { decodeFailureReason, verifiedAssessment, verifyOriginal } from "@/lib/discovery/original-verification";
 import { newJournalEntry, openJournal, type JournalEntry } from "@/lib/uploader/journal";
 import { decodeStreams, digestPackets, freeBytes, probeMedia, remux, resolveMediaTools, runProcess, spoolDocument, type MediaTools } from "@/lib/uploader/media-tools";
 import { normalizeEntry, type NormalizeDeps } from "@/lib/uploader/normalize";
@@ -374,5 +376,80 @@ describe("tool discovery (no real tools needed)", () => {
     const result = await resolveMediaTools({ PATH: "", VELORA_FFPROBE_PATH: exe }, async () => ({ code: 0, stdout: "something else", stderrTail: "", timedOut: false }));
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errors).toContain("ffprobe at VELORA_FFPROBE_PATH did not report a version");
+  });
+});
+
+// Legacy media check fix (2026-10-17): the whole Policy 3 verifier on real files with the real tools. An MP4 is not
+// refused for its index at the end, an MKV is accepted, and a decode that fails is named for what it found.
+describe.skipIf(!tools)("Policy 3 verification of originals, by format and by failure (real tools)", () => {
+  const fixture = (name: string) => join("tests/browser/fixtures", name);
+  async function verifyFile(path: string, fileName: string, bytesHashed?: number) {
+    const probe = await probeMedia(tools!.ffprobe, path);
+    if (!probe.ok) return { probe: probe.code } as const;
+    const assessment = assessOriginalMedia(probe.inspection, fileName);
+    const size = statSync(path).size;
+    const verification = await verifyOriginal({ inspection: probe.inspection, assessment, sizeBytes: size, sha256: "b".repeat(64), bytesHashed: bytesHashed ?? size, fileName,
+      tools: { ffmpeg: tools!.ffmpeg.version, ffprobe: tools!.ffprobe.version }, now: () => new Date() }, { decode: (streams, window) => decodeStreams(tools!.ffmpeg, path, streams, window) });
+    return { assessment, verification, recorded: verifiedAssessment(assessment, verification) } as const;
+  }
+  const copy = (name: string, bytes: Buffer) => { const path = join(work, name); writeFileSync(path, bytes); return path; };
+
+  it("verifies a fast-start MP4, an MP4 with its index at the end, an MKV, and an MKV whose audio browsers cannot play", async () => {
+    const cases = [
+      ["mp4-h264-aac-faststart.mp4", "mp4_head_index", []],
+      ["mp4-h264-aac-moov-at-end.mp4", "mp4_tail_index", ["mp4_startup_tail_required"]],
+      ["mkv-h264-aac.mkv", "matroska", ["firefox_mkv_streaming_unreliable"]],
+      ["mkv-h264-ac3.mkv", "matroska", ["ac3_audio_silent_in_tested_browsers"]],
+    ] as const;
+    for (const [name, layout, warnings] of cases) {
+      const result = await verifyFile(fixture(name), name);
+      if ("probe" in result) throw new Error(`${name}: ${result.probe}`);
+      expect(result.verification.integrity, name).toMatchObject({ status: "verified", reasons: [] });
+      expect(result.verification.streaming, name).toMatchObject({ status: "verified", layout });
+      expect(result.recorded, name).toMatchObject({ accepted: true, integrity: "verified", streaming: "verified", download: "original_servable" });
+      // Browser compatibility is recorded beside integrity and streaming, never in place of them.
+      for (const warning of warnings) expect(result.recorded.warnings, name).toContain(warning);
+    }
+    const ac3 = await verifyFile(fixture("mkv-h264-ac3.mkv"), "mkv-h264-ac3.mkv");
+    if ("probe" in ac3) throw new Error(ac3.probe);
+    expect(ac3.recorded.compatibility).toMatchObject({ chromium: "tested_video_only_silent_audio" });
+  });
+
+  it("names each failure, and none of them verifies", async () => {
+    const aac = readFileSync(fixture("mkv-h264-aac.mkv")), mp3 = readFileSync(fixture("mkv-h264-mp3.mkv")), mp4 = readFileSync(fixture("mp4-h264-aac-faststart.mp4"));
+    const flipped = Buffer.from(aac); for (let at = 100_000; at < 100_400; at += 1) flipped[at] ^= 0x5a;
+    const finalBlock = Buffer.from(mp3); finalBlock.fill(0, finalBlock.length - 1500, finalBlock.length - 900);
+    const cases = [
+      ["corrupt.mkv", flipped, "decode_corrupt_data"],
+      ["final-block.mkv", finalBlock, "decode_error_at_end"],
+      ["truncated.mkv", aac.subarray(0, 150_000), "content_truncated"],
+    ] as const;
+    for (const [name, bytes, reason] of cases) {
+      const result = await verifyFile(copy(name, bytes), name);
+      if ("probe" in result) throw new Error(`${name}: ${result.probe}`);
+      expect(result.verification.integrity, name).toMatchObject({ status: "failed", reasons: [reason] });
+      expect(result.recorded, name).toMatchObject({ accepted: false, integrity: "incomplete", streaming: "unverified" });
+    }
+    // A truncated MP4: its boxes no longer cover the file, so it is refused before any decode is asked for.
+    const cutMp4 = await verifyFile(copy("truncated.mp4", mp4.subarray(0, 170_000)), "truncated.mp4");
+    if ("probe" in cutMp4) throw new Error(cutMp4.probe);
+    expect(cutMp4.verification.integrity).toMatchObject({ status: "failed", reasons: ["mp4_layout_incomplete"], decoded_seconds: null });
+    expect(cutMp4.recorded.accepted).toBe(false);
+    // An incomplete read: fewer bytes hashed than recorded is a failure before any decode.
+    const short = await verifyFile(fixture("mkv-h264-aac.mkv"), "mkv-h264-aac.mkv", 100_000);
+    if ("probe" in short) throw new Error(short.probe);
+    expect(short.verification.integrity).toMatchObject({ status: "failed", reasons: ["content_size_mismatch"], decoded_seconds: null });
+  });
+
+  it("an unsupported codec is a limit of the decoder, and a container it cannot open is named as such", async () => {
+    const unknown = Buffer.from(readFileSync(fixture("mkv-h264-aac.mkv"))); unknown.write("V_XXXXX/ISO/AVC", unknown.indexOf("V_MPEG4/ISO/AVC"));
+    const decoded = await decodeStreams(tools!.ffmpeg, copy("codec-unknown.mkv", unknown), { video: 0, audio: [1] });
+    expect(decoded.outcome).toBe("decode_failed");
+    expect(decodeFailureReason(decoded, 12.021)).toBe("decode_codec_unsupported");
+    // The bounded and full assessments refuse it before a decode is ever asked for.
+    const probed = await probeMedia(tools!.ffprobe, join(work, "codec-unknown.mkv"));
+    if (probed.ok) expect(assessOriginalMedia(probed.inspection, "codec-unknown.mkv").accepted).toBe(false);
+    const noise = await decodeStreams(tools!.ffmpeg, copy("noise.mkv", Buffer.alloc(50_000, 7)), { video: 0, audio: [1] });
+    expect(decodeFailureReason(noise, 12.021)).toBe("decode_container_unparsable");
   });
 });

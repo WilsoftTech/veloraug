@@ -42,8 +42,9 @@ const REASONS: Record<string, string> = {
   media_read_range_not_satisfiable: "The file is shorter than Telegram reports.",
   media_unreadable: "The file could not be read from Telegram.",
   probe_failed: "The file's index could not be read as video.",
-  container_not_mp4: "The file is not an MP4 (for example an MKV). It needs an approved MP4 version.",
-  mp4_not_fast_start: "The MP4 keeps its index at the end, so a browser cannot start it. It needs a fast-start version.",
+  // Policies 1 and 2 (the earlier MP4-only check). Under Policy 3 these are history, not a verdict.
+  container_not_mp4: "The file is not an MP4 (for example an MKV), which the earlier MP4-only policy refused. Policy 3 accepts original MKV files.",
+  mp4_not_fast_start: "The MP4 keeps its index at the end, which the earlier MP4-only policy refused. Policy 3 accepts that layout, with a slower start.",
   mp4_fragmented: "The MP4 is fragmented, which the player does not support.",
   mp4_layout_incomplete: "The file's structure does not cover the size Telegram reports.",
   moov_over_budget: "The file's index is larger than the bounded check reads.",
@@ -65,7 +66,12 @@ const REASONS: Record<string, string> = {
   // The verification contract (a whole-file inspection).
   content_size_mismatch: "Fewer bytes could be read than the file's recorded size.",
   content_truncated: "The film stops before the duration its container reports: the file is cut short.",
-  decode_failed: "The film did not decode from start to end without an error: the file is damaged.",
+  decode_failed: "The decoder reported an error that was not classified (inspections before 2026-10-17 recorded every decoder error this way). This alone does not show that the file is damaged.",
+  decode_corrupt_data: "The decoder found damaged data inside the film, before its end: the file is damaged.",
+  decode_error_at_end: "The whole film decoded to its end; the decoder then reported an incomplete or unreadable final block. That is not evidence of damage to the film, but integrity is not verified.",
+  decode_codec_unsupported: "The verifier's decoder cannot decode a track of this file. That is a limit of the tool, not a verdict on the file.",
+  decode_container_unparsable: "The decoder could not open the file's container, so nothing was decoded.",
+  decode_tool_failed: "The decoder stopped without naming a problem in the file (a fault of the machine that ran it).",
   decode_timeout: "Decoding the film did not finish in time.",
   media_not_decodable: "The file has no film stream or no duration to decode against.",
   mp4_fragmented_untested: "The MP4 is fragmented, a layout the player has not been tested with.",
@@ -92,13 +98,30 @@ export const verificationPending = (candidate: ReviewCandidate): boolean =>
   candidate.evidence?.policyVersion === 3 && candidate.evidence.facts !== undefined && !candidate.evidence.facts.publishable && (candidate.evidence.reasons ?? []).length === 0;
 
 /**
+ * The latest evidence is an earlier MP4-only policy's refusal, on a database
+ * that applies Policy 3 (it reports the separate facts). Kept as history; it is
+ * not a current verdict, and only a new inspection replaces it.
+ */
+export const legacyRefusal = (candidate: ReviewCandidate): boolean => {
+  const evidence = candidate.evidence;
+  return evidence?.policyVersion !== undefined && evidence.policyVersion < 3 && evidence.facts !== undefined && !verified(candidate);
+};
+
+/** Whole-file findings that do not show the file is damaged: not verified, and not a failed file either. */
+export const INCONCLUSIVE_DECODE = new Set(["decode_failed", "decode_error_at_end", "decode_codec_unsupported"]);
+const verificationInconclusive = (candidate: ReviewCandidate): boolean => {
+  const reasons = candidate.evidence?.reasons ?? [];
+  return candidate.evidence?.policyVersion === 3 && reasons.length > 0 && reasons.every((reason) => INCONCLUSIVE_DECODE.has(reason));
+};
+
+/**
  * What the last inspection could not do, or null. A failed attempt is named by
  * the worker's code; a completed media check by the reasons in its evidence.
  */
 export function lastFailure(candidate: ReviewCandidate): string | null {
   const last = candidate.lastInspection;
   if ((candidate.status === "failed" || inspectionExhausted(candidate)) && last?.action === "inspection_failed" && last.detail) return reasonText(last.detail);
-  if (candidate.evidence && !verified(candidate) && !verificationPending(candidate)) {
+  if (candidate.evidence && !verified(candidate) && !verificationPending(candidate) && !legacyRefusal(candidate)) {
     const reasons = candidate.evidence.reasons ?? [];
     return reasons.length ? reasons.slice(0, 3).map(reasonText).join(" ") : "The file did not pass the media policy.";
   }
@@ -141,6 +164,11 @@ export function guidance(candidate: ReviewCandidate): ReviewGuidance {
   if (status === "awaiting_media") {
     if (!mediaCheckAvailable(candidate)) return { group: "progress", label: "Waiting for media check", next: "Film and VJ are confirmed. The file still has to pass the automatic media check before it can be published." };
     if (verificationPending(candidate)) return { group: "progress", label: "Verification pending", next: "The original file was inspected and its metadata is consistent. Integrity and streaming are not verified yet, and nothing here can verify them, so it cannot be published. Film and VJ stay confirmed." };
+    if (legacyRefusal(candidate)) {
+      const history = (candidate.evidence?.reasons ?? []).slice(0, 3).map(reasonText).join(" ");
+      return { group: "action", label: "Awaiting Policy 3 inspection", next: `Historical result, not a current verdict: policy ${candidate.evidence?.policyVersion} refused this file. ${history} Policy 3 has not inspected it yet. A whole-file verification, started by the operator, is needed before it can be published. Film and VJ stay confirmed.` };
+    }
+    if (verificationInconclusive(candidate)) return { group: "action", label: "Verification inconclusive", next: `${failure ?? ""} The file was read whole, and what the decoder reported does not show that it is damaged, but integrity is not verified, so it cannot be published. Film and VJ stay confirmed.`.trim() };
     // Nothing runs by itself here: a check is requested by a reviewer, and a file outside the policy needs replacing.
     return candidate.evidence ? { group: "action", label: "Media check failed", next: `${failure ?? "The file did not pass the media policy."} Film and VJ stay confirmed. Run the check again once the file is fixed.` }
       : { group: "action", label: "Media check needed", next: `${failure ? `${failure} ` : ""}Film and VJ are confirmed. Run the media check: it reads the file's index from Telegram and does not change the post.` };

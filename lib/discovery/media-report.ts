@@ -1,4 +1,4 @@
-import { otherGates, reasonText, steps } from "@/lib/discovery/guidance";
+import { INCONCLUSIVE_DECODE, otherGates, reasonText, steps } from "@/lib/discovery/guidance";
 import type { ReviewCandidate } from "@/lib/discovery/model";
 
 /**
@@ -44,6 +44,8 @@ export interface MediaReport {
   /** How the inspection was made: its scope, the file's digest and the download evidence. */
   provenance: { label: string; value: string }[];
   reasons: string[];
+  /** An earlier MP4-only policy's recorded refusal, kept as history. Never a current verdict. */
+  history: string[];
   warnings: string[];
   browsers: { name: string; value: string }[];
 }
@@ -54,8 +56,18 @@ const NEEDS_UPDATE = "Not reported by this source. On Supabase the separate fact
 const BOUNDED = "A bounded check of the index and samples. It is not proof that the whole file is intact.";
 
 /** The check could not read the file. That says nothing about the file itself. */
-const UNREAD = /^media_read_|^(media_unreadable|probe_timeout|moov_over_budget|no_evidence|verification_storage_unavailable|decode_timeout)$/;
-const refused = (reasons: readonly string[]) => reasons.some((reason) => !UNREAD.test(reason));
+const UNREAD = /^media_read_|^(media_unreadable|probe_timeout|moov_over_budget|no_evidence|verification_storage_unavailable|decode_timeout|decode_tool_failed)$/;
+/** A finding against the file. A decode that does not show damage (INCONCLUSIVE_DECODE) is not one. */
+const refused = (reasons: readonly string[]) => reasons.some((reason) => !UNREAD.test(reason) && !INCONCLUSIVE_DECODE.has(reason));
+const inconclusive = (reasons: readonly string[]) => reasons.some((reason) => INCONCLUSIVE_DECODE.has(reason));
+
+/**
+ * The latest evidence is an earlier MP4-only policy's refusal, on a database that
+ * applies Policy 3. It stays on record as history and is not shown as a verdict.
+ */
+const historical = (facts: MediaFacts) =>
+  facts.inspected && facts.policyVersion !== null && facts.policyVersion < 3 && facts.policy3 !== undefined && facts.passed !== true;
+const AWAITING = "Awaiting Policy 3 inspection";
 
 const WARNINGS: Record<string, string> = {
   mp4_startup_tail_required: "The MP4 keeps its index at the end, so playback needs one extra request before it starts.",
@@ -92,12 +104,15 @@ function integrity(facts: MediaFacts): Omit<MediaStatus, "label"> {
   if (!facts.inspected) return { value: "Not inspected", tone: "missing", detail: "No inspection evidence is recorded for this file." };
   const status = facts.policy3?.integrity;
   if (status === undefined) return { value: UNREPORTED, tone: "missing", detail: NEEDS_UPDATE };
+  if (historical(facts)) return { value: AWAITING, tone: "missing", detail: `The last inspection used policy ${facts.policyVersion}, which did not assess integrity. Policy 3 has not inspected this file.` };
   if (status === "verified") return { value: "Verified", tone: "verified", detail: facts.inspection?.scope === "whole_file"
     ? "Every byte was read and hashed, and the whole film decoded to its end without an error." : "The database records verified integrity for this file." };
   if (status === "metadata_consistent") return { value: "Metadata consistent, not verified", tone: "pending", detail: BOUNDED };
   if (status === "incomplete") return refused(facts.reasons)
     ? { value: "Failed", tone: "failed", detail: "The file was refused. See the reasons below." }
-    : { value: "Inspection incomplete", tone: "pending", detail: "The check could not read enough of the file. This is not a verdict on the file." };
+    : inconclusive(facts.reasons)
+      ? { value: "Not verified", tone: "pending", detail: "The whole file was read, and what the decoder reported does not show that it is damaged. Integrity is not verified. See the reasons below." }
+      : { value: "Inspection incomplete", tone: "pending", detail: "The check could not read enough of the file. This is not a verdict on the file." };
   if (status === "legacy_unassessed") return { value: "Not assessed", tone: "missing", detail: `Inspected under policy ${facts.policyVersion ?? "1 or 2"}, which did not assess integrity separately.` };
   return { value: `Unrecognised: ${human(status)}`, tone: "missing", detail: "This page does not know this status and does not treat it as verified." };
 }
@@ -105,6 +120,7 @@ function integrity(facts: MediaFacts): Omit<MediaStatus, "label"> {
 function streaming(facts: MediaFacts): Omit<MediaStatus, "label"> {
   if (!facts.inspected) return { value: "Not inspected", tone: "missing", detail: "No inspection evidence is recorded for this file." };
   const status = facts.policy3?.streaming;
+  if (historical(facts)) return { value: AWAITING, tone: "missing", detail: `Policy ${facts.policyVersion}, the earlier MP4-only check, refused this file (the historical result below). Under Policy 3 that is not a verdict; a new inspection decides.` };
   // The earlier policies gave one verdict: a fast-start MP4 the player can stream, or not.
   if (status === undefined || status === "legacy_unassessed") {
     if (facts.passed === true) return { value: "Verified by the earlier MP4 policy", tone: "verified", detail: `Policy ${facts.policyVersion ?? "1 or 2"}: a fast-start MP4, checked in bounded reads.` };
@@ -120,7 +136,7 @@ function streaming(facts: MediaFacts): Omit<MediaStatus, "label"> {
   if (status === "untested") return { value: "Untested layout, not verified", tone: "pending", detail: "This layout has not been tested in the player." };
   if (status === "unverified") return refused(facts.reasons)
     ? { value: "Failed", tone: "failed", detail: "The file was refused. See the reasons below." }
-    : { value: "Not verified", tone: "pending", detail: "The check did not get far enough to assess streaming." };
+    : { value: "Not verified", tone: "pending", detail: inconclusive(facts.reasons) ? "Not assessed: streaming is checked only once integrity is verified." : "The check did not get far enough to assess streaming." };
   return { value: `Unrecognised: ${human(status)}`, tone: "missing", detail: "This page does not know this status and does not treat it as verified." };
 }
 
@@ -128,6 +144,7 @@ const NOT_BLOCKING = "A prediction from the container and codecs, not a test of 
 function browsers(facts: MediaFacts): Omit<MediaStatus, "label"> {
   if (!facts.inspected) return { value: "Not inspected", tone: "missing", detail: "No inspection evidence is recorded for this file." };
   if (!facts.policy3) return { value: UNREPORTED, tone: "missing", detail: NEEDS_UPDATE };
+  if (historical(facts)) return { value: AWAITING, tone: "missing", detail: `Policy ${facts.policyVersion} did not predict browser support.` };
   const profile = facts.policy3.browsers;
   if (!profile) return { value: "Unknown", tone: "missing", detail: "The inspection did not get far enough to predict browser support." };
   const desktop = [profile.chromium, profile.firefox];
@@ -152,6 +169,7 @@ export function mediaReport(facts: MediaFacts, context?: DownloadContext): Media
   const count = (value: number | null | undefined) => (value === null || value === undefined ? UNREPORTED : String(value));
   return {
     basis: !facts.inspected ? "No inspection evidence is recorded for this file."
+      : historical(facts) ? `Historical result only: policy ${facts.policyVersion}, the earlier fast-start MP4 check in bounded reads. Policy 3 has not inspected this file, so nothing here is a current verdict.`
       : facts.policyVersion === 3 && facts.inspection?.scope === "whole_file" ? "Policy 3: the whole original file was read, hashed and decoded. Each status below is its own finding."
       : facts.policyVersion === 3 ? "Policy 3: the original file, inspected in bounded reads. Metadata and potential playability are recorded; they are not verification."
       : facts.policyVersion === null ? "Inspection evidence with no recorded policy version."
@@ -177,7 +195,8 @@ export function mediaReport(facts: MediaFacts, context?: DownloadContext): Media
       { label: "Content SHA-256", value: facts.inspection?.sha256 ?? (facts.inspection?.scope === "bounded" ? "Not recorded by a bounded inspection" : UNREPORTED) },
       { label: "Download evidence", value: DOWNLOAD_EVIDENCE[facts.inspection?.download ?? ""] ?? (facts.inspection ? `Unrecognised: ${human(facts.inspection.download)}` : UNREPORTED) },
     ],
-    reasons: facts.reasons.map(reasonText),
+    reasons: historical(facts) ? [] : facts.reasons.map(reasonText),
+    history: historical(facts) ? facts.reasons.map(reasonText) : [],
     warnings: (policy3?.warnings ?? []).map((code) => WARNINGS[code] ?? `${human(code)}.`),
     browsers: Object.entries(policy3?.browsers ?? {}).map(([name, value]) => ({ name: BROWSER_NAMES[name] ?? human(name), value: BROWSER_VALUES[value] ?? `Unrecognised: ${human(value)}` })),
   };

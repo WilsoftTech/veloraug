@@ -50,6 +50,8 @@ export async function inspectAdminUpload(root: string,ports: UploadInspectionPor
         const verification = await verifyOriginal({ inspection: probe.inspection,assessment,sizeBytes: session.size_bytes,sha256: session.verified_sha256,bytesHashed: session.size_bytes,
           fileName: session.file_name,tools: { ffmpeg: tools.tools.ffmpeg.version,ffprobe: tools.tools.ffprobe.version },now: () => new Date() },
           { decode: (streams,window) => decodeStreams(tools.tools.ffmpeg,path,streams,window) });
+        // A decoder that was stopped or could not run says nothing about the file: retried, never recorded as a finding.
+        if (verification.integrity.reasons.includes("decode_tool_failed")) throw Object.assign(new Error("decode_tool_failed"),{ code: "unexpected_error" });
         assessment = verifiedAssessment(assessment,verification);
         classification = { class: assessment.accepted ? "original" : "manual_review",reasons: assessment.reasons,policyVersion: classification.policyVersion };
       }

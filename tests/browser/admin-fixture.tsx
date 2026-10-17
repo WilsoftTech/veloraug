@@ -34,6 +34,13 @@ const SCENARIOS: Record<string, ReviewCandidate> = {
     evidence: { mediaKey: "d".repeat(64), container: true, gateway: true, browser: true, accessible: true, checkedAt: at, reference: "bounded_mtproto_v1: 3072 bytes read (bounded check, not full-file integrity)",
       mediaClass: "canonical", reasons: [], video: "h264", audio: "aac", bytesRead: 3072, policyVersion: 2, containerName: "mp4", passed: true } },
   none: { ...base, evidence: null, lastInspection: { at, action: "media_inspected", detail: "no_evidence", revision: 3 } },
+  // Legacy media check fix: a policy 2 refusal on a database that applies Policy 3 (In Cold Light's record) ...
+  historical: { ...base, evidence: { mediaKey: "d".repeat(64), container: false, gateway: true, browser: false, accessible: true, checkedAt: at, reference: "bounded_mtproto_v1: 64 bytes read (bounded check, not full-file integrity)",
+    mediaClass: "unverified", reasons: ["mp4_not_fast_start"], bytesRead: 64, policyVersion: 2, containerName: "mp4", passed: false,
+    facts: { integrity: "legacy_unassessed", streaming: "legacy_unassessed", browsers: null, audioTracks: null, subtitleTracks: null, warnings: [], publishable: false } } },
+  // ... and a whole-file decode that ended on an error after the whole film (the finding All the Devil's Men's record is consistent with).
+  inconclusive: { ...base, evidence: original("mkv", { integrity: "incomplete", streaming: "unverified" }, { mediaClass: "unverified", reasons: ["decode_error_at_end"], audio: "mp3",
+    inspection: { scope: "whole_file", download: "original_servable", sha256: "e".repeat(64) } }) },
 };
 
 const params = new URLSearchParams(location.search);

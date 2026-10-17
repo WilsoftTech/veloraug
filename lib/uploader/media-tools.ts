@@ -262,8 +262,12 @@ export async function spoolDocument<T>(dir: string, read: (offset: number, lengt
   }
 }
 
-/** How far a decode got. `seconds` and `frames` are the film's video, as FFmpeg's own progress reports them. */
-export interface DecodeResult { outcome: "decoded" | "decode_failed" | "decode_timeout"; seconds: number; frames: number }
+/**
+ * How far a decode got. `seconds` and `frames` are the film's video, as FFmpeg's own progress reports them.
+ * `exitCode` (null: stopped or never started) and `errors` (FFmpeg's last error lines) let a failure be
+ * named (decodeFailureReason); they are never stored, since they can name local paths.
+ */
+export interface DecodeResult { outcome: "decoded" | "decode_failed" | "decode_timeout"; seconds: number; frames: number; exitCode: number | null; errors: string[] }
 
 /**
  * Decodes the film's video and the named audio streams, with every decoder
@@ -283,8 +287,9 @@ export async function decodeStreams(ffmpeg: MediaTool, path: string, streams: { 
     if (key === "frame" && /^\d+$/.test(value ?? "")) frames = Number(value);
     else if (key === "out_time_us" && /^\d+$/.test(value ?? "")) seconds = Number(value) / 1_000_000;
   } });
-  if (result.timedOut) return { outcome: "decode_timeout", seconds, frames };
-  return { outcome: result.code === 0 && !result.stderrTail.trim() ? "decoded" : "decode_failed", seconds, frames };
+  const errors = result.stderrTail.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-20);
+  if (result.timedOut) return { outcome: "decode_timeout", seconds, frames, exitCode: result.code, errors };
+  return { outcome: result.code === 0 && !errors.length ? "decoded" : "decode_failed", seconds, frames, exitCode: result.code, errors };
 }
 
 /**

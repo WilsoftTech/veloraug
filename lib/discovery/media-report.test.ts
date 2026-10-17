@@ -90,11 +90,11 @@ describe("media status mapping", () => {
   it("failed streaming readiness: under Policy 3 and under the earlier MP4 policy", () => {
     const refused = report(policy3({ media_class: "unverified", integrity_status: "incomplete", streaming_status: "unverified", reasons: ["mp4_layout_incomplete"] }));
     expect(status(refused, "Streaming readiness")).toMatchObject({ value: "Failed", tone: "failed" });
-    // The recorded result of an earlier inspection is shown as it was recorded.
+    // The earlier policy's refusal remains history, pending a current Policy 3 inspection.
     const earlier = report(legacy({ verified: false, media_class: "unverified", playback_ready: false, reasons: ["mp4_not_fast_start"], integrity_status: "legacy_unassessed", streaming_status: "legacy_unassessed", browser_profile: null, tracks: null, warnings: null, publishable_media: false }));
-    expect(status(earlier, "Streaming readiness")).toMatchObject({ value: "Failed", tone: "failed" });
-    expect(status(earlier, "Media integrity")).toMatchObject({ value: "Not assessed", tone: "missing" });
-    expect(earlier.reasons[0]).toContain("index at the end"); expect(earlier.basis).toContain("Policy 2");
+    expect(status(earlier, "Streaming readiness")).toMatchObject({ value: "Awaiting Policy 3 inspection", tone: "missing" });
+    expect(status(earlier, "Media integrity")).toMatchObject({ value: "Awaiting Policy 3 inspection", tone: "missing" });
+    expect(earlier.history[0]).toContain("index at the end"); expect(earlier.basis).toContain("Historical result only: policy 2");
   });
 
   it("an inspection that could not read the file is incomplete, not a failed file", () => {
@@ -202,5 +202,66 @@ describe("publication requirements", () => {
       expect(requirement(candidate, "Media integrity verified").done).toBe(false); expect(requirement(candidate, "Streaming readiness verified").done).toBe(false);
     }
     expect(requirement(view(null), "Media integrity verified").detail).toBe("not inspected");
+  });
+});
+
+// Legacy media check fix (2026-10-17). The three candidates as the hosted database records them, read through the same view.
+describe("historical results and inconclusive decodes are never shown as a current Policy 3 verdict", () => {
+  /** A refusal by the earlier MP4-only policy on a database that applies Policy 3 (In Cold Light, Hunting Grounds). */
+  const policy2Refusal = (reason: string, container: string | null) => legacy({ verified: false, media_class: "unverified", playback_ready: false, reasons: [reason], container, video_codec: null, audio_codec: null,
+    bytes_read: container ? 64 : 16, integrity_status: "legacy_unassessed", streaming_status: "legacy_unassessed", browser_profile: null, tracks: null, warnings: null, publishable_media: false,
+    download_status: "not_implemented_authorization_required" });
+  /** A whole-file Policy 3 result that failed integrity (All the Devil's Men, with the reason it recorded or a named one). */
+  const wholeFile = (reason: string) => policy3({ scope: "whole_file", method: "full_original_v1", media_class: "unverified", container: "mkv", audio_codec: "mp3", reasons: [reason], integrity_status: "incomplete",
+    streaming_status: "unverified", download_status: "original_servable", content_sha256: "e".repeat(64), warnings: ["firefox_mkv_streaming_unreliable"],
+    browser_profile: profile("tested_combination", "streaming_unreliable") });
+
+  it.each([["mp4_not_fast_start", "mp4", "index at the end"], ["container_not_mp4", null, "not an MP4"]])("a policy 2 refusal (%s) is history, awaiting a Policy 3 inspection", (reason, container, text) => {
+    const candidate = view(policy2Refusal(reason, container));
+    const result = mediaReport(candidateMedia(candidate));
+    for (const label of ["Media integrity", "Streaming readiness", "Browser compatibility"]) expect(status(result, label), label).toMatchObject({ value: "Awaiting Policy 3 inspection", tone: "missing" });
+    expect(result.statuses.some((item) => item.tone === "failed")).toBe(false);
+    expect(result.reasons).toEqual([]); expect(result.history).toHaveLength(1); expect(result.history[0]).toContain(text); expect(result.history[0]).toContain("Policy 3 accepts");
+    expect(result.basis).toContain("Historical result only"); expect(detail(result, "Inspection policy")).toBe("Version 2");
+    expect(guidance(candidate)).toMatchObject({ group: "action", label: "Awaiting Policy 3 inspection" });
+    expect(guidance(candidate).next).toContain("not a current verdict"); expect(lastFailure(candidate)).toBeNull();
+    expect(requirement(candidate, "Media integrity verified").done).toBe(false); expect(requirement(candidate, "Streaming readiness verified").done).toBe(false);
+  });
+
+  it("a policy 2 pass is unchanged, and so is a policy 2 refusal on a database without the separate facts", () => {
+    expect(status(report(legacy()), "Streaming readiness")).toMatchObject({ value: "Verified by the earlier MP4 policy" });
+    const older = report({ ...legacy({ verified: false, media_class: "unverified", playback_ready: false, reasons: ["container_not_mp4"] }) });
+    expect(status(older, "Streaming readiness")).toMatchObject({ value: "Failed", tone: "failed" }); expect(older.history).toEqual([]);
+  });
+
+  it("All the Devil's Men's recorded decode_failed is not called damage: integrity not verified, streaming not assessed", () => {
+    const candidate = view(wholeFile("decode_failed"));
+    const result = mediaReport(candidateMedia(candidate));
+    expect(status(result, "Media integrity")).toMatchObject({ value: "Not verified", tone: "pending" });
+    expect(status(result, "Streaming readiness")).toMatchObject({ value: "Not verified", tone: "pending", detail: "Not assessed: streaming is checked only once integrity is verified." });
+    expect(result.reasons[0]).toContain("does not show that the file is damaged"); expect(result.reasons[0]).not.toContain(": the file is damaged");
+    expect(status(result, "Browser compatibility").tone).toBe("warning");
+    expect(guidance(candidate)).toMatchObject({ group: "action", label: "Verification inconclusive" });
+    expect(requirement(candidate, "Media integrity verified").done).toBe(false);
+  });
+
+  it.each([["decode_error_at_end", "Not verified", "Verification inconclusive"], ["decode_codec_unsupported", "Not verified", "Verification inconclusive"],
+    ["decode_corrupt_data", "Failed", "Media check failed"], ["content_truncated", "Failed", "Media check failed"], ["decode_container_unparsable", "Failed", "Media check failed"]])(
+    "a whole-file %s reads %s", (reason, value, label) => {
+      const candidate = view(wholeFile(reason));
+      expect(status(mediaReport(candidateMedia(candidate)), "Media integrity").value).toBe(value);
+      expect(guidance(candidate).label).toBe(label);
+    });
+
+  it("a later Policy 3 verification replaces the historical result as current; rights and approval still stand between it and publication", () => {
+    const candidate = view(verified({ scope: "whole_file", method: "full_original_v1", content_sha256: "f".repeat(64), download_status: "original_servable" }), ["rights_clearance_required"]);
+    const result = mediaReport(candidateMedia(candidate));
+    expect(result.history).toEqual([]); expect(status(result, "Media integrity").value).toBe("Verified");
+    expect(guidance(candidate).label).toBe("Rights needed");
+    expect(requirement(candidate, "Rights clearance approved")).toMatchObject({ done: false });
+    expect(requirement(candidate, "Final publication approval granted")).toMatchObject({ done: false, detail: "not approved" });
+    const cleared = view(verified({ scope: "whole_file", method: "full_original_v1", content_sha256: "f".repeat(64) }), []);
+    expect(guidance(cleared).label).toBe("Ready to approve");
+    expect(requirement(cleared, "Final publication approval granted").done).toBe(false);
   });
 });

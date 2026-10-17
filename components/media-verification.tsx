@@ -35,6 +35,10 @@ export function MediaVerification({ report, id = "media", children }: { report: 
       <h3 className="text-label-lg">Why the inspection did not pass</h3>
       <ul className="mt-2 list-inside list-disc space-y-1 text-body-md">{report.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
     </div>}
+    {report.history.length > 0 && <div className="mt-4">
+      <h3 className="text-label-lg">Historical result (not a current verdict)</h3>
+      <ul className="mt-2 list-inside list-disc space-y-1 text-body-md text-muted">{report.history.map((entry) => <li key={entry}>{entry}</li>)}</ul>
+    </div>}
     {report.warnings.length > 0 && <div className="mt-4">
       <h3 className="text-label-lg">Playback warnings</h3>
       <ul className="mt-2 list-inside list-disc space-y-1 text-body-md">{report.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>

@@ -16,7 +16,9 @@ function readFailure(error: unknown): string {
 }
 // Conditions of the reader or the probe that pass by themselves. A document
 // that does not resolve or is outside the policy needs another file, not a retry.
-const TRANSIENT_REASONS = new Set(["media_read_not_ready", "media_read_telegram_unavailable", "media_read_flood_wait", "media_read_mtproto_disconnected", "media_read_upstream_timeout", "probe_timeout", "verification_storage_unavailable"]);
+const TRANSIENT_REASONS = new Set(["media_read_not_ready", "media_read_telegram_unavailable", "media_read_flood_wait", "media_read_mtproto_disconnected", "media_read_upstream_timeout", "probe_timeout", "verification_storage_unavailable",
+  // The decoder was stopped or could not run: a fault of this machine, which says nothing about the document.
+  "decode_tool_failed"]);
 
 /**
  * Read-only inspection of original MP4/MKV documents through the gateway reader.

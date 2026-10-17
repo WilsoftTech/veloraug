@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MediaInspection } from "@/lib/ingestion/media";
 import { assessOriginalMedia } from "@/lib/ingestion/original-media";
-import { decodeReaches, verifiedAssessment, verifyOriginal, type DecodeOutcome, type VerificationDecoder, type VerificationInput } from "./original-verification";
+import { decodeFailureReason, decodeReaches, verifiedAssessment, verifyOriginal, type DecodeOutcome, type VerificationDecoder, type VerificationInput } from "./original-verification";
 import { verifyChannelOriginal, transientMediaFailure, type WholeFilePorts } from "./media-verification";
 
 /**
@@ -160,5 +160,60 @@ describe("failures that are not findings", () => {
     expect(transientMediaFailure(evidence(["verification_storage_unavailable"]))).toBe("verification_storage_unavailable");
     expect(transientMediaFailure(evidence(["media_read_flood_wait"]))).toBe("media_read_flood_wait");
     for (const reason of ["content_size_mismatch", "decode_failed", "content_truncated", "probe_failed"]) expect(transientMediaFailure(evidence([reason])), reason).toBeNull();
+  });
+});
+
+// Legacy media check fix (2026-10-17): a decode that did not succeed is named from what FFmpeg reported and where it
+// stopped. The error lines are FFmpeg 9.0.2's own, recorded from the committed fixtures damaged on purpose.
+describe("naming a failed whole-file decode", () => {
+  const failed = (errors: string[], extra: Partial<DecodeOutcome> = {}): DecodeOutcome => ({ outcome: "decode_failed", seconds: 7.25, frames: 86, exitCode: 0, errors, ...extra });
+  const LINES = {
+    endedEarly: ["[in#0/matroska,webm @ 000001ff2cd349c0] File ended prematurely"],
+    damaged: ["[h264 @ 000002641bd23080] Reference 5 >= 4", "[h264 @ 000002641bd23080] error while decoding MB 17 9, bytestream 262",
+      "[vist#0:0/h264 @ 0000026419f58c40] [dec:h264 @ 000002641a46ac80] Error submitting packet to decoder: Invalid data found when processing input"],
+    cutMp4: ["[h264 @ 000002cd55e40980] Invalid NAL unit size (3628 > 1081).", "[in#0/mov,mp4,m4a,3gp,3g2,mj2 @ 000002cd541832c0] corrupt input packet in stream 0"],
+    finalBlock: ["Truncating packet of size 229 to 29"],
+    finalBytes: ["[in#0/matroska,webm @ 00000230cac13280] 0x00 at pos 269010 (0x41ad2) invalid as first byte of an EBML number"],
+    notMedia: ["[in#0 @ 0000020d88b33480] EBML header parsing failed", "[in#0 @ 0000020d88b33240] Error opening input: Invalid data found when processing input"],
+    noIndex: ["[in#0 @ 00000255116f3400] moov atom not found", "Error opening input files: Invalid data found when processing input"],
+    noDecoder: ["[vist#0:0/none @ 000001df2db0c980] Decoding requested, but no decoder found for: none", "Error opening output files: Invalid argument"],
+  };
+  it.each([
+    ["damaged data before the end", failed(LINES.damaged, { seconds: 5.78, exitCode: 1 }), "decode_corrupt_data"],
+    ["a cut MP4 whose index points past the end", failed(LINES.cutMp4, { seconds: 8, exitCode: 1 }), "decode_corrupt_data"],
+    ["a file that ends early, before the film does", failed(LINES.endedEarly), "content_truncated"],
+    ["an incomplete final block after the whole film", failed(LINES.finalBlock, { seconds: 12, frames: 144 }), "decode_error_at_end"],
+    ["unreadable final bytes after the whole film", failed(LINES.finalBytes, { seconds: 12, frames: 144 }), "decode_error_at_end"],
+    ["a file that is not media", failed(LINES.notMedia, { seconds: 0, frames: 0, exitCode: 1 }), "decode_container_unparsable"],
+    ["an MP4 with no index", failed(LINES.noIndex, { seconds: 0, frames: 0, exitCode: 1 }), "decode_container_unparsable"],
+    ["a track the decoder cannot decode", failed(LINES.noDecoder, { seconds: 0, frames: 0, exitCode: 1 }), "decode_codec_unsupported"],
+    ["a decoder that was stopped or never started", failed(["spawn ffmpeg ENOENT"], { exitCode: null }), "decode_tool_failed"],
+    ["a non-zero exit that names nothing in the file", failed([], { exitCode: 1 }), "decode_tool_failed"],
+    ["an error nothing recognises", failed(["something new"], { exitCode: 1 }), "decode_failed"],
+    ["a decoder that reports no detail (as before)", { outcome: "decode_failed", seconds: 7.25, frames: 86 } satisfies DecodeOutcome, "decode_failed"],
+    ["a timeout", { outcome: "decode_timeout", seconds: 3, frames: 30, exitCode: null, errors: [] } satisfies DecodeOutcome, "decode_timeout"],
+  ] as const)("%s is %s", (_, decode, reason) => expect(decodeFailureReason(decode, 12.021)).toBe(reason));
+
+  it("All the Devil's Men's recorded decode: 5981.208 of 5981.227 seconds is an error after the whole film, never damage inside it", () => {
+    expect(decodeFailureReason(failed(LINES.finalBytes, { seconds: 5981.208333, frames: 143_000 }), 5981.227)).toBe("decode_error_at_end");
+    // A second earlier is inside the film.
+    expect(decodeFailureReason(failed(LINES.damaged, { seconds: 5979.2, exitCode: 1 }), 5981.227)).toBe("decode_corrupt_data");
+  });
+
+  it("the named finding is what integrity records, and none of them verifies", async () => {
+    for (const [errors, extra, reason] of [[LINES.finalBlock, { seconds: 5399.6 }, "decode_error_at_end"], [LINES.damaged, { seconds: 2700, exitCode: 1 }, "decode_corrupt_data"]] as const) {
+      const { port, calls } = decoder({ outcome: "decode_failed", errors, ...extra });
+      const result = await verifyOriginal(input(mp4()), port);
+      expect(result.integrity).toMatchObject({ status: "failed", reasons: [reason] });
+      expect(result.streaming.status).toBe("not_attempted"); expect(calls).toHaveLength(1);
+      expect(verifiedAssessment(input(mp4()).assessment, result)).toMatchObject({ accepted: false, reasons: [reason], integrity: "incomplete" });
+    }
+  });
+
+  it("a decoder fault is retried like a full disk, never recorded as a finding about the document", () => {
+    const evidence = (reasons: string[]) => ({ identity: `tg1-${"c".repeat(64)}`, method: "full_original_v1", policy_version: 3, media_class: "unverified" as const, reasons, container: null, video_codec: null, audio_codec: null,
+      accessible: false, gateway_compatible: true, playback_ready: false, bytes_read: 10, inspection_scope: "whole_file" as const });
+    expect(transientMediaFailure(evidence(["decode_tool_failed"]))).toBe("decode_tool_failed");
+    for (const reason of ["decode_corrupt_data", "decode_error_at_end", "decode_codec_unsupported", "decode_container_unparsable"]) expect(transientMediaFailure(evidence([reason])), reason).toBeNull();
   });
 });
