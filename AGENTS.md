@@ -1075,3 +1075,20 @@ NEW DEPENDENCY
 in that order.
 
 Velora should remain fast, lightweight, responsive, understandable, and easy to evolve into a native mobile application.
+
+---
+
+# 40. Emergency Publisher Containment (2026-10-17)
+
+The prior standing owner approval is suspended. It is not sufficient evidence of
+any title's distribution rights. Do not reactivate the local standing-approval
+publisher or automatic rights clearance, approval, transfer, or publication
+without a separate authorization decision. Keep
+`.velora-ingest/standing-approval.pause` in place. Do not remove the containment
+entry-point guards from the quarantined local operator scripts.
+
+The current task permits local legacy-media fixes, offline tests, disposable
+local database validation, and read-only hosted audits only. No publication,
+hosted migration, deployment, push, live Telegram verification, listener rebuild,
+or restart of the contained batches is authorized. A clean complete decode is
+still required for verified integrity; errors at the end of a file do not pass.
