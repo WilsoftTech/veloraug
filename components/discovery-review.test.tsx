@@ -79,12 +79,12 @@ describe("admin media verification dashboard", () => {
       evidence: original("mp4", { integrity: "incomplete", streaming: "unverified", browsers: null, audioTracks: null, subtitleTracks: null }, { mediaClass: "unverified", reasons: ["size_mismatch"] }) });
     for (const text of ["Why the inspection did not pass", "does not match what its container reports", "Media check failed"]) expect(refused, text).toContain(text);
     expect(refused.match(/>Failed</g)).toHaveLength(2); expect(refused).not.toContain(">Verified<"); expect(refused).not.toContain('value="approve"');
-    // The earlier MP4 policy's refusal (as recorded for an existing candidate): streaming failed, integrity never assessed.
+    // A historical MP4-policy refusal is not a current Policy 3 failure.
     const earlier = screen({ ...confirmed, status: "awaiting_media", gates: ["media_verification_required"], evidence: { mediaKey: "d".repeat(64), container: false, gateway: true, browser: false, accessible: true, checkedAt: at,
       reference: "bounded_mtproto_v1: 64 bytes read (bounded check, not full-file integrity)", mediaClass: "unverified", reasons: ["mp4_not_fast_start"], policyVersion: 2, containerName: "mp4", passed: false,
       facts: { integrity: "legacy_unassessed", streaming: "legacy_unassessed", browsers: null, audioTracks: null, subtitleTracks: null, warnings: [], publishable: false } } });
-    expect(earlier.match(/>Failed</g)).toHaveLength(1);
-    for (const text of ["Not assessed", "Policy 2", "index at the end", "Version 2"]) expect(earlier, text).toContain(text);
+    expect(earlier).not.toContain(">Failed<");
+    for (const text of ["Awaiting Policy 3 inspection", "Policy 2", "index at the end", "Version 2"]) expect(earlier, text).toContain(text);
   });
 
   it("browser warning with otherwise verified media does not block: approval is offered and the warning is still shown", () => {

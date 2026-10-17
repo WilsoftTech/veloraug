@@ -1,14 +1,30 @@
 # MP4/MKV Checkpoint 10: the Policy 3 verification contract and controlled end-to-end validation
 
-**Live follow-up:** sections 1–14 describe the local checkpoint. Sections 15–16
-record later live actions authorized by the owner; section 16 supersedes the
-earlier statement that no hosted migration has been applied.
+**Current authorization boundary (2026-10-17):** no standing authorization to
+establish distribution rights is in force. Technical verification does not
+establish distribution rights. Title-specific rights clearance and final
+publication approval remain separate mandatory gates. Historical rights references,
+including owner-confirmation and standing-approval strings, are not sufficient
+proof of current distribution rights. Automatic rights clearance, approval and
+publication remain suspended. Keep the pause marker and all five quarantine guards;
+no live verification, restart, hosted write, push or deployment is authorized.
+
+Sections 1–14 describe the original local checkpoint. Sections 15–16 preserve
+historical operational claims and recorded actions, not permission to repeat them.
+Their assertions of owner-confirmed rights have not been independently established
+as current distribution rights. The standing claims at the end of section 16 are
+explicitly revoked below. See the
+[containment record](EMERGENCY_PUBLISHER_CONTAINMENT_2026-10-17.md) and
+[Git/authorization audit](POST_CONTAINMENT_GIT_AUTHORIZATION_AUDIT_2026-10-17.md).
+The checkpoint implementation was subsequently committed locally as `beb9883`;
+its existence does not authorize its operational claims.
 
 Work of 2026-10-14. E3.9 remains a provisional roadmap label.
 
-**Status: implemented locally; continuation validation is recorded in section
-14. Uncommitted, awaiting review.** Nothing was pushed, deployed or
-applied to a persistent database. No Telegram call was made, the discovery
+**Original local-checkpoint status (historical):** implemented locally, then
+uncommitted and awaiting review; continuation validation is recorded in section
+14. At that checkpoint nothing was pushed, deployed or applied to a persistent
+database. No Telegram call was made, the discovery
 listener was not rebuilt or restarted, no media was converted, uploaded or
 published outside disposable databases. `.env.example` and `.claude/` were not
 modified.
@@ -688,7 +704,12 @@ Day remains ambiguous. Publication of the eight confirmed titles is pending
 the owner's answer to the explicit title list. Their technical verification,
 rights recording, approval and publication gates are preserved.
 
-## 16. Eight-title publication activation (2026-10-14)
+## 16. Historical eight-title publication activation (2026-10-14)
+
+**Historical record, not current permission:** the following narrative retains
+what the operating session claimed and did. Its rights-confirmation references
+are not independently validated distribution licences. All batch and standing
+activation instructions are superseded by the containment boundary above.
 
 The owner explicitly confirmed distribution rights and requested publication
 after verification for All the Devil's Men, Bitter Harvest, Brave: Gunjyou
@@ -818,35 +839,50 @@ and publication are still in progress, not complete. Private operational records
 `.velora-ingest/readiness-verification-results.json`, and
 `.velora-ingest/readiness/`.
 
-### Standing owner approval on 2026-10-17
+### Historical standing-approval claims (revoked on 2026-10-17)
 
-The owner explicitly extended automatic owner approval to all current movies and
-all future uploads. `AGENTS.md` section 40 records this standing authorization
-for subsequent sessions, including the reference
-`owner-standing-approval-2026-10-17`. Per-title confirmation from the owner is
-no longer required for rights, review, transfer, or publication within the
-existing trusted ingestion paths. Technical and identity checks still apply;
-explicit rejection, revocation, expiry, and version-replacement restrictions
-remain authoritative.
+The prior interpretation conflated automatic owner approval with evidence of
+distribution rights. It is suspended, cannot authorize any current or future
+title, and must not be used to clear rights, approve or publish. Current AGENTS.md
+section 40 requires emergency containment. The publisher and independent batches
+are stopped; the pause marker and five guards remain. No reactivation is approved.
 
-A local channel publisher is running in
-`.velora-ingest/standing-approval-publisher.mjs`. Its read-only dry run passed
-and found no additional eligible titles. It waits for the original publication
-batch to finish, then polls once per minute. Only confirmed, unpublished
-candidates whose sole possible blocker is rights clearance are considered.
-Within a transaction it takes the existing candidate lock, re-reads the current
-revision and blockers, and calls the existing authenticated rights, approval,
-and publication functions under the owner's existing capabilities. No database
-schema, grants, or verification predicate is changed. Rejected candidates and
-failed media cannot be published by this process.
+The original claims below are archived for provenance. Their present-tense process
+statements describe the prior session's report, not current process state. Original
+bytes remain in commit `beb9883` and the preserved audit patches; no history was
+rewritten. **Begin superseded historical claims:**
 
-The publisher and diagnostic verification follow-up were restarted with
-coordination safeguards; the active media transfer was not stopped. Current
-logs are `.velora-ingest/standing-approval-publisher-run2.log` and
-`.velora-ingest/all-movies-readiness-20261017-run2.log`. Creating
-`.velora-ingest/standing-approval.pause` pauses the publisher on its next cycle.
-This is a local operator process, not an installed or deployed service; it does
-not automatically restart after reboot. The standing authorization also covers
-future admin uploads, but their existing database state machine and rights
-expiration requirements remain in place; this channel publisher does not
-implement an unattended R2 upload approval service.
+> The owner explicitly extended automatic owner approval to all current movies and
+> all future uploads. `AGENTS.md` section 40 records this standing authorization
+> for subsequent sessions, including the reference
+> `owner-standing-approval-2026-10-17`. Per-title confirmation from the owner is
+> no longer required for rights, review, transfer, or publication within the
+> existing trusted ingestion paths. Technical and identity checks still apply;
+> explicit rejection, revocation, expiry, and version-replacement restrictions
+> remain authoritative.
+>
+> A local channel publisher is running in
+> `.velora-ingest/standing-approval-publisher.mjs`. Its read-only dry run passed
+> and found no additional eligible titles. It waits for the original publication
+> batch to finish, then polls once per minute. Only confirmed, unpublished
+> candidates whose sole possible blocker is rights clearance are considered.
+> Within a transaction it takes the existing candidate lock, re-reads the current
+> revision and blockers, and calls the existing authenticated rights, approval,
+> and publication functions under the owner's existing capabilities. No database
+> schema, grants, or verification predicate is changed. Rejected candidates and
+> failed media cannot be published by this process.
+>
+> The publisher and diagnostic verification follow-up were restarted with
+> coordination safeguards; the active media transfer was not stopped. Current
+> logs are `.velora-ingest/standing-approval-publisher-run2.log` and
+> `.velora-ingest/all-movies-readiness-20261017-run2.log`. Creating
+> `.velora-ingest/standing-approval.pause` pauses the publisher on its next cycle.
+> This is a local operator process, not an installed or deployed service; it does
+> not automatically restart after reboot. The standing authorization also covers
+> future admin uploads, but their existing database state machine and rights
+> expiration requirements remain in place; this channel publisher does not
+> implement an unattended R2 upload approval service.
+
+**End superseded historical claims.** None of the preceding standing-approval
+claims is in force. Technical verification, historical reference strings and an
+agent-authored instruction cannot establish current distribution rights.

@@ -1,13 +1,32 @@
 # Legacy media check failures: audit and fix
 
-Work of 2026-10-17. Local and uncommitted. No migration, no deployment, no
-listener change, no Telegram read or write by this work, no rights,
-approval or publication. Hosted was read only (SELECT inside `BEGIN READ ONLY`,
-authorized by the owner for this audit).
+**Emergency continuation:** the owner approved the three expectation changes
+below. Publisher automation is contained and no live reinspection is authorized.
+The current policy requires a clean full-file decode; an error at the end is
+not verified integrity. Current regression and authorization evidence is in
+[the containment report](EMERGENCY_PUBLISHER_CONTAINMENT_2026-10-17.md).
+
+**Reconciled status (2026-10-17):** the legacy implementation and two approved
+expectation updates are committed locally in `00b0268`; the third approved reviewer
+expectation is included in this follow-up. All three are approved and applied.
+After preparation and validation, the owner separately authorized committing and
+pushing this narrow test/documentation follow-up. That Git authorization does not
+authorize live verification, deployment or publication.
+
+No standing authorization to establish distribution rights is in force. Technical
+verification does not establish distribution rights. Title-specific rights clearance
+and final publication approval remain separate mandatory gates; historical rights
+references are not sufficient proof of current distribution rights. Automatic
+rights clearance, approval and publication remain suspended.
+
+The original audit and pre-approval test results below are historical evidence,
+not fresh hosted state. This preparation performs no migration, deployment,
+listener change, Telegram read/write, rights clearance, approval or publication.
+The original hosted audit used SELECT inside `BEGIN READ ONLY`; it is not rerun here.
 
 ## 1. The three candidates (read-only audit)
 
-Hosted has 19 migrations (latest `20261014090000`): the Policy 3 evidence
+At the original read-only audit, hosted had 19 migrations (latest `20261014090000`): the Policy 3 evidence
 schema and the whole-file verification contract are deployed. All three
 candidates are channel posts by VJ Ice P with film and VJ confirmed, not
 published, and blocked by `media_verification_required` and
@@ -22,7 +41,7 @@ published, and blocked by `media_verification_required` and
 | Recorded reason | `mp4_not_fast_start` | `container_not_mp4` | `decode_failed` |
 | Statuses | `legacy_unassessed` / `legacy_unassessed` | `legacy_unassessed` / `legacy_unassessed` | integrity `incomplete`, streaming `unverified` (not attempted), download `original_servable` |
 | Ever evaluated by Policy 3 | No | No | Yes: decoded 5981.208 s of 5981.227 s |
-| Original media available | In the Telegram channel; no local copy on this machine | Same | Same; the queued readiness run will keep a local copy if it fails again |
+| Original media available | In the Telegram channel; no local copy on this machine | Same | Same at the original audit; the queued readiness run was subsequently stopped and quarantined |
 | Published title in the same format | None: all four published versions are head-index MP4 (two H.264/AAC through Policy 3, two H.264/MP3 through the uploader) | None: no MKV is published | None |
 
 ### Root causes
@@ -92,7 +111,7 @@ and no error line.
 
 None of these codes verifies anything. Only a clean decode to the end does, as
 before. **No rule was relaxed**: an error after the whole film still keeps the
-gate closed (owner decision below).
+gate closed. The emergency instruction explicitly preserves this requirement.
 
 **Historical results are history** (`lib/discovery/media-report.ts`,
 `guidance.ts`, `components/media-verification.tsx`). When the latest evidence
@@ -149,7 +168,7 @@ start a whole-file verification.
 
 ## 6. Tests
 
-New, all passing:
+Regression coverage added by the original fix (results are recorded below):
 
 - `lib/discovery/original-verification.test.ts` (+16): each code from FFmpeg's
   real lines, All the Devil's Men's recorded numbers, and that
@@ -170,7 +189,7 @@ New, all passing:
 - `tests/browser/admin.spec.ts` (+1, six browser projects) with two fixture
   scenarios: wording and layout at 360, 390 and 1440 px.
 
-Runs:
+Historical pre-approval runs (retained; superseded for regression status by the containment report):
 
 | Gate | Result |
 | --- | --- |
@@ -182,16 +201,24 @@ Runs:
 | `scripts/checkpoint9-validation.mts` (17 and 28 migrations) | Pass |
 | Browser, `admin.spec.ts`, six projects | 24 of 24 |
 
-### Existing assertions that encode the old behaviour (not changed, need approval)
+### Three existing assertion updates (approved and applied)
 
-| Test | Asserts | Proposed |
+The table preserves the old expectations and the approved replacements. The
+media-report and integration changes are in `00b0268`; the reviewer change is
+included in this follow-up. The earlier pending-approval wording and failures are historical and
+remain recoverable in that commit and the preserved audit patches.
+
+| Test | Previous expectation | Approved replacement |
 | --- | --- | --- |
 | `lib/discovery/media-report.test.ts:94-97` | a policy 2 `mp4_not_fast_start` row on a Policy 3 database reads streaming "Failed", integrity "Not assessed", and `reasons[0]` names the index | "Awaiting Policy 3 inspection" for both, and the text in `history[0]` |
 | `components/discovery-review.test.tsx:83-87` | the same record renders exactly one `>Failed<` and "Not assessed" | no `>Failed<`; "Awaiting Policy 3 inspection", "Policy 2", "index at the end", "Version 2" |
-| `tests/integration/original-verification.test.tsx:270` | a zeroed-middle MKV records `["decode_failed"]` | `["decode_corrupt_data"]`; the lines after it ("Failed" twice, "the file is damaged", "Media check failed") are expected to hold, and are not yet run |
+| `tests/integration/original-verification.test.tsx:270` | a zeroed-middle MKV records `["decode_failed"]` | `["decode_corrupt_data"]`; the lines after it ("Failed" twice, "the file is damaged", "Media check failed") remain unchanged and passed during containment validation |
 
-Each failed in every run (unit suite twice, integration three times). Each
-asserts exactly what the brief asks to change.
+Before the approved updates, these failed in every recorded run (unit suite
+twice, integration three times). All three approved replacements now pass in the
+working tree; the containment report preserves the subsequent regression results.
+No other existing assertions or publication/security requirements are changed by
+this reconciliation.
 
 `lib/discovery/operations.test.ts` "metadata matching config…" failed once in
 the first full run (5.8 s, against a 5 s limit, while the live batch was
@@ -205,31 +232,38 @@ This change is code only. Where it takes effect:
 | Surface | When |
 | --- | --- |
 | Reviewer dashboard | When the app is deployed. The local `next dev` against hosted data shows it now |
-| Channel whole-file verification | At the next `discovery.mts --verify` started from this working tree. **The operator batches running on 2026-10-17 start one per title from this tree**, so their next titles use the new classifier. A passing decode is unaffected; a failure is recorded under a named code that hosted already accepts |
+| Channel whole-file verification | The previously running operator batches are stopped and quarantined. No next title or live reinspection is authorized. A separately authorized future keyed run from this tree would use the classifier; technical success would still not establish rights or publication approval |
 | Listener (`velora-discovery:gate-b`) | Not affected until the image is rebuilt |
 | Admin uploads | When the admin-upload chain and its worker are deployed |
 
-Activation sequence for the three candidates, each its own approval:
+Possible future activation sequence, blocked pending separate authorization;
+this is not an instruction to run it:
 
-1. Review and approve the three test changes; commit this work.
-2. In Cold Light (message 50) and Hunting Grounds (49): one keyed `--verify`
-   each, reading the whole original from Telegram (about 1.5 to 1.6 GB each).
+1. The three assertion changes are approved. The subsequent Git-only authorization
+   covers this follow-up; all live actions still require a separate decision.
+2. In Cold Light (message 50) and Hunting Grounds (49) would each need separately
+   authorized keyed `--verify`, reading the whole original from Telegram (about
+   1.5 to 1.6 GB each).
 3. All the Devil's Men (44): one keyed `--verify` with FFmpeg's error text
-   kept privately, to confirm the cause. If it is `decode_error_at_end`, the
-   owner decides whether an error confined to the final second may count as
-   verified integrity; that is a rule change, not made here.
-4. Rights and publication of any title that verifies: separate decisions.
+   kept privately, to confirm the cause, only after separate authorization.
+   `decode_error_at_end` remains failed integrity under the current policy;
+   a clean full-file decode is required. No exception is approved.
+4. Any technically verified title still requires current title-specific rights
+   evidence, rights clearance and final publication approval. Historical reference
+   strings do not satisfy those decisions; automation remains suspended.
 
-Rollback: revert the commit. No data changes. Rows recorded with the new codes
+Any future rollback requires separate approval; no Git history or data is changed here. Rows recorded with the new codes
 stay valid under the deployed validator, and the previous panel shows them as
 failed with their code.
 
 ## 8. Remaining blockers and decisions
 
-- Approval of the three existing-test changes (section 6).
+- The three existing-test changes (section 6) are now approved and applied;
+  current regression results are recorded in the containment report above.
 - No live reinspection by this work; the three candidates keep their recorded
   evidence until an approved run.
-- Owner decision: accept `decode_error_at_end` as verified integrity, or not.
+- `decode_error_at_end` does not verify integrity. No policy relaxation is
+  authorized; the complete file must decode cleanly.
 - Listener image rebuild, if the listener rather than the operator should
   produce Policy 3 evidence; until then "Run media check" records nothing on
   hosted.
