@@ -12,7 +12,9 @@ import type { KindDecision, ParseConfidence, ParsedFilename, ParseIssue, ParseIs
 /**
  * Video containers accepted for detection, scanning and review. Accepting a
  * container says nothing about playback: media inspection classifies the
- * streams, and only a verified browser-ready MP4 passes the publication gate.
+ * streams. New movie originals must be MP4 or MKV (Policy 3, original-media.ts),
+ * and the publication gate needs verified integrity and streaming readiness,
+ * not browser compatibility.
  */
 export const SUPPORTED_EXTENSIONS: readonly string[] = ["mp4", "mkv", "avi", "mov", "m4v", "webm", "wmv", "flv", "mpg", "mpeg", "ts", "m2ts", "3gp"];
 

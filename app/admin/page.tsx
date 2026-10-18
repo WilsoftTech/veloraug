@@ -13,8 +13,8 @@ const GROUP_HELP: Record<ReviewGroup, string> = {
 const STEPS = [
   ["Post the file in the Movies channel", "It is detected automatically while the listener is running."],
   ["Confirm the film and the VJ", "In the review queue. The film is suggested from the file name; you choose."],
-  ["Media check", "Automatic. Only a browser-ready MP4 passes."],
-  ["Rights clearance", "A reviewer with the rights permission records the licence reference."],
+  ["Media check", "The original MP4 or MKV is kept as uploaded. By default the whole file must decode cleanly and be ready to stream; browser compatibility is shown but does not block."],
+  ["Rights clearance", "A reviewer with the rights permission verifies the distribution rights. Publication needs that decision; the licence reference is optional where the server supports it."],
   ["Approve and publish", "A reviewer approves; an account with the publish permission publishes. Both are buttons on the movie’s page."],
 ];
 
