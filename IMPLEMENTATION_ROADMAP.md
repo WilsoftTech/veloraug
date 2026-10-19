@@ -300,6 +300,17 @@ The first Velora UG task is reconciliation, not feature construction.
   - **Fix.** Decode failures are named (`decode_corrupt_data`, `content_truncated`, `decode_container_unparsable`, `decode_error_at_end`, `decode_codec_unsupported`, unclassified `decode_failed`); a decoder fault is retried, never recorded. No rule relaxed. The reviewer panel shows a policy 1/2 refusal on a Policy 3 database as history, "Awaiting Policy 3 inspection", and inconclusive decodes as "Not verified", not "Failed". Reinspection reuses the keyed `--verify` path. The deployed validator already accepts the codes.
   - **Tests.** Unit 1,224 passed; integration 62 passed, 1 skipped; database 21 suites, 1,212 assertions; Checkpoint 9 script; admin browser 24 of 24. Three existing assertions encode the old behaviour and fail; changes proposed, awaiting approval.
   - Record: `docs/LEGACY_MEDIA_CHECK_FIX.md`.
+- Optional media verification and rights review (2026-10-18): **LOCAL ONLY, uncommitted; no deployment, hosted migration, listener change, Telegram access, rights decision, approval or publication.**
+  - **Owner decisions.** Media verification may be optional for publication. A known media failure still blocks, and the default mode `required` keeps the Checkpoint 10 gate. Rights documentation is optional, but a verified rights decision is still required to publish. Rights do not expire.
+  - **Migration 29**, `20261018090000_optional_media_and_rights_review.sql`:
+    - an owner-only, audited `media_inspection_mode` setting;
+    - a mode-aware media gate;
+    - append-only rights submissions (`not_provided` / `pending_review` / `verified` / `rejected`);
+    - two reviewer commands, with no change to approval, publication or the playback resolvers.
+  - **Reviewer screen.** Catalogue stages, five independent indicators and a rights panel.
+  - **Validation.** Existing count, security-inventory and migration-count checks were updated with owner approval. Database 22/22 suites (1,345 assertions), unit 1,247/1,247, integration 68 passed / 1 skipped, Checkpoint 9 script, typecheck, lint, the offline build and the full browser matrix (234 passed, 24 optional skipped) pass.
+  - **Follow-up, same day.** The rights reference is optional; the rights decision is still required. Automatic whole-file verification is added: migration 30, `20261018100000_automatic_media_verification.sql`, plus `discovery.mts --verify-due`, which needs two switches. It has not run live. Three existing inventory checks await approval.
+  - Record: `docs/OPTIONAL_MEDIA_AND_RIGHTS_REVIEW.md`.
 - Database regression suite: `npm run test:db` (local Supabase; resets it). Without touching developer state: `npm run test:db:isolated` (disposable container, every migration and suite) and, with `VELORA_E38_ISOLATED_TESTS=true`, `npm run test:integration:isolated`.
 
 ## 2. Product and data rules

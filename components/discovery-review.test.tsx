@@ -37,6 +37,8 @@ const confirmed = { ...candidate, title: "Example Movie", identity: "confirmed" 
 const everything = { review: true, rights: true, publish: true };
 const screen = (item: ReviewCandidate, capabilities: { review: boolean; rights: boolean; publish: boolean } | null = everything, downloads = false) =>
   renderToStaticMarkup(<ReviewDetail candidate={item} vjs={fixture.vjs} action={async () => {}} mode="database" capabilities={capabilities} downloads={downloads} />);
+// The page up to the overview (migration 20261018090000), which repeats the media status and names the rights status.
+const mediaPart = (html: string) => html.split("Where this movie stands")[0];
 const REQUIREMENTS = ["Media integrity verified", "Streaming readiness verified", "Film identity confirmed", "VJ identity confirmed", "Rights clearance approved", "Final publication approval granted"];
 
 describe("admin media verification dashboard", () => {
@@ -45,14 +47,14 @@ describe("admin media verification dashboard", () => {
     for (const text of ["Media inspection", "Media integrity", "Streaming readiness", "Browser compatibility", "Download availability", "Original container", "MP4", "Original filename", "Example.Movie.2024.VJ.Test.mp4",
       "Video codec", "h264", "Audio codec", "aac", "Audio tracks", "Subtitle tracks", "Inspection policy", "Version 3", "2026-10-12 08:00 UTC", "Tested combination on desktop", "Browser by browser", "Not tested on a real device", ...REQUIREMENTS,
       "Every mandatory gate passes", "Browser compatibility is not a gate", 'value="approve"']) expect(html, text).toContain(text);
-    expect(html.match(/>Verified</g)).toHaveLength(2); // integrity and streaming, and nothing else
+    expect(mediaPart(html).match(/>Verified</g)).toHaveLength(2); // integrity and streaming, and nothing else
     for (const text of ["Why the inspection did not pass", 'value="publish"', "Readiness", "Container / gateway / browser"]) expect(html).not.toContain(text);
   });
 
   it("MKV verified profile: the Firefox limitation is a warning, and approval is still offered", () => {
     const html = screen({ ...confirmed, status: "awaiting_review", gates: [], evidence: original("mkv", VERIFIED) });
     for (const text of ["MKV", "Limited in some browsers", "Playback warnings", "Firefox does not stream MKV reliably.", "They do not block publication", "Streaming unreliable", 'value="approve"']) expect(html, text).toContain(text);
-    expect(html.match(/>Verified</g)).toHaveLength(2);
+    expect(mediaPart(html).match(/>Verified</g)).toHaveLength(2);
   });
 
   it("what a Policy 3 inspection records today is shown as pending, never as verified, and nothing can be approved", () => {
@@ -78,7 +80,7 @@ describe("admin media verification dashboard", () => {
     const refused = screen({ ...confirmed, status: "awaiting_media", gates: ["media_verification_required"],
       evidence: original("mp4", { integrity: "incomplete", streaming: "unverified", browsers: null, audioTracks: null, subtitleTracks: null }, { mediaClass: "unverified", reasons: ["size_mismatch"] }) });
     for (const text of ["Why the inspection did not pass", "does not match what its container reports", "Media check failed"]) expect(refused, text).toContain(text);
-    expect(refused.match(/>Failed</g)).toHaveLength(2); expect(refused).not.toContain(">Verified<"); expect(refused).not.toContain('value="approve"');
+    expect(mediaPart(refused).match(/>Failed</g)).toHaveLength(2); expect(refused).not.toContain(">Verified<"); expect(refused).not.toContain('value="approve"');
     // A historical MP4-policy refusal is not a current Policy 3 failure.
     const earlier = screen({ ...confirmed, status: "awaiting_media", gates: ["media_verification_required"], evidence: { mediaKey: "d".repeat(64), container: false, gateway: true, browser: false, accessible: true, checkedAt: at,
       reference: "bounded_mtproto_v1: 64 bytes read (bounded check, not full-file integrity)", mediaClass: "unverified", reasons: ["mp4_not_fast_start"], policyVersion: 2, containerName: "mp4", passed: false,

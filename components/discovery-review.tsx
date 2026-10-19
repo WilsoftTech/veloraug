@@ -7,8 +7,8 @@ import { EmptyState } from "@/components/empty-state";
 import { TabLinks } from "@/components/tab-links";
 import { PosterImage, BackdropImage } from "@/components/media-image";
 import { MediaVerification } from "@/components/media-verification";
-import { canReinspect, guidance, inspectionExhausted, lastFailure, mediaCheckAvailable, mediaPasses, reviewOpen, verificationPending, REVIEW_GROUPS, type ReviewGroup, type ReviewGuidance } from "@/lib/discovery/guidance";
-import { candidateMedia, mediaReport, publicationRequirements } from "@/lib/discovery/media-report";
+import { canReinspect, catalogueStage, detectedNewVj, guidance, inspectionExhausted, lastFailure, mediaCheckAvailable, mediaPasses, newVjsDetected, reviewOpen, verificationPending, REVIEW_GROUPS, STAGE_LABELS, type ReviewGroup, type ReviewGuidance } from "@/lib/discovery/guidance";
+import { candidateMedia, indicators, mediaReport, publicationRequirements, RIGHTS_TEXT, type MediaTone } from "@/lib/discovery/media-report";
 import { cn } from "@/lib/utils";
 import type { ReviewCandidate, ReviewVj } from "@/lib/discovery/model";
 import type { ReviewCapabilities } from "@/lib/discovery/database";
@@ -41,7 +41,34 @@ function Message({ error, notice }: { error?: string; notice?: string }) {
   </>;
 }
 
-export function ReviewQueue({ candidates, search, group, mode = "fixture", error, notice, reinspectAll }: { candidates: ReviewCandidate[]; search: string; group: ReviewGroup | ""; mode?: ReviewUiMode; error?: string; notice?: string; reinspectAll?: Action }) {
+/**
+ * Adds a VJ read from uploads, under a name the reviewer can correct first. The database requires the
+ * publish permission; `allowed` only decides whether the form is offered.
+ */
+function AddVjForm({ id, name, hint, action, allowed, candidateId }: { id: string; name: string; hint: string; action: Action; allowed: boolean; candidateId?: string }) {
+  if (!allowed) return <p className="mt-3 text-body-sm text-muted">Adding a VJ needs the publish permission, which your account does not have.</p>;
+  return <form action={action} className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-end">
+    {candidateId && <input type="hidden" name="id" value={candidateId} />}
+    <div className="min-w-0 flex-1 sm:max-w-sm"><Field id={id} label="VJ name" hint={hint}>{(props) => <input {...props} name="name" required maxLength={100} defaultValue={name} />}</Field></div>
+    <button className={buttonClass("primary", "w-full sm:w-auto")}>Add VJ and assign</button>
+  </form>;
+}
+
+/** VJ names read from uploads that are not in the VJ list yet, with the one-click way to add each. */
+function NewVjs({ candidates, vjs, action, allowed }: { candidates: ReviewCandidate[]; vjs: readonly ReviewVj[]; action: Action; allowed: boolean }) {
+  const found = newVjsDetected(candidates, vjs);
+  if (!found.length) return null;
+  return <section aria-labelledby="new-vjs-heading" className="rounded-lg border border-highlight/40 bg-accent/12 p-5">
+    <h2 id="new-vjs-heading" className="text-headline-sm">New VJs detected</h2>
+    <p className="mt-1 text-body-md">These VJ names were read from uploads but are not in the VJ list. Adding one makes it public and attaches it to the waiting uploads. Check the spelling first.</p>
+    <ul className="mt-2 space-y-2">{found.map((item, index) => <li key={item.name} className="border-t border-border pt-2 first:border-t-0">
+      <AddVjForm id={`new-vj-${index}`} name={item.name} hint={`Read from ${item.count} ${item.count === 1 ? "upload" : "uploads"}.`} action={action} allowed={allowed} />
+    </li>)}</ul>
+  </section>;
+}
+
+export function ReviewQueue({ candidates, search, group, mode = "fixture", error, notice, reinspectAll, vjs = [], addVj, canAddVj = false }: { candidates: ReviewCandidate[]; search: string; group: ReviewGroup | ""; mode?: ReviewUiMode; error?: string; notice?: string; reinspectAll?: Action;
+  /** Database review: the VJ list, and the add command, for the "New VJs detected" panel. */ vjs?: readonly ReviewVj[]; addVj?: Action; canAddVj?: boolean }) {
   const database = mode === "database";
   const found = candidates.filter((item) => name(item).toLowerCase().includes(search.toLowerCase()));
   const shown = found.filter((item) => !group || guidance(item).group === group);
@@ -50,6 +77,7 @@ export function ReviewQueue({ candidates, search, group, mode = "fixture", error
   return <div className="space-y-6">
     <p className="text-body-md text-muted">{database ? "Movies detected in the Telegram Movies channel. Nothing is published without explicit review, rights clearance and a publish decision." : "Synthetic offline review. Production discovery and publication are disabled."}</p>
     <Message error={error} notice={notice} />
+    {database && addVj && <NewVjs candidates={candidates} vjs={vjs} action={addVj} allowed={canAddVj} />}
     <TabLinks label="Review groups" tabs={[{ id: "" as const, label: "All" }, ...REVIEW_GROUPS].map((tab) => ({
       label: `${tab.label} (${found.filter((item) => !tab.id || guidance(item).group === tab.id).length})`, href: href(tab.id), active: group === tab.id }))} />
     <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
@@ -73,7 +101,8 @@ export function ReviewQueue({ candidates, search, group, mode = "fixture", error
           <dt className="text-muted">Source</dt><dd>{database ? "Movies channel" : "Movies fixture channel"}</dd>
           <dt className="text-muted">Identity</dt><dd>{human(item.identity)}</dd>
           <dt className="text-muted">Media</dt><dd>{readiness(item)}</dd>
-          <dt className="text-muted">Rights</dt><dd>{item.rights ? (database ? "Clearance recorded" : "Fixture clearance recorded") : "Awaiting clearance"}</dd>
+          <dt className="text-muted">Stage</dt><dd>{STAGE_LABELS[catalogueStage(item)]}</dd>
+          <dt className="text-muted">Rights</dt><dd>{item.rightsReview ? RIGHTS_TEXT[item.rightsReview.status] : item.rights ? (database ? "Clearance recorded" : "Fixture clearance recorded") : "Awaiting clearance"}</dd>
           <dt className="text-muted">Status</dt><dd>{human(item.status)}</dd>
           {database && lastFailure(item) && <><dt className="text-muted">Last failure</dt><dd className="break-words">{lastFailure(item)}</dd></>}
         </dl>
@@ -109,6 +138,53 @@ function Gates({ candidate }: { candidate: ReviewCandidate }) {
   </section>;
 }
 
+const TONE: Record<MediaTone, string> = { verified: "text-highlight", pending: "text-foreground", warning: "text-foreground", failed: "text-destructive", missing: "text-muted" };
+/** The five independent facts, and where the candidate stands. Each is the database's record; none implies another. */
+function Overview({ candidate }: { candidate: ReviewCandidate }) {
+  return <section className="rounded-lg border border-border p-5" aria-labelledby="overview-heading">
+    <h2 id="overview-heading" className="text-headline-sm">Where this movie stands</h2>
+    <p className="mt-1 text-body-md">{STAGE_LABELS[catalogueStage(candidate)]}</p>
+    <dl className="mt-3 grid gap-3 text-body-md sm:grid-cols-2">{indicators(candidate).map((item) => <div key={item.label} className="min-w-0">
+      <dt className="text-label-md text-muted">{item.label}</dt>
+      <dd className={cn("break-words font-semibold", TONE[item.tone])}>{item.value}</dd>
+      <dd className="text-body-sm text-muted">{item.detail}</dd>
+    </div>)}</dl>
+  </section>;
+}
+
+const DECISION: Record<"pending" | "verified" | "rejected", string> = { pending: "Pending review", verified: "Verified", rejected: "Rejected" };
+/**
+ * The rights review (database review, migration 20261018090000). Any reviewer may submit a reference, with a
+ * document's SHA-256 if there is one; only an account with the rights permission verifies or rejects it. A
+ * submission grants nothing, and the database checks every step again.
+ */
+function RightsReview({ candidate, capabilities, action, open, hidden }: { candidate: ReviewCandidate; capabilities: ReviewCapabilities | null; action: Action; open: boolean; hidden: ReactNode }) {
+  const review = candidate.rightsReview!;
+  const pending = review.submissions.find((item) => item.current && item.decision === "pending");
+  const maySubmit = capabilities !== null && (capabilities.review || capabilities.rights || capabilities.publish);
+  return <section className="rounded-lg border border-border p-5" aria-labelledby="rights-heading">
+    <h2 id="rights-heading" className="text-headline-sm">Distribution rights</h2>
+    <p className="mt-1 text-body-md">{RIGHTS_TEXT[review.status]}{review.status === "verified" && candidate.rights ? ` · ${candidate.rights.reference ?? "no reference"}` : ""}</p>
+    <p className="mt-1 text-body-sm text-muted">A reference and a document are optional. Publication, streaming and downloads need a verified rights decision for this revision; the Telegram channel is never one.</p>
+    {open && pending && (capabilities?.rights
+      ? <form action={action} className="mt-4 flex flex-wrap gap-3">{hidden}<input type="hidden" name="command" value="decide_rights" /><input type="hidden" name="submission" value={pending.id} />
+        <button name="decision" value="verified" className={buttonClass()}>{pending.reference ? `Verify rights: ${pending.reference}` : "Verify rights"}</button>
+        <button name="decision" value="rejected" className={buttonClass("secondary")}>Reject</button>
+      </form>
+      : <p className="mt-4 text-body-sm text-muted">Verifying or rejecting the submitted reference needs the rights permission.</p>)}
+    {open && !pending && (review.status === "not_provided" || review.status === "rejected") && (maySubmit
+      ? <form action={action} className="mt-4 grid gap-4 sm:grid-cols-2">{hidden}<input type="hidden" name="command" value="submit_rights" />
+        <Field id="rights-submit" label="Rights reference (optional)" hint="Contract or licence reference for this title, if there is one. Not a URL.">{(props) => <input {...props} name="reference" maxLength={200} />}</Field>
+        <Field id="rights-document" label="Document SHA-256 (optional)" hint="If the licence document is kept elsewhere, its SHA-256 ties this record to it.">{(props) => <input {...props} name="document" maxLength={64} pattern="[a-fA-F0-9]{64}" />}</Field>
+        <button className={buttonClass("secondary", "self-end")}>Submit for rights review</button>
+      </form>
+      : <p className="mt-4 text-body-sm text-muted">Submitting a rights reference needs a reviewer permission.</p>)}
+    {review.submissions.length > 0 && <ol className="mt-4 space-y-2 break-words text-body-sm">{review.submissions.map((item) => <li key={item.id}>
+      {item.submittedAt.slice(0, 16).replace("T", " ")} UTC · {item.reference ?? "no reference"}{item.documentSha256 ? ` · document ${item.documentSha256.slice(0, 12)}…` : " · no document"} · {DECISION[item.decision]}{item.current ? "" : ` · revision ${item.revision}, no longer current`}
+    </li>)}</ol>}
+  </section>;
+}
+
 /** Database review: the film is chosen from the validated TMDB choices; the title and year come from that choice. */
 function FilmChoices({ candidate }: { candidate: ReviewCandidate }) {
   return <fieldset className="sm:col-span-2">
@@ -132,8 +208,9 @@ function FilmChoices({ candidate }: { candidate: ReviewCandidate }) {
  * `capabilities` (database review): what the signed-in account may do, so only usable controls are offered.
  * Null: the database does not have the dashboard commands yet. The database checks every action again.
  */
-export function ReviewDetail({ candidate, vjs, action, error, notice, mode = "fixture", capabilities = null, downloads = false }: { candidate: ReviewCandidate; vjs: readonly ReviewVj[]; action: Action; error?: string; notice?: string; mode?: ReviewUiMode; capabilities?: ReviewCapabilities | null;
-  /** The server's download setting (database review). It is shown, never decided, here. */ downloads?: boolean }) {
+export function ReviewDetail({ candidate, vjs, action, error, notice, mode = "fixture", capabilities = null, downloads = false, addVj }: { candidate: ReviewCandidate; vjs: readonly ReviewVj[]; action: Action; error?: string; notice?: string; mode?: ReviewUiMode; capabilities?: ReviewCapabilities | null;
+  /** The server's download setting (database review). It is shown, never decided, here. */ downloads?: boolean;
+  /** Database review: adds the VJ this post names when it is not in the VJ list. */ addVj?: Action }) {
   const candidateId = <><input type="hidden" name="id" value={candidate.id} /><input type="hidden" name="revision" value={candidate.revision} /></>;
   const database = mode === "database";
   const open = reviewOpen(candidate);
@@ -151,6 +228,7 @@ export function ReviewDetail({ candidate, vjs, action, error, notice, mode = "fi
     : candidate.status === "approved" && candidate.approval?.revision === candidate.revision ? "publish" as const : null;
   const allowed = decision === "approve" ? capabilities?.review : decision === "publish" ? capabilities?.publish : false;
   const evidence = candidate.evidence;
+  const newVj = database && addVj ? detectedNewVj(candidate, vjs) : null;
   const vjSelect = <Field id="vj" label={database ? "VJ" : "Existing VJ"}>{(props) => <select {...props} name="vjId" required defaultValue={candidate.vjId ?? ""}><option value="">Select active VJ</option>{vjs.filter((vj) => vj.isActive).map((vj) => <option key={vj.id} value={vj.id}>{vj.name}</option>)}</select>}</Field>;
   return <div className="space-y-6">
     <Link className={buttonClass("ghost")} href="/admin/discovery">Back to review queue</Link>
@@ -173,6 +251,11 @@ export function ReviewDetail({ candidate, vjs, action, error, notice, mode = "fi
             {working && <Link prefetch={false} href={`/admin/discovery/${candidate.id}`} className={buttonClass("secondary")}>Refresh</Link>}
           </div>}
         </NextStep>
+        {newVj && addVj && <section aria-labelledby="new-vj-heading" className="rounded-lg border border-highlight/40 bg-accent/12 p-5">
+          <h2 id="new-vj-heading" className="text-headline-sm">New VJ detected</h2>
+          <p className="mt-1 break-words text-body-md">The post names “{candidate.vjText}”, which is not in the VJ list yet. Adding it makes it public and attaches it to this upload and any other waiting upload that names it.</p>
+          <AddVjForm id="new-vj" name={newVj} hint="Check the spelling: this is how the VJ appears on the site. If the VJ is already listed under another spelling, choose it when you confirm the film instead." action={addVj} allowed={capabilities?.publish === true} candidateId={candidate.id} />
+        </section>}
         <dl className="grid grid-cols-1 gap-2 break-words text-body-md sm:grid-cols-2">
           <dt className="text-muted">Telegram reference</dt><dd>{database ? "Movies channel" : `Channel ${candidate.event.channelId}`}, message {candidate.event.messageId}</dd>
           <dt className="text-muted">Media size</dt><dd>{size(candidate.event.media.size)}</dd>
@@ -185,7 +268,7 @@ export function ReviewDetail({ candidate, vjs, action, error, notice, mode = "fi
             <dt className="text-muted">Inspection attempts</dt><dd>{candidate.attempts} of 5{candidate.status === "failed" && candidate.retryAt > 0 ? ` · next retry ${when(new Date(candidate.retryAt).toISOString())}` : ""}</dd>
             <dt className="text-muted">Manual action</dt><dd>{guidance(candidate).group === "action" ? "Needed" : "Not needed now"}</dd>
           </>}
-          <dt className="text-muted">Rights</dt><dd>{candidate.rights?.reference ?? "No clearance; publication blocked"}</dd>
+          <dt className="text-muted">Rights</dt><dd>{candidate.rights ? candidate.rights.reference ?? "Cleared, no reference recorded" : "No clearance; publication blocked"}</dd>
           {candidate.publication && <><dt className="text-muted">Published</dt><dd><Link className="underline underline-offset-4" href={`/movies/${candidate.publication.movieSlug}`}>{candidate.publication.movieSlug}</Link> · version {candidate.publication.versionId}</dd></>}
         </dl>
         <MediaVerification report={mediaReport(candidateMedia(candidate), database ? { enabled: downloads, published: candidate.status === "published" } : undefined)}>
@@ -195,6 +278,7 @@ export function ReviewDetail({ candidate, vjs, action, error, notice, mode = "fi
         <details className="rounded-lg border border-border p-4"><summary className="cursor-pointer text-label-lg">Caption and validation warnings</summary><p className="mt-3 whitespace-pre-wrap break-all">{candidate.event.media.caption ?? "No caption"}</p><ul className="mt-3 list-inside list-disc">{candidate.warnings.map((warning) => <li key={warning}>{human(warning)}</li>)}</ul>{candidate.error && <p>{human(candidate.error)}</p>}</details>
       </section>
     </div>
+    {database && <Overview candidate={candidate} />}
     {database && <Gates candidate={candidate} />}
     {open && database && candidate.choices.length === 0 && <section className="rounded-lg border border-border bg-surface p-5" aria-labelledby="nofilm-heading">
       <h2 id="nofilm-heading" className="text-headline-sm">No film found for this title</h2>
@@ -218,11 +302,14 @@ export function ReviewDetail({ candidate, vjs, action, error, notice, mode = "fi
       {vjSelect}
       <button className={buttonClass()}>Confirm reviewed identity</button>
     </form>}
+    {database && candidate.rightsReview && <RightsReview candidate={candidate} capabilities={capabilities} action={action} open={open} hidden={candidateId} />}
     {open && database && !capabilities?.rights && <p className="rounded-lg border border-border p-5 text-body-md text-muted">Recording rights clearance needs the rights permission, which your account does not have.</p>}
     {open && (!database || capabilities?.rights) && <form action={action} className="grid gap-4 rounded-lg border border-border p-5 sm:grid-cols-2">
       {candidateId}<input type="hidden" name="command" value="rights" />
       {database
-        ? <Field id="rights" label="Rights clearance reference" hint="Contract or licence reference for this document. Recorded with your account for this revision only; not a URL.">{(props) => <input {...props} name="reference" required maxLength={200} />}</Field>
+        ? candidate.rightsReview
+          ? <Field id="rights" label="Rights clearance reference (optional)" hint="Your decision is recorded with your account for this revision only. A contract or licence reference is optional; not a URL.">{(props) => <input {...props} name="reference" maxLength={200} />}</Field>
+          : <Field id="rights" label="Rights clearance reference" hint="Contract or licence reference for this document. Recorded with your account for this revision only; not a URL.">{(props) => <input {...props} name="reference" required maxLength={200} />}</Field>
         : <Field id="rights" label="Synthetic rights review reference" hint="Records only a local fixture decision. Real streaming rights require the approved owner workflow.">{(props) => <input {...props} name="reference" required maxLength={200} />}</Field>}
       <button className={buttonClass("secondary", "self-end")}>{database ? "Record rights clearance" : "Record fixture rights decision"}</button>
     </form>}

@@ -8,6 +8,7 @@ import { createLocalBotApiClient, parseBotApiBaseUrl, type LocalBotApiConfig } f
 import { databasePersistence, databaseCataloguePorts } from "@/lib/discovery/database";
 import { botApiUpdateProvider } from "@/lib/discovery/bot-api-provider";
 import { classifyFailure, runDiscoveryService, serviceHealth, type ServiceState } from "@/lib/discovery/service";
+import { runAutoVerification, runMediaVerification } from "@/lib/discovery/auto-verify";
 import { channelMediaPort, channelVerificationPort } from "@/lib/discovery/media-verification";
 import { searchTmdbForIngestion, fetchMovieSnapshot } from "@/lib/tmdb/ingestion-search";
 import { mediaReaderRange } from "@/lib/media-gateway/range-reader";
@@ -35,8 +36,13 @@ const configSchema = z.object({
   ...readerConfigSchema.partial().shape,
   VELORA_DISCOVERY_INSPECTION: z.enum(["disabled", "metadata", "bounded"]).default("disabled"),
   VELORA_DISCOVERY_HEALTH_PORT: z.coerce.number().int().min(1024).max(65535).default(8790),
-  // Where a whole-file verification holds the document while it reads it (--verify only).
+  // Where a whole-file verification holds the document while it reads it (--verify and --verify-due only).
   VELORA_DISCOVERY_SPOOL_DIR: z.string().refine(isAbsolute).optional(),
+  // --verify-due only: its own switch, off unless exactly "true", in addition to the live switch.
+  VELORA_DISCOVERY_AUTO_VERIFY: z.string().optional(),
+  // --verify-due: the wait between passes once nothing is due, and before a failed attempt is retried.
+  VELORA_DISCOVERY_VERIFY_INTERVAL_SECONDS: z.coerce.number().int().min(5).max(86400).default(30),
+  VELORA_DISCOVERY_VERIFY_RETRY_SECONDS: z.coerce.number().int().min(60).max(604800).default(21600),
 }).superRefine((cfg, ctx) => {
   if (cfg.VELORA_DISCOVERY_INSPECTION !== "bounded") return;
   const reader = readerConfigSchema.safeParse(cfg);
@@ -47,16 +53,15 @@ const configSchema = z.object({
 const VERIFICATION_LEASE_SECONDS = 14_400;
 
 /**
- * `--verify <candidate key>`: one whole-file verification of one candidate whose film and VJ a reviewer has
- * confirmed, then exit (the Policy 3 verification contract). It takes no part in polling: no Bot API call and no
- * consumer lease, so it runs beside the listener and never in its loop. The candidate is claimed by its key, so it
- * cannot land on another film. It reads the whole document from Telegram through the dedicated reader, which is a
- * live media operation: the same explicit switch as the listener applies, and nothing starts it but an operator.
+ * The whole-file verifier: the worker's database identity, the dedicated reader (read-only, never the uploading
+ * bot) and the verified media tools. Shared by `--verify` and `--verify-due`. It reads documents from Telegram,
+ * which is a live media operation: the same explicit switch as the listener applies, and nothing starts it but an
+ * operator. It cannot record rights, approve or publish: the worker's database identity has none of those commands.
  */
-async function verifyCandidate(cfg: z.infer<typeof configSchema>, key: string): Promise<void> {
+async function openVerifier(cfg: z.infer<typeof configSchema>) {
   const readerCfg = readerConfigSchema.safeParse(cfg);
   const spoolDir = cfg.VELORA_DISCOVERY_SPOOL_DIR;
-  if (!/^[a-f0-9]{64}$/.test(key) || !readerCfg.success || !spoolDir) throw new Error("discovery_verification_configuration_required");
+  if (!readerCfg.success || !spoolDir) throw new Error("discovery_verification_configuration_required");
   const tools = await resolveMediaTools(process.env);
   if (!tools.ok) throw new Error("discovery_verified_media_tools_required");
   // A stop request ends the read; the failed attempt then gives the candidate's lease back.
@@ -67,11 +72,17 @@ async function verifyCandidate(cfg: z.infer<typeof configSchema>, key: string): 
   const target = databasePersistence(database.rpc, { channelId: Number(cfg.TELEGRAM_MOVIES_CHANNEL_ID) });
   const reader = createMtcuteReader({ apiId: readerCfg.data.TELEGRAM_MEDIA_API_ID, apiHash: readerCfg.data.TELEGRAM_MEDIA_API_HASH, sessionFile: readerCfg.data.VELORA_DISCOVERY_SESSION_FILE, allowBotLogin: false,
     expectedBotId: readerCfg.data.TELEGRAM_MEDIA_BOT_ID, expectedUsername: readerCfg.data.TELEGRAM_MEDIA_BOT_USERNAME, forbiddenBotIds: [cfg.TELEGRAM_MOVIES_BOT_ID], moviesChannelId: cfg.TELEGRAM_MOVIES_CHANNEL_ID, logger: createLogger() });
+  const close = async () => {
+    abort.abort();
+    await reader.stop(); await database.close();
+    process.removeListener("SIGINT", halt); process.removeListener("SIGTERM", halt);
+  };
   try {
     await database.check();
     await reader.start();
-    const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(VERIFICATION_LEASE_SECONDS * 1000)]);
-    const media = channelVerificationPort((doc) => mediaReaderRange(reader, { movieVersionId: 0, chatId: String(doc.chatId), messageId: doc.messageId, fileUniqueId: doc.fileUniqueId, fileSize: doc.sizeBytes, mimeType: doc.mimeType }, signal), {
+  } catch (error) { await close(); throw error; }
+  /** One keyed verification, bounded by the database's own ceiling for the keyed claim. */
+  const mediaFor = (signal: AbortSignal) => channelVerificationPort((doc) => mediaReaderRange(reader, { movieVersionId: 0, chatId: String(doc.chatId), messageId: doc.messageId, fileUniqueId: doc.fileUniqueId, fileSize: doc.sizeBytes, mimeType: doc.mimeType }, signal), {
       probe: headProbe(tools.tools.ffprobe, (file, args, options) => runProcess(file, args, { ...options, timeoutMs: Math.min(options.timeoutMs, 20000) })),
       gatewayCompatible: true,
       spool: (read, sizeBytes, handle) => spoolDocument(spoolDir, read, sizeBytes, handle),
@@ -79,14 +90,63 @@ async function verifyCandidate(cfg: z.infer<typeof configSchema>, key: string): 
       decoder: (path) => ({ decode: (streams, window) => decodeStreams(tools.tools.ffmpeg, path, streams, window) }),
       tools: { ffmpeg: tools.tools.ffmpeg.version, ffprobe: tools.tools.ffprobe.version }, now: () => new Date(),
     });
-    const result = await target.verifyOne(key, media, () => new Date(), VERIFICATION_LEASE_SECONDS);
+  const signalFor = (stop: AbortSignal) => AbortSignal.any([stop, abort.signal, AbortSignal.timeout(VERIFICATION_LEASE_SECONDS * 1000)]);
+  const verify = (key: string, stop: AbortSignal = abort.signal) => target.verifyOne(key, mediaFor(signalFor(stop)), () => new Date(), VERIFICATION_LEASE_SECONDS);
+  const next = (stop: AbortSignal) => target.verifyMediaNext(mediaFor(signalFor(stop)), () => new Date(), VERIFICATION_LEASE_SECONDS, cfg.VELORA_DISCOVERY_VERIFY_RETRY_SECONDS);
+  return { target, verify, next, signal: abort.signal, close };
+}
+
+/** All uploaded movie media, including the backlog. Own process; no listener consumer or review mutation. */
+async function verifyUploads(cfg: z.infer<typeof configSchema>, once: boolean): Promise<void> {
+  if (cfg.VELORA_DISCOVERY_AUTO_VERIFY !== "true") throw new Error("discovery_auto_verification_not_enabled");
+  const verifier = await openVerifier(cfg);
+  try {
+    const summary = await runMediaVerification({ next: verifier.next, log,
+      sleep: async (ms, signal) => { try { await pause(ms, undefined, { signal }); } catch (error) { if (!signal.aborted) throw error; } },
+    }, { signal: verifier.signal, intervalMs: cfg.VELORA_DISCOVERY_VERIFY_INTERVAL_SECONDS*1000, once });
+    log({ event: "upload_media_verification_summary", ...summary });
+    if (once && summary.errors) process.exitCode=1;
+  } finally { await verifier.close(); }
+}
+
+/**
+ * `--verify <candidate key>`: one whole-file verification of one candidate whose film and VJ a reviewer has
+ * confirmed (the Policy 3 verification contract), then exit. It takes no part in polling: no Bot API call and no
+ * consumer lease, so it runs beside the listener and never in its loop. The candidate is claimed by its key, so it
+ * cannot land on another film.
+ */
+async function verifyCandidate(cfg: z.infer<typeof configSchema>, key: string): Promise<void> {
+  if (!/^[a-f0-9]{64}$/.test(key)) throw new Error("discovery_verification_configuration_required");
+  const verifier = await openVerifier(cfg);
+  try {
+    const result = await verifier.verify(key);
     // Fixed codes and counts only: no key, title, digest or Telegram identifier.
     log({ event: "discovery_verification_finished", outcome: result.outcome, media: result.evidence?.media_class ?? null, reasons: result.evidence?.reasons.length ?? null });
     if (result.outcome !== "needs_review") process.exitCode = 1;
   } finally {
-    abort.abort();
-    await reader.stop(); await database.close();
-    process.removeListener("SIGINT", halt); process.removeListener("SIGTERM", halt);
+    await verifier.close();
+  }
+}
+
+/**
+ * `--verify-due [--once]`: automatic whole-file verification (migration 20261018100000). Every candidate the
+ * database reports as due is verified, one at a time, through the same keyed claim as `--verify`; then it waits
+ * and asks again (or, with --once, exits). Its own switch, VELORA_DISCOVERY_AUTO_VERIFY=true, is required in
+ * addition to the live switch.
+ */
+async function verifyDue(cfg: z.infer<typeof configSchema>, once: boolean): Promise<void> {
+  if (cfg.VELORA_DISCOVERY_AUTO_VERIFY !== "true") throw new Error("discovery_auto_verification_not_enabled");
+  const verifier = await openVerifier(cfg);
+  try {
+    const summary = await runAutoVerification({
+      due: (limit) => verifier.target.verificationDue(limit, cfg.VELORA_DISCOVERY_VERIFY_RETRY_SECONDS),
+      verify: (key, signal) => verifier.verify(key, signal),
+      sleep: async (ms, signal) => { try { await pause(ms, undefined, { signal }); } catch (error) { if (!signal.aborted) throw error; } },
+      log,
+    }, { signal: verifier.signal, intervalMs: cfg.VELORA_DISCOVERY_VERIFY_INTERVAL_SECONDS * 1000, once });
+    if (summary.errors > 0 && once) process.exitCode = 1;
+  } finally {
+    await verifier.close();
   }
 }
 
@@ -102,6 +162,8 @@ async function main() {
   if (!/^velora_discovery_worker(?:\.[a-z0-9]{10,40})?$/.test(decodeURIComponent(url.username)) || !url.password || !["postgres:", "postgresql:"].includes(url.protocol)) throw new Error("discovery_wrong_database_identity");
   if (cfg.TELEGRAM_MOVIES_BOT_ID === cfg.TELEGRAM_MEDIA_BOT_ID || !cfg.TELEGRAM_MOVIES_BOT_TOKEN.startsWith(`${cfg.TELEGRAM_MOVIES_BOT_ID}:`)) throw new Error("discovery_bot_identity_invalid");
   if (process.argv.includes("--check")) { log({ event: "discovery_configuration_valid", inspection: cfg.VELORA_DISCOVERY_INSPECTION }); return; }
+  if (process.argv.includes("--verify-uploads")) return verifyUploads(cfg, process.argv.includes("--once"));
+  if (process.argv.includes("--verify-due")) return verifyDue(cfg, process.argv.includes("--once"));
   const verifyAt = process.argv.indexOf("--verify");
   if (verifyAt >= 0) return verifyCandidate(cfg, process.argv[verifyAt + 1] ?? "");
   const abort = new AbortController();
@@ -156,6 +218,6 @@ async function main() {
 main().catch((error) => {
   const failure = classifyFailure(error);
   log({ event: "discovery_start_failed", code: failure.code });
-  const configuration = ["discovery_gate_b_required", "discovery_wrong_database_identity", "discovery_bot_identity_invalid", "discovery_verified_media_tools_required", "discovery_verification_configuration_required"].includes(failure.code);
+  const configuration = ["discovery_gate_b_required", "discovery_wrong_database_identity", "discovery_bot_identity_invalid", "discovery_verified_media_tools_required", "discovery_verification_configuration_required", "discovery_auto_verification_not_enabled"].includes(failure.code);
   process.exitCode = configuration || failure.action === "stop" ? 78 : 1;
 });

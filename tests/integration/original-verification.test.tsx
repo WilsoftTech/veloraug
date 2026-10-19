@@ -63,6 +63,8 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
 const key = (message: number) => isolatedSql(`select private.discovery_message_key(${CHANNEL}, ${message})`);
 const refusal = async (run: () => Promise<unknown>) => { try { await run(); return "accepted"; } catch (error) { return String((error as { code?: string }).code ?? "other"); } };
 const status = (report: ReturnType<typeof mediaReport>, label: string) => report.statuses.find((item) => item.label === label)!;
+// The page up to the overview (migration 20261018090000), which repeats the media status and names the rights status.
+const mediaPart = (html: string) => html.split("Where this movie stands")[0];
 const row = (report: ReturnType<typeof mediaReport>, label: string) => [...report.details, ...report.provenance].find((item) => item.label === label)!.value;
 
 interface Doc { message: number; tmdb: number; title: string; name: string; mime: string; bytes: Buffer }
@@ -185,7 +187,7 @@ describe.skipIf(skip)("Policy 3 verification contract, end to end (isolated)", (
       expect(report.basis).toContain("whole original file was read, hashed and decoded");
       const html = page(candidate);
       for (const text of ["Every byte was read and hashed", "decoded after seeking", "Whole file", sha256(docs.get(301)!.bytes), "whole file read and decoded", "Rights needed", "rights clearance required"]) expect(html, text).toContain(text);
-      expect(html.match(/>Verified</g)).toHaveLength(2);
+      expect(mediaPart(html).match(/>Verified</g)).toHaveLength(2);
       for (const text of ['value="approve"', 'value="publish"', "Every mandatory gate passes", "synthetic-bot-file", "AgADcp10x", String(Math.abs(CHANNEL)), "tg1-"]) expect(html, text).not.toContain(text);
     });
 
@@ -274,7 +276,7 @@ describe.skipIf(skip)("Policy 3 verification contract, end to end (isolated)", (
       expect([status(report, "Media integrity").value, status(report, "Streaming readiness").value]).toEqual(["Failed", "Failed"]);
       expect(report.reasons[0]).toContain("the file is damaged");
       expect(guidance(failed).label).toBe("Media check failed");
-      expect(page(failed).match(/>Failed</g)).toHaveLength(2);
+      expect(mediaPart(page(failed)).match(/>Failed</g)).toHaveLength(2);
 
       // 312: the reader stops short of the recorded size. That is recorded as a failed read of this document, with no digest.
       served.set(312, async (offset, length) => docs.get(312)!.bytes.subarray(offset, Math.min(offset + length, 100_000)));

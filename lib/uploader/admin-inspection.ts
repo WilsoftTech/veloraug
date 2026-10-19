@@ -46,7 +46,7 @@ export async function inspectAdminUpload(root: string,ports: UploadInspectionPor
       if(session.storage==="r2" && classification.class==="canonical") await validatePlayback(tools.tools.ffmpeg,path);
       // Policy 3: the worker holds every byte of the staged original, whose SHA-256 was matched above. It is decoded
       // whole and after seeking before it can be called verified. The file is only read; a failed finding is recorded as one.
-      if(session.storage==="r2" && assessment?.accepted) {
+      if(assessment?.accepted) {
         const verification = await verifyOriginal({ inspection: probe.inspection,assessment,sizeBytes: session.size_bytes,sha256: session.verified_sha256,bytesHashed: session.size_bytes,
           fileName: session.file_name,tools: { ffmpeg: tools.tools.ffmpeg.version,ffprobe: tools.tools.ffprobe.version },now: () => new Date() },
           { decode: (streams,window) => decodeStreams(tools.tools.ffmpeg,path,streams,window) });

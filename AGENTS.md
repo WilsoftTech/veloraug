@@ -1088,7 +1088,28 @@ without a separate authorization decision. Keep
 entry-point guards from the quarantined local operator scripts.
 
 The current task permits local legacy-media fixes, offline tests, disposable
-local database validation, and read-only hosted audits only. No publication,
-hosted migration, deployment, push, live Telegram verification, listener rebuild,
-or restart of the contained batches is authorized. A clean complete decode is
-still required for verified integrity; errors at the end of a file do not pass.
+local database validation, read-only hosted audits, and live Telegram media
+verification for the movie files covered by the current integrity and streaming
+readiness audit. This verification authorization was granted by the owner on
+2026-10-18. It permits reading and downloading existing Telegram media into
+private local staging, hashing and fully decoding the files, checking streaming
+layout and seek decoding, and recording verification claims, results, and
+failures through the existing fenced verification commands. Preserve existing
+identity prerequisites, leases, source bindings, and validation rules; do not
+guess or automatically confirm film or VJ identity.
+
+This authorization does not permit rights clearance, publication approval,
+media uploads or transfers to Telegram, publication, hosted migrations,
+deployment, push, listener rebuild or restart, or restarting the contained
+batches. Use the existing explicit verification path; keep the pause marker and
+quarantined entry-point guards intact. A clean complete decode is still required
+for verified integrity; errors at the end of a file do not pass.
+
+On 2026-10-18, the owner separately authorized applying only
+`20261018072045_media_verification_on_upload.sql` to hosted after backup and
+validation, and enabling its separate automatic media-verification worker once
+the current named verifier releases the dedicated reader. This narrow exception
+permits the media-only queue for recorded movie files, including unconfirmed
+and already published files. Keep media verification required. It grants no
+rights clearance, final approval, publication, upload, listener restart, other
+hosted migration, or reactivation of contained operator batches.

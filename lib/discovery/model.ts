@@ -3,6 +3,11 @@ import { movieSnapshotSchema } from "@/lib/tmdb/ingestion-search";
 export type { KnownVj as ReviewVj } from "@/types/ingestion";
 
 export const reviewStates = ["detected", "inspecting", "awaiting_metadata", "awaiting_identity", "awaiting_vj", "awaiting_media", "awaiting_rights", "awaiting_review", "approved", "publishing", "published", "duplicate", "rejected", "failed", "blocked"] as const;
+/** required: publication needs verified media (the default). optional/disabled: only a definite media failure blocks. */
+export const mediaInspectionModes = ["required", "optional", "disabled"] as const;
+export type MediaInspectionMode = (typeof mediaInspectionModes)[number];
+export const rightsStatuses = ["not_provided", "pending_review", "verified", "rejected"] as const;
+export type RightsStatus = (typeof rightsStatuses)[number];
 const instant = z.iso.datetime();
 const key = z.string().regex(/^[a-f0-9]{64}$/);
 export const eventSchema = z.strictObject({
@@ -48,7 +53,8 @@ export const candidateSchema = z.strictObject({
   relation: z.enum(["new_movie", "new_vj", "replacement", "unknown"]),
   choices: z.array(movieSnapshotSchema).max(20), snapshot: movieSnapshotSchema.nullable(),
   warnings: z.array(z.string().max(100)).max(50), evidence: evidenceSchema.nullable(),
-  rights: z.strictObject({ actor: z.string().max(128), at: instant, reference: z.string().min(1).max(200), revision: z.number().int().positive() }).nullable(),
+  // The reference is optional on a database with migration 20261018090000: the clearance itself is the decision.
+  rights: z.strictObject({ actor: z.string().max(128), at: instant, reference: z.string().min(1).max(200).nullable(), revision: z.number().int().positive() }).nullable(),
   approval: z.strictObject({ actor: z.string().max(128), at: instant, revision: z.number().int().positive() }).nullable(),
   // Only supplied by a trusted catalogue lookup, never copied from a caption.
   uploaderSource: z.strictObject({ fingerprint: z.string().regex(/^sf1-[0-9a-f]{64}$/), mediaKey: key, evaluatedTmdbId: z.number().int().positive(), evaluatedVjId: z.number().int().positive() }).nullable(),
@@ -59,6 +65,18 @@ export const candidateSchema = z.strictObject({
   // The worker's last inspection result, as fixed codes (never a provider's text). Present (possibly null) only when the
   // database has media-only re-inspection (migration 20261011112745); absent in the offline inbox and on an older database.
   lastInspection: z.strictObject({ at: instant, action: z.string().max(60), detail: z.string().max(300).nullable(), revision: z.number().int().positive() }).nullable().optional(),
+  // Database-backed review only (migration 20261018090000); absent in the offline inbox and on an older database.
+  // The owner's media inspection setting, which the database's own gate follows.
+  mediaInspection: z.enum(mediaInspectionModes).optional(),
+  // The rights review of the current revision and its submissions. A submission grants nothing; only `rights` (a clearance) does.
+  rightsReview: z.strictObject({
+    status: z.enum(rightsStatuses),
+    submissions: z.array(z.strictObject({
+      id: z.number().int().positive(), revision: z.number().int().positive(), reference: z.string().min(1).max(200).nullable(),
+      documentSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable(), submittedBy: z.string().max(128), submittedAt: instant,
+      decision: z.enum(["pending", "verified", "rejected"]), decidedBy: z.string().max(128).nullable(), decidedAt: instant.nullable(), current: z.boolean(),
+    })).max(50),
+  }).optional(),
 });
 export type ReviewCandidate = z.infer<typeof candidateSchema>;
 export const inboxSchema = z.strictObject({

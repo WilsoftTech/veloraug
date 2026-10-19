@@ -1,5 +1,5 @@
-import { INCONCLUSIVE_DECODE, otherGates, reasonText, steps } from "@/lib/discovery/guidance";
-import type { ReviewCandidate } from "@/lib/discovery/model";
+import { INCONCLUSIVE_DECODE, otherGates, reasonText, steps, verificationInconclusive } from "@/lib/discovery/guidance";
+import type { ReviewCandidate, RightsStatus } from "@/lib/discovery/model";
 
 /**
  * What the admin shows about a file's inspection (Policy 3: integrity, streaming
@@ -230,14 +230,22 @@ export function publicationRequirements(candidate: ReviewCandidate): { requireme
   const policy3 = facts.policy3 !== undefined && facts.policyVersion === 3;
   // Under the earlier policies one verdict covers both, and the database's gate has the last word.
   const legacyPass = !policy3 && media.done && facts.passed === true;
-  const integrityDone = policy3 ? integrityStatus.tone === "verified" : legacyPass;
-  const streamingDone = policy3 ? streamingStatus.tone === "verified" : legacyPass;
+  const verifiedIntegrity = policy3 ? integrityStatus.tone === "verified" : legacyPass;
+  const verifiedStreaming = policy3 ? streamingStatus.tone === "verified" : legacyPass;
+  // The owner's setting (the database's own gate follows it): verification optional, a definite failure still blocks.
+  const optional = mediaOptional(candidate);
+  const failed = gates.includes("media_known_failure");
+  const integrityDone = verifiedIntegrity || (optional && !failed);
+  const streamingDone = verifiedStreaming || (optional && !failed);
+  const mediaDetail = (verified: boolean, value: string) => verified ? (policy3 ? "verified" : "accepted under the earlier MP4 policy")
+    : optional && !failed ? `${value.toLowerCase()} · verification is optional on this server` : value.toLowerCase();
   const approved = candidate.status === "published" || candidate.approval?.revision === candidate.revision;
   const blocked = (step: { blockers: string[] }) => step.blockers.map(human).join(", ");
   return {
     requirements: [
-      { label: "Media integrity verified", done: integrityDone, detail: integrityDone ? (policy3 ? "verified" : "accepted under the earlier MP4 policy") : integrityStatus.value.toLowerCase() },
-      { label: "Streaming readiness verified", done: streamingDone, detail: streamingDone ? (policy3 ? "verified" : "passed the earlier MP4 policy") : streamingStatus.value.toLowerCase() },
+      { label: optional ? "Media integrity (verification optional)" : "Media integrity verified", done: integrityDone, detail: mediaDetail(verifiedIntegrity, integrityStatus.value) },
+      { label: optional ? "Streaming readiness (verification optional)" : "Streaming readiness verified", done: streamingDone,
+        detail: verifiedStreaming && !policy3 ? "passed the earlier MP4 policy" : mediaDetail(verifiedStreaming, streamingStatus.value) },
       { label: "Film identity confirmed", done: film.done, detail: film.done ? "done" : blocked(film) },
       { label: "VJ identity confirmed", done: vj.done, detail: vj.done ? "done" : blocked(vj) },
       { label: "Rights clearance approved", done: rights.done, detail: rights.done ? "done" : blocked(rights) },
@@ -245,6 +253,48 @@ export function publicationRequirements(candidate: ReviewCandidate): { requireme
         : candidate.approval ? `approved at revision ${candidate.approval.revision}, which is not the current one` : "not approved" },
     ],
     // The media gate is still the database's: if it stays closed although both halves read verified, say so.
-    also: [...(!media.done && integrityDone && streamingDone ? media.blockers : []), ...otherGates(gates)],
+    also: [...(!media.done && verifiedIntegrity && verifiedStreaming ? media.blockers : []), ...otherGates(gates)],
   };
+}
+
+/** Media verification is optional for publication on this server (the database reports the owner's setting). */
+export const mediaOptional = (candidate: ReviewCandidate): boolean => candidate.mediaInspection === "optional" || candidate.mediaInspection === "disabled";
+
+export const RIGHTS_TEXT: Record<RightsStatus, string> = {
+  not_provided: "Not provided", pending_review: "Pending review", verified: "Verified", rejected: "Rejected",
+};
+
+export interface Indicator { label: string; value: string; tone: MediaTone; detail: string }
+/**
+ * Five independent facts about a candidate: where it came from, what it is, its
+ * media, its distribution authorization and its publication approval. Each is
+ * read from what the database recorded; none implies another.
+ */
+export function indicators(candidate: ReviewCandidate): Indicator[] {
+  const gates = candidate.gates ?? [];
+  const mode = candidate.mediaInspection;
+  const [integrity] = mediaReport(candidateMedia(candidate)).statuses;
+  const failed = gates.includes("media_known_failure");
+  const media = failed ? { value: "Failed", tone: "failed" as const }
+    : verificationInconclusive(candidate) ? { value: "Verification inconclusive", tone: "pending" as const } : { value: integrity.value, tone: integrity.tone };
+  const rights: RightsStatus = candidate.rightsReview?.status ?? (candidate.rights ? "verified" : "not_provided");
+  const approved = candidate.status === "published" || candidate.approval?.revision === candidate.revision;
+  const confirmed = candidate.identity === "confirmed" && candidate.vjId !== null;
+  return [
+    gates.includes("channel_not_registered")
+      ? { label: "Telegram source", value: "Unregistered channel", tone: "failed", detail: "The post is not in the registered Movies channel, so it cannot be published." }
+      : { label: "Telegram source", value: `Movies channel, message ${candidate.event.messageId}`, tone: candidate.duplicateOf ? "warning" : "verified",
+        detail: candidate.duplicateOf ? "The same file was already detected in another post." : "A trusted ingestion source. That does not prove the file is intact or that it may be distributed." },
+    { label: "Film and VJ", value: confirmed ? "Confirmed" : candidate.identity === "proposed" ? "Suggested, not confirmed" : "Unresolved",
+      tone: confirmed ? "verified" : "missing", detail: confirmed ? "A reviewer confirmed the film and the VJ." : "A reviewer has to confirm the film and the VJ." },
+    { label: "Media verification", ...media,
+      detail: mode === "optional" ? "Optional on this server: unchecked media does not block publication, a failed file does. Unchecked is never shown as verified."
+        : mode === "disabled" ? "Optional on this server and not run automatically. A reviewer or operator can still request it. A failed file blocks publication."
+        : mode === "required" ? "Required: publication needs verified integrity and streaming." : integrity.detail },
+    { label: "Distribution authorization", value: RIGHTS_TEXT[rights], tone: rights === "verified" ? "verified" : rights === "rejected" ? "failed" : rights === "pending_review" ? "pending" : "missing",
+      detail: rights === "verified" ? "A reviewer with the rights permission recorded a clearance for this revision."
+        : "Publication, streaming and downloads need a verified rights decision. Telegram presence is never one." },
+    { label: "Publication approval", value: candidate.status === "published" ? "Published" : approved ? "Approved" : "Not approved",
+      tone: approved ? "verified" : "missing", detail: approved ? "Approved at this revision." : "Approval comes after every gate passes; publishing is a separate decision." },
+  ];
 }

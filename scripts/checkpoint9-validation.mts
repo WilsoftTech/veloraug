@@ -28,7 +28,10 @@ const POLICY3 = ["20261011192618_original_media_evidence.sql", "20261011192619_a
 const NOT_ON_HOSTED = ["20261011083200_admin_upload_sessions.sql", "20261011084309_admin_upload_disk_chunks.sql", "20261011085220_admin_upload_inspection.sql", "20261011093300_admin_upload_r2_staging.sql",
   "20261011094004_admin_upload_r2_worker.sql", "20261011095632_admin_upload_r2_visibility.sql", ...POLICY3, "20261011200813_original_media_download_resolver.sql",
   // Checkpoint 10: the verification contract, which builds on Policy 3.
-  "20261014090000_original_media_verification.sql", "20261014090001_admin_original_media_verification.sql"];
+  "20261014090000_original_media_verification.sql", "20261014090001_admin_original_media_verification.sql",
+  // Optional media verification and the rights review, which build on both.
+  "20261018090000_optional_media_and_rights_review.sql", "20261018100000_automatic_media_verification.sql",
+  "20261018072045_media_verification_on_upload.sql"];
 const REST = `http://127.0.0.1:${ISOLATED.restPort}`;
 
 const sql = (statement: string) => { const result = psql(statement); assert.equal(result.code, 0, result.err); return result.out.trim(); };
@@ -93,7 +96,7 @@ const read = async (message: number) => (await reviewer(REVIEW).get(key(message)
 const leaks = (candidate: unknown) => JSON.stringify(candidate).includes("synthetic-bot-file");
 
 try {
-  assert.equal(readdirSync("supabase/migrations").filter((name) => name.endsWith(".sql")).length, 28);
+  assert.equal(readdirSync("supabase/migrations").filter((name) => name.endsWith(".sql")).length, 31);
   const tools = await resolveMediaTools();
   assert.ok(tools.ok, "VELORA_FFPROBE_PATH and VELORA_FFMPEG_PATH are required: the fixtures are inspected for real");
 

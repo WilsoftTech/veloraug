@@ -1,4 +1,6 @@
-import type { ReviewCandidate } from "@/lib/discovery/model";
+import type { ReviewCandidate, ReviewVj } from "@/lib/discovery/model";
+import { resolveVj } from "@/lib/ingestion/vj";
+import { vjKey } from "@/lib/ingestion/normalize";
 
 /**
  * What the admin shows a person about one candidate: which queue group it
@@ -109,7 +111,7 @@ export const legacyRefusal = (candidate: ReviewCandidate): boolean => {
 
 /** Whole-file findings that do not show the file is damaged: not verified, and not a failed file either. */
 export const INCONCLUSIVE_DECODE = new Set(["decode_failed", "decode_error_at_end", "decode_codec_unsupported"]);
-const verificationInconclusive = (candidate: ReviewCandidate): boolean => {
+export const verificationInconclusive = (candidate: ReviewCandidate): boolean => {
   const reasons = candidate.evidence?.reasons ?? [];
   return candidate.evidence?.policyVersion === 3 && reasons.length > 0 && reasons.every((reason) => INCONCLUSIVE_DECODE.has(reason));
 };
@@ -173,7 +175,15 @@ export function guidance(candidate: ReviewCandidate): ReviewGuidance {
     return candidate.evidence ? { group: "action", label: "Media check failed", next: `${failure ?? "The file did not pass the media policy."} Film and VJ stay confirmed. Run the check again once the file is fixed.` }
       : { group: "action", label: "Media check needed", next: `${failure ? `${failure} ` : ""}Film and VJ are confirmed. Run the media check: it reads the file's index from Telegram and does not change the post.` };
   }
-  if (status === "awaiting_rights") return { group: "action", label: "Rights needed", next: "Record the contract or licence reference that allows this movie to be streamed." };
+  if (status === "awaiting_rights") {
+    const rights = candidate.rightsReview?.status;
+    if (rights === "pending_review") return { group: "action", label: "Rights awaiting review", next: "A rights reference was submitted. Someone with the rights permission verifies or rejects it. Until then it cannot be published." };
+    if (rights === "rejected") return { group: "action", label: "Rights rejected", next: "The submitted rights reference was rejected. Submit a corrected reference; without a verified rights decision it cannot be published." };
+    // Only a database that reports the rights review makes the reference optional (as in discovery-review.tsx).
+    return { group: "action", label: "Rights needed", next: candidate.rightsReview
+      ? "Record the rights decision that allows this movie to be streamed. A contract or licence reference and a document are optional; publication needs a verified rights decision."
+      : "Record the contract or licence reference that allows this movie to be streamed. A document is optional; publication needs a verified rights decision." };
+  }
   if (status === "awaiting_review") return { group: "action", label: "Ready to approve", next: "Every check passes. Approve it; publishing is the step after." };
   if (status === "approved") return { group: "action", label: "Approved", next: "Approved at this revision. Publish it to put it on the site." };
   if (status === "publishing") return { group: "progress", label: "Publishing", next: "Publication is running. Refresh to see the result." };
@@ -186,6 +196,9 @@ const NOTICES: Record<string, string> = {
   saved: "Saved.",
   confirmed: "Film and VJ confirmed.",
   rights: "Rights clearance recorded for this revision.",
+  rights_submitted: "Rights reference submitted for review. It grants nothing until it is verified.",
+  rights_verified: "Rights verified for this revision.",
+  rights_rejected: "Rights reference rejected.",
   rejected: "Candidate rejected. Nothing will be published from this post.",
   reinspecting: "Reinspection requested. The listener picks it up within a few seconds; refresh to see the result.",
   prepared: "Owner script prepared in the local ignored discovery folder. Nothing was published.",
@@ -198,6 +211,7 @@ const NOTICES: Record<string, string> = {
   unfeature: "Movie no longer featured.",
   edited: "Title and description saved.",
   vj_added: "VJ added. New posts can now be matched to it.",
+  vj_assigned: "VJ added. The waiting uploads that name it are being read again to attach it; refresh in a few seconds.",
 };
 const ERRORS: Record<string, string> = {
   blocked: "That action is not available for this candidate right now. Check its status and the latest revision.",
@@ -223,10 +237,78 @@ export function steps(gates: readonly string[]): { label: string; done: boolean;
   return [
     { label: "Film identified", blockers: of("identity_unconfirmed", "metadata_missing") },
     { label: "VJ chosen", blockers: of("vj_unresolved") },
-    { label: "Media check passed", blockers: of("media_verification_required", "media_identity_incomplete") },
+    { label: "Media check passed", blockers: of("media_verification_required", "media_known_failure", "media_identity_incomplete") },
     { label: "Rights cleared", blockers: of("rights_clearance_required") },
   ].map((step) => ({ ...step, done: step.blockers.length === 0 }));
 }
-const STEP_GATES = ["identity_unconfirmed", "metadata_missing", "vj_unresolved", "media_verification_required", "media_identity_incomplete", "rights_clearance_required"];
+const STEP_GATES = ["identity_unconfirmed", "metadata_missing", "vj_unresolved", "media_verification_required", "media_known_failure", "media_identity_incomplete", "rights_clearance_required"];
 /** Gates outside the four steps (closed candidate, duplicates, conflicts, replacements). */
 export const otherGates = (gates: readonly string[]): string[] => gates.filter((gate) => !STEP_GATES.includes(gate));
+
+/**
+ * Where a candidate stands on the way to the catalogue, separately from the next
+ * step. Catalogue-ready: film and VJ are confirmed and only the media check (or a
+ * known media failure) stands between it and publication authorization.
+ * Awaiting authorization: what remains is the rights decision and the approve
+ * and publish decisions. The database still decides every gate.
+ */
+export type CatalogueStage = "discovered" | "identified" | "catalogue_ready" | "awaiting_authorization" | "published" | "rejected_or_blocked";
+export const STAGE_LABELS: Record<CatalogueStage, string> = {
+  discovered: "Discovered", identified: "Identified", catalogue_ready: "Catalogue-ready",
+  awaiting_authorization: "Awaiting publication authorization", published: "Published", rejected_or_blocked: "Rejected or blocked",
+};
+export function catalogueStage(candidate: ReviewCandidate): CatalogueStage {
+  const status = candidate.status;
+  const gates = candidate.gates ?? [];
+  if (status === "published") return "published";
+  if (["duplicate", "rejected", "blocked"].includes(status)) return "rejected_or_blocked";
+  if (["detected", "inspecting", "failed", "awaiting_metadata"].includes(status)) return "discovered";
+  if (status === "awaiting_identity" || status === "awaiting_vj") return "identified";
+  // Conflicts, replacements and archived titles stop a candidate whatever else passes.
+  if (otherGates(gates).length) return "rejected_or_blocked";
+  if (status === "awaiting_media" || gates.some((gate) => ["media_verification_required", "media_known_failure", "media_identity_incomplete"].includes(gate))) return "catalogue_ready";
+  return "awaiting_authorization";
+}
+
+/**
+ * The house form of a VJ name read from a post, for the reviewer to check before adding it:
+ * "SHIELD" becomes "VJ Shield". A word typed in mixed case ("McKay") is kept as typed.
+ */
+export function proposedVjName(vjText: string): string {
+  const rest = vjText.replace(/[._]+/g, " ").replace(/\s+/g, " ").trim().replace(/^vj(?:[ -]+|$)/i, "");
+  const word = (part: string) => part === part.toUpperCase() || part === part.toLowerCase() ? part.charAt(0).toUpperCase() + part.slice(1).toLowerCase() : part;
+  return rest ? `VJ ${rest.split(" ").map(word).join(" ")}` : "";
+}
+
+/**
+ * The new VJ an open candidate names: VJ text read from the post that matches no VJ, not even by the
+ * listener's own prefix rule. An ambiguous or inactive match is not new. Null when there is nothing to add.
+ */
+export function detectedNewVj(candidate: ReviewCandidate, vjs: readonly ReviewVj[]): string | null {
+  if (!reviewOpen(candidate) || candidate.vjId !== null || !candidate.vjText) return null;
+  if (resolveVj(candidate.vjText, vjs, { prefix: true }).status !== "unresolved") return null;
+  return proposedVjName(candidate.vjText) || null;
+}
+
+/** Every new VJ name across the queue, once each, with how many open uploads use it. */
+export function newVjsDetected(candidates: readonly ReviewCandidate[], vjs: readonly ReviewVj[]): { name: string; count: number }[] {
+  const found = new Map<string, { name: string; count: number }>();
+  for (const candidate of candidates) {
+    const name = detectedNewVj(candidate, vjs);
+    if (!name) continue;
+    const entry = found.get(vjKey(name)) ?? { name, count: 0 };
+    entry.count++;
+    found.set(vjKey(name), entry);
+  }
+  return [...found.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+}
+
+/**
+ * The open uploads a newly added VJ should be attached to: no VJ yet, film not confirmed, and VJ text that
+ * resolves to this VJ by the listener's rule. Reading one again starts a new revision, which would void a
+ * rights decision, so a candidate with one is left for the reviewer to assign by hand.
+ */
+export function awaitingNewVj(candidates: readonly ReviewCandidate[], vj: ReviewVj): ReviewCandidate[] {
+  return candidates.filter((candidate) => reviewOpen(candidate) && candidate.vjId === null && candidate.identity !== "confirmed"
+    && !candidate.rights && candidate.vjText !== null && resolveVj(candidate.vjText, [vj], { prefix: true }).status === "resolved");
+}

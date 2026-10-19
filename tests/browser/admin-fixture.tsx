@@ -1,5 +1,7 @@
 import { createRoot } from "react-dom/client";
 import { ReviewDetail } from "@/components/discovery-review";
+import { AdminUploadForm } from "@/components/admin-upload-form";
+import { AdminUploadTransfer } from "@/components/admin-upload-transfer";
 import "@/app/globals.css";
 import type { ReviewCandidate } from "@/lib/discovery/model";
 
@@ -41,13 +43,25 @@ const SCENARIOS: Record<string, ReviewCandidate> = {
   // ... and a whole-file decode that ended on an error after the whole film (the finding All the Devil's Men's record is consistent with).
   inconclusive: { ...base, evidence: original("mkv", { integrity: "incomplete", streaming: "unverified" }, { mediaClass: "unverified", reasons: ["decode_error_at_end"], audio: "mp3",
     inspection: { scope: "whole_file", download: "original_servable", sha256: "e".repeat(64) } }) },
+  // Optional media verification (migration 20261018090000): an uninspected trusted document, no rights document yet ...
+  optional: { ...base, status: "awaiting_rights", gates: ["rights_clearance_required"], mediaInspection: "optional", evidence: null, lastInspection: null,
+    rightsReview: { status: "not_provided", submissions: [] } },
+  // ... and with a reference awaiting a rights reviewer, after an earlier one was rejected.
+  rights_pending: { ...base, status: "awaiting_rights", gates: ["rights_clearance_required"], mediaInspection: "optional", evidence: null, lastInspection: null,
+    rightsReview: { status: "pending_review", submissions: [
+      { id: 8, revision: 3, reference: "licence 2026-021-B", documentSha256: "f".repeat(64), submittedBy: "reviewer", submittedAt: at, decision: "pending", decidedBy: null, decidedAt: null, current: true },
+      { id: 7, revision: 3, reference: "licence 2026-021", documentSha256: null, submittedBy: "reviewer", submittedAt: at, decision: "rejected", decidedBy: "rights", decidedAt: at, current: true }] } },
 };
 
 const params = new URLSearchParams(location.search);
 const candidate = SCENARIOS[params.get("scenario") ?? "pending"];
 createRoot(document.getElementById("root")!).render(
   <main className="page-container py-6 sm:py-8">
-    <ReviewDetail candidate={candidate} vjs={[{ id: 1, slug: "vj-test", name: "VJ Test", isActive: true }]} action={async () => {}} mode="database"
-      capabilities={{ review: true, rights: true, publish: params.has("publisher") }} downloads={params.has("downloads")} />
+    {params.get("screen") === "upload" ? <AdminUploadForm maxBytes={2_000_000_000} extensions={["mp4", "mkv"]} action={async (_previous, data) => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      return { error: `Synthetic draft received: ${data.get("fileName")} (${data.get("sizeBytes")} bytes).` };
+    }} /> : params.get("screen") === "transfer" ? <AdminUploadTransfer id="synthetic-upload" fileName={params.get("name") ?? "Example.Movie.mp4"} sizeBytes={4} storage={params.has("r2") ? "r2" : "disk"} /> :
+      <ReviewDetail candidate={candidate} vjs={[{ id: 1, slug: "vj-test", name: "VJ Test", isActive: true }]} action={async () => {}} mode="database"
+        capabilities={{ review: true, rights: true, publish: params.has("publisher") }} downloads={params.has("downloads")} />}
   </main>,
 );

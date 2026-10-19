@@ -70,6 +70,28 @@ describe("worker persistence over RPC", () => {
     const reply = replies[fn];
     return reply instanceof Error ? { data: null, error: { message: reply.message, code: "P0001" } } : ok(typeof reply === "function" ? reply(args) : reply);
   };
+  it("claims media independently of reviews, and uses only the media result commands", async () => {
+    calls.length=0;
+    const raw={media_id:1,identity:`tg1-${"a".repeat(64)}`,lease:"00000000-0000-4000-8000-000000000001",
+      chat_id:channel,message_id:42,file_unique_id:"AgADupload42",size:1000,name:"Unknown.mkv",mime:"video/x-matroska"};
+    const store=databasePersistence(rpc({media_verification_claim:raw,media_verification_finish:"retry"}),{channelId:channel});
+    const result=await store.verifyMediaNext(async(event)=>{
+      expect(event.media.name).toBe("Unknown.mkv");
+      throw new Error("https://secret.invalid/token");
+    },()=>new Date());
+    expect(result).toEqual({outcome:"retry",evidence:null});
+    expect(calls.map(item=>item.fn)).toEqual(["media_verification_claim","media_verification_finish"]);
+    expect(calls[1].args).toMatchObject({p_media_id:1,p_token:raw.lease,p_identity:raw.identity,p_evidence:null,p_error:"inspection_provider_failed"});
+    expect(JSON.stringify(calls)).not.toContain("secret.invalid");
+  });
+  it("does not read media when no upload is due", async () => {
+    calls.length=0;
+    const media=vi.fn();
+    const store=databasePersistence(rpc({media_verification_claim:null}),{channelId:channel});
+    expect(await store.verifyMediaNext(media,()=>new Date())).toEqual({outcome:"idle",evidence:null});
+    expect(media).not.toHaveBeenCalled();
+    expect(calls.map(item=>item.fn)).toEqual(["media_verification_claim"]);
+  });
   const claim = { key: "a".repeat(64), revision: 1, lease: "00000000-0000-4000-8000-000000000001", attempts: 1, event_id: "b".repeat(64), payload_digest: "c".repeat(64),
     observed_at: 1760000000, update_id: 1, kind: "channel_post", chat_id: channel, message_id: 10, file_unique_id: "AgADuniq10", size: 1048576,
     name: "Example.Movie.2024.VJ.Test.mp4", mime: "video/mp4", caption: null, identity: `tg1-${"d".repeat(64)}` };

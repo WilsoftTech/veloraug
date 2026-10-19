@@ -13,16 +13,18 @@ export function AdminUploadTransfer({ id,fileName,sizeBytes,storage="disk",paral
   const [offset,setOffset] = useState(0);
   const [speed,setSpeed] = useState(0);
   const [error,setError] = useState("");
+  const [phase,setPhase] = useState<"idle" | "checking" | "uploading" | "finishing" | "queued">("idle");
   const controller = useRef<AbortController | null>(null);
   useEffect(() => () => controller.current?.abort(),[]);
   async function transfer() {
-    if (!file || running) return;
+    if (!file || controller.current || phase === "queued") return;
     if (file.name !== fileName || file.size !== sizeBytes) { setError("Reselect the same file name and size to continue this upload."); return; }
-    setRunning(true); setError("");
+    setRunning(true); setError(""); setSpeed(0); setPhase("checking");
     const abort = new AbortController(); controller.current = abort;
     try {
       if(storage==="r2") {
-        await uploadR2FromBrowser(file,`/api/admin/uploads/${id}/transfer`,{signal:abort.signal,parallelism,progress:(bytes,rate)=>{setOffset(bytes);setSpeed(rate);}});
+        await uploadR2FromBrowser(file,`/api/admin/uploads/${id}/transfer`,{signal:abort.signal,parallelism,progress:(bytes,rate)=>{setOffset(bytes);setSpeed(rate);setPhase(bytes === sizeBytes ? "finishing" : "uploading");}});
+        setPhase("queued");
         router.refresh(); return;
       }
       const credentials = await fetch(`/api/admin/uploads/${id}/transfer`,{ method: "POST",signal: abort.signal });
@@ -45,7 +47,7 @@ export function AdminUploadTransfer({ id,fileName,sizeBytes,storage="disk",paral
         checked += chunk.size;
       }
       if (checked !== manifest.offset) throw new Error("Upload progress is inconsistent.");
-      let current = manifest.offset; setOffset(current);
+      let current = manifest.offset; setOffset(current); setPhase("uploading");
       const startedAt = performance.now(); const initial = current;
       while (current < sizeBytes) {
         const end = Math.min(current+CHUNK_BYTES,sizeBytes);
@@ -55,19 +57,26 @@ export function AdminUploadTransfer({ id,fileName,sizeBytes,storage="disk",paral
         if (receipt.offset !== end) throw new Error("Upload progress is inconsistent.");
         current = end; setOffset(current); setSpeed((current-initial)/Math.max(1,(performance.now()-startedAt)/1000));
       }
+      setPhase("finishing");
       const complete = await fetch(`/api/admin/uploads/${id}/transfer`,{ method: "POST",headers: { "Upload-Command": "verify" },signal: abort.signal });
       if (!complete.ok) throw new Error("File transfer completed, but verification could not be queued. Resume to retry.");
+      setPhase("queued");
       router.refresh();
     } catch (failure) {
+      setPhase("idle");
       setError(abort.signal.aborted ? "Paused. Completed chunks are retained." : failure instanceof Error ? failure.message : "Transfer interrupted. Resume to retry.");
     } finally { controller.current = null; setRunning(false); }
   }
-  const remaining = speed > 0 ? Math.ceil((sizeBytes-offset)/speed) : null;
+  const remaining = running && speed > 0 && offset < sizeBytes ? Math.ceil((sizeBytes-offset)/speed) : null;
+  const message = phase === "checking" ? "Checking previously completed parts…" : phase === "uploading" ? "Transferring your movie…" : phase === "finishing" ? "Confirming transfer and queuing verification…" : phase === "queued" ? "Transfer complete. Verification is queued; the movie is still private." : "Select the original file to start or resume.";
   return <section aria-label="File transfer" className="mt-6 max-w-xl rounded-lg border border-border bg-surface p-4">
-    <Field id="resume-upload-file" label="Select the file to upload or resume" hint={storage==="r2" ? "Completed parts remain in private R2 staging. Reselect the original file after a refresh." : "Previously completed chunks are kept on the staging service."}>{(props) => <input {...props} type="file" accept="video/*,.mkv,.m4v,.ts,.m2ts" disabled={running} onChange={(event) => setFile(event.target.files?.[0] ?? null)} />}</Field>
+    <h2 className="text-headline-sm">Transfer the original file</h2>
+    <p className="mb-4 mt-2 break-all text-body-sm text-muted">{fileName} · {(sizeBytes/1_000_000).toFixed(1)} MB</p>
+    <Field id="resume-upload-file" label="Select the file to upload or resume" hint="Completed parts are retained. After a refresh, reselect the same original file to resume.">{(props) => <input {...props} type="file" accept="video/*,.mkv,.m4v,.ts,.m2ts" className={`${props.className} h-auto min-h-11 min-w-0 py-2 file:mr-3 file:rounded-sm file:border-0 file:bg-surface-elevated file:px-3 file:py-1 file:text-foreground`} disabled={running || phase === "queued"} onChange={(event) => { setFile(event.target.files?.[0] ?? null); setError(""); }} />}</Field>
     <progress className="mt-4 w-full" value={offset} max={sizeBytes} aria-label="File transfer progress" />
-    <p className="mt-2 text-body-sm text-muted" aria-live="polite">{Math.floor(offset/sizeBytes*100)}% · {(offset/1_000_000).toFixed(1)} / {(sizeBytes/1_000_000).toFixed(1)} MB{speed > 0 ? ` · ${(speed/1_000_000).toFixed(1)} MB/s` : ""}{remaining !== null ? ` · about ${Math.ceil(remaining/60)} min remaining` : ""}</p>
+    <p className="mt-2 text-body-sm text-muted">{Math.floor(offset/sizeBytes*100)}% · {(offset/1_000_000).toFixed(1)} / {(sizeBytes/1_000_000).toFixed(1)} MB{running && speed > 0 ? ` · ${(speed/1_000_000).toFixed(1)} MB/s` : ""}{remaining !== null ? ` · about ${Math.ceil(remaining/60)} min remaining` : ""}</p>
+    <p role="status" className="mt-3 text-body-sm">{message}</p>
     {error && <p role="status" className="mt-3 text-body-sm">{error}</p>}
-    <div className="mt-4 flex flex-wrap gap-3"><button type="button" disabled={!file || running} onClick={() => void transfer()} className={buttonClass()}>{offset ? "Resume transfer" : "Start or resume transfer"}</button>{running && <button type="button" onClick={() => controller.current?.abort()} className={buttonClass("secondary")}>Pause</button>}</div>
+    <div className="mt-4 flex flex-wrap gap-3"><button type="button" disabled={!file || running || phase === "queued"} onClick={() => void transfer()} className={buttonClass("primary", "w-full sm:w-auto")}>{phase === "queued" ? "Verification queued" : running ? "Transfer in progress…" : offset ? "Resume transfer" : "Start or resume transfer"}</button>{running && <button type="button" onClick={() => controller.current?.abort()} className={buttonClass("secondary", "w-full sm:w-auto")}>Pause</button>}{phase === "queued" && <button type="button" onClick={() => router.refresh()} className={buttonClass("secondary")}>Refresh processing status</button>}</div>
   </section>;
 }

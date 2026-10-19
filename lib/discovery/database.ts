@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { detectDocument, newCandidate } from "@/lib/discovery/events";
 import { inspectCandidate, type CatalogueMatch, type InspectionPorts } from "@/lib/discovery/pipeline";
-import { candidateSchema, eventSchema, type ReviewCandidate, type ReviewVj } from "@/lib/discovery/model";
+import { candidateSchema, eventSchema, mediaInspectionModes, rightsStatuses, type ReviewCandidate, type ReviewVj } from "@/lib/discovery/model";
 import { browserProfile } from "@/lib/discovery/media-report";
 import { transientMediaFailure, type ChannelMediaEvidence } from "@/lib/discovery/media-verification";
 import type { DiscoveryPersistence } from "@/lib/discovery/worker";
@@ -68,6 +68,11 @@ const cursorRow = z.array(z.object({
   reconciliation_incomplete: z.boolean(),
 })).length(1);
 const counts = z.object({ detected: z.number().int(), duplicates: z.number().int(), ignored: z.number().int() });
+const mediaClaimSchema = z.object({
+  media_id: z.number().int().positive().safe(), lease: z.uuid(), identity: z.string().regex(/^tg1-[a-f0-9]{64}$/),
+  chat_id: z.number().int().safe(), message_id: z.number().int().positive(), file_unique_id: z.string().min(1).max(128),
+  size: z.number().int().positive().max(2097152000), name: z.string().nullable(), mime: z.string().nullable(),
+});
 const claimSchema = z.object({
   key: z.string().regex(/^[a-f0-9]{64}$/), revision: z.number().int().positive(), lease: z.uuid(), attempts: z.number().int(),
   event_id: z.string().regex(/^[a-f0-9]{64}$/), payload_digest: z.string().regex(/^[a-f0-9]{64}$/), observed_at: z.number().int().positive(),
@@ -145,7 +150,9 @@ const toTmdb = (snapshot: ReviewCandidate["choices"][number]) => ({ tmdbId: snap
  * discovery_consumer_busy instead of consuming the same updates).
  */
 export function databasePersistence(rpc: DiscoveryRpc, options: { channelId: number; consumer?: string; leaseSeconds?: number; inspectionLeaseSeconds?: number }): DiscoveryPersistence & { consumer: string; release(): Promise<void>; health(now: Date): Promise<DiscoveryHealth>;
-  verifyOne(key: string, media: InspectionPorts["media"], now: () => Date, leaseSeconds?: number): Promise<{ outcome: string; evidence: ChannelMediaEvidence | null }> } {
+  verifyOne(key: string, media: InspectionPorts["media"], now: () => Date, leaseSeconds?: number): Promise<{ outcome: string; evidence: ChannelMediaEvidence | null }>;
+  verificationDue(limit: number, retrySeconds: number): Promise<string[]>;
+  verifyMediaNext(media: InspectionPorts["media"], now: () => Date, leaseSeconds?: number, retrySeconds?: number): Promise<{ outcome: string; evidence: ChannelMediaEvidence | null }> } {
   const consumer = options.consumer ?? randomUUID();
   const leaseSeconds = options.leaseSeconds ?? 120;
   const inspectionLease = options.inspectionLeaseSeconds ?? 120;
@@ -205,6 +212,29 @@ export function databasePersistence(rpc: DiscoveryRpc, options: { channelId: num
         vjText: selected.vj_text, vjId: selected.vj_id, tmdbId: selected.tmdb_id, identity: "proposed", choices: [selected.snapshot], snapshot: selected.snapshot };
       const outcome = String(await call(rpc, "discovery_complete", { p_key: claim.key, p_lease: claim.lease, p_revision: claim.revision, p_result: completionPayload(result, verification, claim.identity) }));
       return { outcome, evidence: verification };
+    },
+    /** Candidates due a whole-file verification, oldest first (migration 20261018100000). Keys only; the database decides. */
+    async verificationDue(limit: number, retrySeconds: number): Promise<string[]> {
+      return z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(100).parse(await call(rpc, "discovery_verification_due", { p_limit: limit, p_retry_seconds: retrySeconds }));
+    },
+    /** Media-only jobs cover all recorded movie files without claiming or modifying a review. */
+    async verifyMediaNext(media, now, leaseSeconds = 14_400, retrySeconds = 21600) {
+      const raw = await call(rpc, "media_verification_claim", { p_token: randomUUID(), p_lease_seconds: leaseSeconds, p_retry_seconds: retrySeconds });
+      if (raw === null) return { outcome: "idle", evidence: null };
+      const claim = mediaClaimSchema.parse(raw);
+      const key = claim.identity.slice(4);
+      const event = eventSchema.parse({ id: key, messageKey: key, updateId: null, channelId: claim.chat_id, messageId: claim.message_id,
+        kind: "channel_post", timestamp: Math.floor(now().getTime()/1000), digest: key,
+        media: { uniqueId: claim.file_unique_id, size: claim.size, name: claim.name, mime: claim.mime, caption: null } });
+      const finish = (evidence: ChannelMediaEvidence | null, error: string | null) => call(rpc, "media_verification_finish", {
+        p_media_id: claim.media_id, p_token: claim.lease, p_identity: claim.identity, p_evidence: evidence, p_error: error,
+      });
+      let evidence: ChannelMediaEvidence | null;
+      try { evidence = (await media(event)).verification ?? null; }
+      catch { return { outcome: String(await finish(null, "inspection_provider_failed")), evidence: null }; }
+      const transient = evidence ? transientMediaFailure(evidence) : "inspection_provider_failed";
+      if (transient) return { outcome: String(await finish(null, transient)), evidence: null };
+      return { outcome: String(await finish(evidence, null)), evidence };
     },
     async inspectNext(ports, now) {
       const claim = claimSchema.nullable().parse(await call(rpc, "discovery_claim", { p_lease_seconds: inspectionLease }));
@@ -285,6 +315,8 @@ const evidenceView = z.object({
   tracks: z.array(z.object({ type: z.string() })).max(64).nullable().optional().catch(undefined),
   warnings: z.array(z.string().max(100)).max(50).nullable().optional().catch(undefined),
   publishable_media: z.boolean().optional().catch(undefined),
+  // Migration 20261018090000: the evidence is a definite finding against the file (the screen's "Failed").
+  known_failure: z.boolean().optional().catch(undefined),
   // Download evidence (migration 20261011192618) and, for a whole-file inspection, the digest (migration 20261014090000).
   download_status: z.string().max(60).optional().catch(undefined),
   assessment: z.object({ verification: z.object({ digest: z.object({ value: z.string().regex(/^[a-f0-9]{64}$/) }) }).optional() }).nullable().optional().catch(undefined),
@@ -308,10 +340,17 @@ const viewSchema = z.object({
   tmdb_id: z.number().nullable(), vj: z.object({ id: z.number(), slug: z.string(), name: z.string(), active: z.boolean() }).nullable(),
   relation: z.enum(["new_movie", "new_vj", "replacement", "unknown"]), movie_id: z.number().nullable(), duplicate_of: z.string().nullable(),
   snapshot: z.unknown().nullable(), evidence: evidenceView.nullable(),
-  rights: z.object({ reference: z.string(), cleared_by: z.string(), cleared_at: stamp, revision: z.number() }).nullable(),
+  rights: z.object({ reference: z.string().nullable(), cleared_by: z.string(), cleared_at: stamp, revision: z.number() }).nullable(),
   approval: z.object({ revision: z.number(), by: z.string(), at: stamp }).nullable(),
   publication: z.object({ movie_slug: z.string(), version_id: z.number(), published_at: z.string().nullable() }).nullable(),
   blockers: z.array(z.string()),
+  // Migration 20261018090000. Absent on a database without it: the page then shows the earlier rights field only.
+  media_inspection_mode: z.enum(mediaInspectionModes).optional().catch(undefined),
+  rights_status: z.enum(rightsStatuses).optional().catch(undefined),
+  rights_submissions: z.array(z.object({
+    id: z.number().int().positive(), revision: z.number().int().positive(), reference: z.string().nullable(), document_sha256: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+    submitted_by: z.string(), submitted_at: stamp, decision: z.enum(["pending", "verified", "rejected"]), decided_by: z.string().nullable(), decided_at: stamp.nullable(), current: z.boolean(),
+  })).max(50).optional().catch(undefined),
   // Migration 20261011112745. Absent on a database without it.
   inspection: z.object({ retry_at: stamp.nullable(), last: z.object({ at: stamp, action: z.string(), detail: z.string().nullable(), revision: z.number() }).nullable() }).optional(),
   choices: z.array(z.unknown()).optional(),
@@ -334,7 +373,7 @@ function reviewStatus(view: ReviewView): ReviewCandidate["status"] {
       if (!view.snapshot) return view.identity_state === "ambiguous" ? "awaiting_identity" : "awaiting_metadata";
       if (gates.includes("identity_unconfirmed") || gates.includes("metadata_missing")) return "awaiting_identity";
       if (gates.includes("vj_unresolved")) return "awaiting_vj";
-      if (gates.includes("media_verification_required")) return "awaiting_media";
+      if (gates.includes("media_verification_required") || gates.includes("media_known_failure")) return "awaiting_media";
       if (gates.includes("rights_clearance_required")) return "awaiting_rights";
       return "awaiting_review";
     default: return "blocked";
@@ -369,6 +408,10 @@ export function toCandidate(input: unknown): ReviewCandidate {
     audit: (view.audit ?? []).slice(-500).map((entry) => ({ at: entry.at, actor: entry.actor ?? (entry.actor_kind === "worker" ? "discovery" : "owner"),
       action: entry.detail ? `${entry.action} (${entry.detail})`.slice(0, 100) : entry.action, revision: entry.revision })),
     gates: view.blockers.slice(0, 50),
+    mediaInspection: view.media_inspection_mode,
+    rightsReview: view.rights_status === undefined ? undefined : { status: view.rights_status,
+      submissions: (view.rights_submissions ?? []).map((item) => ({ id: item.id, revision: item.revision, reference: item.reference, documentSha256: item.document_sha256,
+        submittedBy: item.submitted_by, submittedAt: item.submitted_at, decision: item.decision, decidedBy: item.decided_by, decidedAt: item.decided_at, current: item.current })) },
   });
 }
 
@@ -401,8 +444,17 @@ export function createReviewClient(rpc: DiscoveryRpc) {
     async correct(key: string, revision: number, fields: { tmdbId: number; year: number; vjId: number }) {
       return toCandidate(await call(rpc, "discovery_review_correct", { p_key: key, p_revision: revision, p_tmdb_id: fields.tmdbId, p_year: fields.year, p_vj_id: fields.vjId }));
     },
-    async clearRights(key: string, revision: number, reference: string) {
+    /** Rights capability. The reference is optional (null) on a database with migration 20261018090000. */
+    async clearRights(key: string, revision: number, reference: string | null) {
       return toCandidate(await call(rpc, "discovery_review_clear_rights", { p_key: key, p_revision: revision, p_reference: reference }));
+    },
+    /** Submits a rights reference (and optionally a document's SHA-256) for review. Any capability; grants nothing by itself. */
+    async submitRights(key: string, revision: number, reference: string | null, documentSha256: string | null) {
+      return toCandidate(await call(rpc, "discovery_review_submit_rights", { p_key: key, p_revision: revision, p_reference: reference, p_document_sha256: documentSha256 }));
+    },
+    /** Rights capability: `verified` records the clearance (a new revision), `rejected` records the decision only. */
+    async decideRights(key: string, revision: number, submission: number, decision: "verified" | "rejected") {
+      return toCandidate(await call(rpc, "discovery_review_decide_rights", { p_key: key, p_revision: revision, p_submission: submission, p_decision: decision }));
     },
     /** Withdraws the clearance of an unpublished candidate (rights capability): a new revision, so an approval that relied on it cannot publish. */
     async revokeRights(key: string, revision: number) { return toCandidate(await call(rpc, "discovery_review_revoke_rights", { p_key: key, p_revision: revision })); },

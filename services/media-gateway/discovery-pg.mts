@@ -3,6 +3,8 @@ import type { DiscoveryRpc } from "@/lib/discovery/database";
 
 // Fixed function names, named arguments and casts. Never interpolate a caller's SQL.
 const calls: Record<string, readonly (readonly [string, string])[]> = {
+  media_verification_claim: [["p_token", "uuid"], ["p_lease_seconds", "integer"], ["p_retry_seconds", "integer"]],
+  media_verification_finish: [["p_media_id", "bigint"], ["p_token", "uuid"], ["p_identity", "text"], ["p_evidence", "jsonb"], ["p_error", "text"]],
   discovery_acquire_consumer: [["p_token", "uuid"], ["p_lease_seconds", "integer"]],
   discovery_receive: [["p_token", "uuid"], ["p_chat_id", "bigint"], ["p_deliveries", "jsonb"], ["p_reconciliation", "jsonb"]],
   discovery_claim: [["p_lease_seconds", "integer"]],

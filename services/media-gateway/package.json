@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "node --import ../../scripts/ingest/register.mjs main.mts",
+    "verify:uploads": "node --experimental-transform-types --import ../../scripts/ingest/register.mjs discovery.mts --verify-uploads",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {

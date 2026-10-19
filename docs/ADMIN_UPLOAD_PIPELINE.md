@@ -259,3 +259,28 @@ Surgical additions to existing files:
 Discovery runtime, worker, listener, Telegram channels and publication functions
 were not modified by this feature. Existing unrelated working-tree changes
 remain intact. No dependency, commit, push, deployment or real transfer was made.
+
+## Upload UI continuation (2026-10-18)
+
+The new-upload screen now explains the draft, transfer, and review steps beside
+the existing file form. The picker shows supported containers, its configured
+size limit, a wrapping file summary, and a remove control. Multiple dropped
+files are refused instead of silently choosing the first. Clearing the picker
+also clears the draft facts; selection is locked while draft creation is pending.
+
+The transfer screen distinguishes checking saved parts, transferring, confirming
+completion, and queued verification. Completion disables another transfer and
+offers a processing-status refresh. Pause hides stale throughput and time
+estimates. Existing chunk hashes, R2 resume, authorization, and independent
+rights/publication gates are preserved.
+
+Local validation: 37 targeted unit tests; TypeScript and scoped ESLint; 12 upload
+browser checks across Chromium and WebKit, including 360–1440 px layouts in both
+themes, pause, changed-file rejection, and recovery without resending completed
+parts. Firefox crashed before opening a page, also reproduced by an independent
+blank-page smoke check. The isolated offline webpack build passed with its
+existing safe-area CSS warning. Browser screenshots were visually inspected.
+
+These checks use synthetic files and loopback services only. Upload enablement,
+the standing-approval pause marker, hosted data, listeners, and publication state
+were not changed. No dependency was added.

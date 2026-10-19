@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 import { beforeEach,describe,expect,it,vi } from "vitest";
 import { emptyUploadMetadata } from "./admin-upload";
 
-const mocks = vi.hoisted(() => ({ assemble: vi.fn(),fingerprint: vi.fn(),hash: vi.fn(),tools: vi.fn(),probe: vi.fn(),classify: vi.fn(),search: vi.fn(),snapshot: vi.fn() }));
+const mocks = vi.hoisted(() => ({ assemble: vi.fn(),fingerprint: vi.fn(),hash: vi.fn(),tools: vi.fn(),probe: vi.fn(),decode: vi.fn(),classify: vi.fn(),search: vi.fn(),snapshot: vi.fn() }));
 vi.mock("@/lib/uploader/disk-transfer",async (original) => ({ ...await original<typeof import("./disk-transfer")>(),assembleDiskUpload: mocks.assemble }));
 vi.mock("@/lib/uploader/scan",() => ({ fingerprintFile: mocks.fingerprint,hashFile: mocks.hash }));
-vi.mock("@/lib/uploader/media-tools",() => ({ resolveMediaTools: mocks.tools,probeMedia: mocks.probe }));
+vi.mock("@/lib/uploader/media-tools",() => ({ resolveMediaTools: mocks.tools,probeMedia: mocks.probe,decodeStreams: mocks.decode }));
 import { canonicalInspection } from "./test-media";
 vi.mock("@/lib/tmdb/ingestion-search",async (original) => ({ ...await original<typeof import("../tmdb/ingestion-search")>(),searchTmdbForIngestion: mocks.search,fetchMovieSnapshot: mocks.snapshot }));
 import { inspectAdminUpload } from "./admin-inspection";
@@ -23,10 +23,29 @@ beforeEach(() => {
   mocks.hash.mockResolvedValue("a".repeat(64));
   mocks.tools.mockResolvedValue({ ok: true,tools: { ffprobe: { version: "test" },ffmpeg: { version: "test" } } });
   mocks.probe.mockResolvedValue({ ok: true,inspection: canonicalInspection(3) });
+  mocks.decode.mockResolvedValue({ outcome: "decoded",seconds: 5208.29,frames: 100,exitCode: 0,errors: [] });
   mocks.classify.mockReturnValue({ class: "canonical",reasons: [],policyVersion: 1 });
   mocks.search.mockResolvedValue([]);
 });
 describe("admin upload inspection",() => {
+  it("automatically decodes a disk upload whole and after three seeks before metadata review",async () => {
+    const { ports }=setup();
+    await inspectAdminUpload("C:\\private",ports);
+    expect(mocks.decode).toHaveBeenCalledTimes(4);
+    expect(mocks.decode.mock.calls[0][3]).toBeNull();
+    expect(ports.finish).toHaveBeenCalledWith(expect.any(String),expect.any(String),expect.objectContaining({
+      inspection: expect.objectContaining({assessment:expect.objectContaining({integrity:"verified",streaming:"verified"})}),
+    }));
+  });
+  it("an error at the end of a disk upload cannot become a passing integrity result",async () => {
+    const { ports }=setup();
+    mocks.decode.mockResolvedValue({outcome:"decode_failed",seconds:5208.28,frames:100,exitCode:1,errors:["Invalid data found"]});
+    await inspectAdminUpload("C:\\private",ports);
+    expect(mocks.decode).toHaveBeenCalledTimes(1);
+    expect(ports.finish).toHaveBeenCalledWith(expect.any(String),expect.any(String),expect.objectContaining({
+      inspection:expect.objectContaining({assessment:expect.objectContaining({accepted:false,integrity:"incomplete",streaming:"unverified",reasons:["decode_error_at_end"]})}),
+    }));
+  });
   it("persists byte verification separately from inspection",async () => {
     const { claim,ports }=setup("verify");
     expect(await inspectAdminUpload("C:\\private",ports)).toBe(true);

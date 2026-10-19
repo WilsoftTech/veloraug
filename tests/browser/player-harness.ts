@@ -39,13 +39,15 @@ export async function startPlayerHarness(gatewayOptions: Pick<HarnessOptions, "f
       { find: "@/lib/session", replacement: "fixture-session" },
       { find: "next/link", replacement: "fixture-link" },
       { find: "next/image", replacement: "fixture-image" },
+      { find: "next/navigation", replacement: "fixture-navigation" },
       { find: "@", replacement: resolve(__dirname, "../..") },
     ] },
     optimizeDeps: { noDiscovery: true, include: ["react", "react-dom/client", "react/jsx-runtime", "react/jsx-dev-runtime", "lucide-react"], exclude: ["fixture-link", "fixture-session", "fixture-image"] },
     server: { host: "127.0.0.1", port: 0, strictPort: false, hmr: false },
     plugins: [{ name: "isolated-player-host",
-      resolveId(id) { if (id === "fixture-session") return "\0fixture-session"; if (id === "fixture-link") return "\0fixture-link"; if (id === "fixture-image") return "\0fixture-image"; },
+      resolveId(id) { if (id === "fixture-navigation") return "\0fixture-navigation"; if (id === "fixture-session") return "\0fixture-session"; if (id === "fixture-link") return "\0fixture-link"; if (id === "fixture-image") return "\0fixture-image"; },
       load(id) {
+        if (id === "\0fixture-navigation") return `const router = { refresh() { window.dispatchEvent(new Event('fixture-refresh')); } }; export function useRouter() { return router; }`;
         if (id === "\0fixture-session") return `import { useSyncExternalStore } from 'react'; export function useSession() { return useSyncExternalStore((notify) => { window.addEventListener('fixture-session', notify); return () => window.removeEventListener('fixture-session', notify); }, () => window.fixtureSignedIn ? 'signed-in' : 'signed-out', () => 'unknown'); }`;
         if (id === "\0fixture-link") return `import { createElement } from 'react'; export default function Link({ prefetch, ...props }) { return createElement('a', props); }`;
         // The admin fixture's candidates carry no artwork, so the image component is never rendered.
