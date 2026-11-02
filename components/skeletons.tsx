@@ -19,9 +19,9 @@ export function SectionSkeleton() {
   return (
     <div role="status" aria-label="Loading">
       <Bone className="mb-4 h-6 w-40" />
-      <div className="page-bleed no-scrollbar flex gap-4 overflow-hidden md:gap-6">
+      <div className="page-bleed no-scrollbar flex gap-3 overflow-hidden md:gap-4">
         {Array.from({ length: 8 }, (_, index) => (
-          <PosterSkeleton key={index} className="w-32 shrink-0 sm:w-40 lg:w-44" />
+          <PosterSkeleton key={index} className="w-36 shrink-0 sm:w-44 lg:w-48" />
         ))}
       </div>
     </div>
@@ -69,5 +69,5 @@ export function PageSkeleton() {
 }
 
 export function HeroSkeleton() {
-  return <Bone className="h-[26rem] w-full rounded-none sm:h-[30rem] lg:h-[36rem]" />;
+  return <Bone className="h-[32rem] w-full rounded-none sm:h-[36rem] lg:h-[40rem]" />;
 }

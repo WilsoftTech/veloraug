@@ -97,7 +97,7 @@ export function SearchInput({ query, scope }: SearchInputProps) {
           const value = event.target.value;
           timerRef.current = window.setTimeout(() => navigate(value), DEBOUNCE_MS);
         }}
-        className="peer h-12 w-full rounded-default border border-border bg-canvas-subtle/80 pl-12 pr-12 text-base text-foreground placeholder:text-muted/80 transition-[border-color,box-shadow] focus:border-highlight focus:shadow-focus focus-visible:outline-none [&::-webkit-search-cancel-button]:appearance-none"
+        className="peer h-14 w-full rounded-lg border border-border bg-surface pl-12 pr-12 text-base text-foreground placeholder:text-muted transition-[border-color,box-shadow] focus:border-highlight focus:shadow-focus focus-visible:outline-none [&::-webkit-search-cancel-button]:appearance-none"
       />
       <button
         type="button"

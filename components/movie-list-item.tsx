@@ -4,9 +4,9 @@ import { PosterImage } from "@/components/media-image";
 import { Rating } from "@/components/rating";
 import type { TitleSummary } from "@/types/catalogue";
 
-/** Glass panel (DESIGN.md → Glass Cards) holding compact rows. */
+/** Saved-title grid, retaining a separate touch target for each item's action. */
 export function MovieList({ children }: { children: ReactNode }) {
-  return <ul className="rounded-lg border border-border bg-surface px-4 backdrop-blur-md md:px-6">{children}</ul>;
+  return <ul className="grid grid-cols-2 gap-x-4 gap-y-8 sm:grid-cols-3 md:grid-cols-4 md:gap-x-6 lg:grid-cols-5 xl:grid-cols-6">{children}</ul>;
 }
 
 interface MovieListItemProps {
@@ -23,9 +23,9 @@ interface MovieListItemProps {
 export function MovieListItem({ item, href, typeLabel, action }: MovieListItemProps) {
   const body = (
     <>
-      <PosterImage path={item.posterPath} title={item.title} sizes="56px" className="w-14 shrink-0 rounded-default" />
-      <div className="min-w-0">
-        <p className="truncate text-body-md font-semibold sm:text-body-lg">{item.title}</p>
+      <PosterImage path={item.posterPath} title={item.title} sizes="(min-width: 1280px) 15vw, (min-width: 1024px) 19vw, (min-width: 768px) 24vw, (min-width: 640px) 32vw, 48vw" className="rounded-md ring-1 ring-border" />
+      <div className="mt-2 min-w-0">
+        <p className="truncate text-label-lg">{item.title}</p>
         <p className="mt-1 flex flex-wrap items-center gap-x-2 text-body-sm text-muted">
           {item.releaseYear && <span>{item.releaseYear}</span>}
           {item.releaseYear && <span aria-hidden>·</span>}
@@ -36,10 +36,10 @@ export function MovieListItem({ item, href, typeLabel, action }: MovieListItemPr
       </div>
     </>
   );
-  const rowClass = "flex min-w-0 flex-1 items-center gap-4 py-3";
+  const rowClass = "block min-w-0 transition-colors hover:text-highlight";
 
   return (
-    <li className="flex items-center gap-2 border-b border-border last:border-b-0">
+    <li className="relative min-w-0">
       {href ? (
         <Link href={href} className={rowClass}>
           {body}
@@ -47,7 +47,7 @@ export function MovieListItem({ item, href, typeLabel, action }: MovieListItemPr
       ) : (
         <div className={rowClass}>{body}</div>
       )}
-      {action}
+      {action && <div className="absolute right-2 top-2 rounded-default border border-border bg-background/95">{action}</div>}
     </li>
   );
 }

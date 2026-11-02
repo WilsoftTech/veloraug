@@ -24,7 +24,7 @@ export function TitleHero({ title, facts, actions }: TitleHeroProps) {
         <div className="absolute inset-0 hidden bg-gradient-to-r from-background/70 to-transparent md:block" />
       </div>
 
-      <div className="page-container relative pt-44 sm:pt-60 lg:pt-56">
+      <div className="page-container relative pt-48 sm:pt-64 lg:pt-72">
         <div className="flex flex-col gap-6 md:flex-row md:items-end md:gap-8">
           <PosterImage
             path={title.posterPath}
@@ -34,7 +34,7 @@ export function TitleHero({ title, facts, actions }: TitleHeroProps) {
             className="hidden w-44 shrink-0 shadow-float ring-1 ring-border md:block lg:w-56"
           />
           <div className="min-w-0 max-w-3xl">
-            <h1 className="text-balance text-headline-md md:text-headline-lg">{title.title}</h1>
+            <h1 className="text-balance text-headline-md font-extrabold md:text-headline-lg">{title.title}</h1>
             {title.originalTitle && title.originalTitle !== title.title && (
               <p className="mt-2 text-body-md italic text-muted">{title.originalTitle}</p>
             )}
@@ -51,7 +51,7 @@ export function TitleHero({ title, facts, actions }: TitleHeroProps) {
                   <li key={genre.id}>
                     <Link
                       href={browseHref(title.kind, { genre: genre.slug })}
-                      className="inline-flex min-h-8 items-center rounded-full border border-highlight/30 bg-accent/12 px-3 text-label-tag uppercase text-highlight transition-colors hover:border-highlight/60"
+                      className="inline-flex min-h-11 items-center rounded-sm border border-border bg-surface px-3 text-label-tag uppercase text-foreground transition-colors hover:border-highlight/60"
                     >
                       {genre.name}
                     </Link>

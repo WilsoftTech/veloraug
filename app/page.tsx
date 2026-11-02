@@ -67,7 +67,7 @@ export default function HomePage() {
         <Hero />
       </Suspense>
 
-      <div className="page-container space-y-12 pt-10 sm:space-y-16 sm:pt-14">
+      <div className="page-container space-y-10 pt-6 sm:space-y-12 sm:pt-8">
         <Suspense fallback={<SectionSkeleton />}>
           <CatalogueRows />
         </Suspense>

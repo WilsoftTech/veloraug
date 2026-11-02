@@ -12,8 +12,8 @@ export default async function MyListPage({ searchParams }: PageProps<"/my-list">
   const mediaType = tab === "series" ? "tv" : (parseMediaType(tab ?? "") ?? "movie");
 
   return (
-    <div className="page-container max-w-3xl py-6 sm:py-8">
-      <h1 className="text-headline-md md:text-headline-lg">My List</h1>
+    <div className="page-container py-6 sm:py-8">
+      <h1 className="text-headline-md">My List</h1>
       <div className="mt-4 max-w-xs">
         <TabLinks
           label="My List sections"
@@ -23,7 +23,7 @@ export default async function MyListPage({ searchParams }: PageProps<"/my-list">
           ]}
         />
       </div>
-      <div className="mt-2">
+      <div className="mt-6">
         <WatchlistView mediaType={mediaType} />
       </div>
     </div>

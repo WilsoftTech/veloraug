@@ -56,7 +56,7 @@ export function BackdropImage({ path, sizes, alt = "", preload, className }: Omi
       <div
         aria-hidden
         className={cn(
-          "absolute inset-0 bg-canvas-subtle bg-[radial-gradient(ellipse_at_70%_20%,rgb(37_99_235/0.4),transparent_60%)]",
+          "absolute inset-0 bg-canvas-subtle bg-[radial-gradient(ellipse_at_70%_20%,rgb(229_9_20/0.25),transparent_60%)]",
           className,
         )}
       />

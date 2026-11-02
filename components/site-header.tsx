@@ -15,20 +15,24 @@ const NAV_ITEMS = [
 
 export function SiteHeader() {
   return (
-    <header className="sticky top-0 z-40 border-b border-border bg-background/70 backdrop-blur-xl">
-      <div className="page-container flex h-14 items-center gap-8 md:h-16">
+    <header className="sticky top-0 z-40 border-b border-border bg-background/95 backdrop-blur-md">
+      <div className="page-container flex min-h-16 items-center gap-4 lg:min-h-20 lg:gap-6">
         <Link href="/" className="inline-flex min-h-11 items-center">
-          <Logo eager className="h-8 md:h-9" />
+          <span className="flex flex-col items-start">
+            <Logo eager className="h-7 md:h-8" />
+            <span className="pl-1.5 text-[0.5625rem] font-semibold uppercase tracking-widest text-muted">Ugandan VJ translations</span>
+          </span>
         </Link>
 
-        <nav aria-label="Primary" className="hidden md:block">
+        <nav aria-label="Primary" className="hidden lg:block">
           <ul className="flex items-center gap-1">
             {NAV_ITEMS.map((item) => (
               <li key={item.href}>
                 <NavLink
                   href={item.href}
-                  className="relative inline-flex min-h-11 items-center px-3 text-label-lg text-muted transition-colors hover:text-foreground"
-                  activeClassName="text-foreground after:absolute after:inset-x-3 after:bottom-1 after:h-0.5 after:rounded-full after:bg-highlight after:shadow-[0_0_12px_rgb(56_189_248/0.6)]"
+                  className="relative inline-flex min-h-11 items-center whitespace-nowrap rounded-default px-3 text-label-lg transition-colors hover:bg-surface hover:text-foreground"
+                  activeClassName="bg-surface-elevated text-highlight"
+                  inactiveClassName="text-muted"
                 >
                   {item.label}
                 </NavLink>
@@ -42,7 +46,7 @@ export function SiteHeader() {
           <Link
             href="/search"
             aria-label="Search"
-            className="grid size-11 place-items-center rounded-default text-foreground transition-colors hover:bg-surface-elevated md:hidden"
+            className="grid size-11 place-items-center rounded-default text-foreground transition-colors hover:bg-surface-elevated lg:hidden"
           >
             <Search aria-hidden className="size-5" />
           </Link>

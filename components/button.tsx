@@ -6,7 +6,7 @@ const base =
   "inline-flex min-h-11 items-center justify-center gap-2 rounded-default px-6 text-label-lg transition duration-150 disabled:pointer-events-none disabled:opacity-50";
 
 const variants: Record<ButtonVariant, string> = {
-  // Solid cobalt; hover deepens the fill and adds a soft halo (DESIGN.md → Buttons).
+  // Solid cinema red, with a subtle halo on hover.
   primary: "bg-accent text-accent-foreground hover:bg-accent-hover hover:shadow-glow active:bg-accent-hover",
   secondary:
     "border border-border bg-surface text-foreground hover:border-highlight/40 hover:bg-surface-elevated active:bg-surface-elevated",

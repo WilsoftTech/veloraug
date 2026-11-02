@@ -69,7 +69,12 @@ export async function CatalogueBrowse({ kind, searchParams }: { kind: CatalogueK
 
   return (
     <div className="page-container py-6 sm:py-8">
-      <h1 className="text-headline-md md:text-headline-lg">{COPY[kind].title}</h1>
+      <h1 className="flex items-center gap-3 text-headline-md">
+        <span aria-hidden className="grid size-11 place-items-center rounded-default border border-border bg-surface text-highlight">
+          <Film className="size-5" />
+        </span>
+        {COPY[kind].title}
+      </h1>
       <CatalogueFilters kind={kind} filters={filters} genres={genres} vjs={vjs} />
       <section aria-labelledby={`${kind}-results`} className="mt-6">
         <h2 id={`${kind}-results`} className="sr-only">

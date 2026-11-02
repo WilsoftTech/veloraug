@@ -22,13 +22,13 @@ export const metadata: Metadata = {
   applicationName: "Velora UG",
 };
 
-const themeInitializer = `(function(){try{var k=${JSON.stringify(THEME_STORAGE_KEY)},p=localStorage.getItem(k),r=document.documentElement,v=p==="light"||p==="dark"?p:"system";if(v==="system")r.removeAttribute("data-theme");else r.setAttribute("data-theme",v);var d=v==="dark"||(v==="system"&&matchMedia("(prefers-color-scheme: dark)").matches);r.style.colorScheme=d?"dark":"light";var m=document.querySelector('meta[name="theme-color"]');if(m)m.content=d?"#070b14":"#f8f7f4"}catch(e){}})()`;
+const themeInitializer = `(function(){try{var k=${JSON.stringify(THEME_STORAGE_KEY)},p=localStorage.getItem(k),r=document.documentElement,v=p==="light"||p==="dark"?p:"system";if(v==="system")r.removeAttribute("data-theme");else r.setAttribute("data-theme",v);var d=v==="dark"||(v==="system"&&matchMedia("(prefers-color-scheme: dark)").matches);r.style.colorScheme=d?"dark":"light";var m=document.querySelector('meta[name="theme-color"]');if(m)m.content=d?"#000000":"#f8f7f4"}catch(e){}})()`;
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="en" className={`${jakarta.variable} h-full antialiased`} suppressHydrationWarning>
       <head>
-        <meta name="theme-color" content="#070b14" />
+        <meta name="theme-color" content="#000000" />
         <script dangerouslySetInnerHTML={{ __html: themeInitializer }} />
       </head>
       <body className="flex min-h-full flex-col">

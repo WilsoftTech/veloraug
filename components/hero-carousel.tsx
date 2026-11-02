@@ -48,7 +48,7 @@ export function HeroCarousel({ children, label }: { children: ReactNode; label: 
       </div>
 
       {slides.length > 1 && (
-        <div className="page-container pointer-events-none absolute inset-x-0 bottom-1 flex items-center justify-center gap-3 md:bottom-6 md:justify-end">
+        <div className="page-container pointer-events-none absolute inset-x-0 bottom-2 flex items-center justify-center gap-3 md:bottom-5">
           <button
             type="button"
             aria-label="Previous slide"

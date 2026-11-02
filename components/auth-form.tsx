@@ -6,6 +6,7 @@ import { Loader2 } from "lucide-react";
 import { requestPasswordReset, resetPassword, signIn, signUp, type AuthFormState } from "@/app/auth/actions";
 import { buttonClass } from "@/components/button";
 import { Field } from "@/components/form-field";
+import { Logo } from "@/components/logo";
 
 interface AuthFormProps {
   mode: "sign-in" | "sign-up" | "forgot-password" | "reset-password";
@@ -55,14 +56,15 @@ export function AuthForm({ mode, next, callbackFailed = false, passwordReset = f
   const switchHref = next === "/" ? copy.switchHref : `${copy.switchHref}?next=${encodeURIComponent(next)}`;
 
   return (
-    <div className="page-container max-w-md py-8 sm:py-12">
+    <div className="page-container max-w-lg py-10 sm:py-16">
+      <div className="mb-8 flex justify-center"><Logo className="h-9" /></div>
       <h1 className="text-headline-md md:text-headline-lg">{copy.title}</h1>
       <p className="mt-2 text-body-md text-muted">{copy.lead}</p>
       {passwordReset && <p role="status" className="mt-4 text-body-md text-highlight">Password updated. Sign in with your new password.</p>}
 
       <form
         action={formAction}
-        className="mt-6 space-y-5 rounded-lg border border-border bg-surface p-5 backdrop-blur-md sm:p-6"
+        className="mt-6 space-y-5 rounded-lg border border-border bg-surface p-5 sm:p-8"
       >
         <input type="hidden" name="next" value={next} />
 

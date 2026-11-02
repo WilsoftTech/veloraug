@@ -12,7 +12,7 @@ function applyTheme(preference: ThemePreference) {
 
   const dark = preference === "dark" || (preference === "system" && window.matchMedia(DARK_QUERY).matches);
   root.style.colorScheme = dark ? "dark" : "light";
-  document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute("content", dark ? "#070b14" : "#f8f7f4");
+  document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute("content", dark ? "#000000" : "#f8f7f4");
 }
 
 function storedPreference(): ThemePreference {

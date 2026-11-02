@@ -17,9 +17,9 @@ export function MovieSection({ title, items, href }: MovieSectionProps) {
   return (
     <section aria-labelledby={headingId}>
       <SectionHeader id={headingId} title={title} href={href} />
-      <ul className="page-bleed no-scrollbar relative flex snap-x snap-proximity gap-4 overflow-x-auto pb-1 md:gap-6">
+      <ul className="page-bleed no-scrollbar relative flex snap-x snap-proximity gap-3 overflow-x-auto pb-2 md:gap-4">
         {items.map((item) => (
-          <li key={`${item.kind}-${item.id}`} className="w-32 shrink-0 snap-start sm:w-40 lg:w-44">
+          <li key={`${item.kind}-${item.id}`} className="w-36 shrink-0 snap-start sm:w-44 lg:w-48">
             <MovieCard item={item} />
           </li>
         ))}

@@ -14,19 +14,18 @@ const SLIDE_COUNT = 5;
 function HeroSlide({ item, first }: { item: FeaturedTitle; first: boolean }) {
   const vjNames = item.vjs.map((vj) => vj.name);
   return (
-    <div className="relative h-[26rem] sm:h-[30rem] lg:h-[36rem]">
+    <div className="relative h-[32rem] sm:h-[36rem] lg:h-[40rem]">
       <BackdropImage path={item.backdropPath} sizes="100vw" preload={first} />
       {/* The fade keeps text legible over any artwork. Phones stack the copy over most of the hero, so they need
           a denser scrim (WCAG AA against a pure-white backdrop); the side fade only matters once copy sits left. */}
       <div aria-hidden className="absolute inset-0 bg-gradient-to-t from-background via-background/75 via-60% to-background/45 md:via-background/50 md:via-50% md:to-background/10" />
       <div aria-hidden className="absolute inset-0 hidden bg-gradient-to-r from-background/80 via-background/20 to-transparent md:block" />
 
-      <div className="page-container relative flex h-full flex-col justify-end pb-12 md:pb-16">
-        <p className="inline-flex w-fit items-center gap-2 rounded-full border border-highlight/30 bg-accent/12 px-3 py-1 text-label-tag uppercase text-highlight">
-          <span aria-hidden className="size-1.5 rounded-full bg-highlight shadow-[0_0_8px_var(--highlight)]" />
+      <div className="page-container relative flex h-full flex-col justify-end pb-16 md:pb-20">
+        <p className="inline-flex w-fit items-center gap-2 rounded-full bg-accent px-3 py-1.5 text-label-tag uppercase text-accent-foreground">
           Featured
         </p>
-        <h2 className="mt-4 max-w-2xl text-balance text-display-hero-mobile md:text-display-hero">
+        <h2 className="mt-4 max-w-3xl text-balance text-display-hero-mobile uppercase md:text-display-hero">
           {item.title}
         </h2>
         <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-body-md text-foreground/80">
@@ -41,8 +40,8 @@ function HeroSlide({ item, first }: { item: FeaturedTitle; first: boolean }) {
         {item.overview && (
           <p className="mt-3 line-clamp-3 max-w-xl text-body-md text-foreground/80 md:text-body-lg">{item.overview}</p>
         )}
-        <div className="mt-5 flex flex-wrap gap-3">
-          <Link href={titleHref(item.kind, item.slug)} className={buttonClass("primary")}>
+        <div className="mt-6 flex flex-wrap gap-3">
+          <Link href={titleHref(item.kind, item.slug)} className={buttonClass("primary", "min-h-12")}>
             <Play aria-hidden className="size-4 fill-current" />
             View Details
           </Link>

@@ -13,7 +13,7 @@ export function HeaderSearch() {
   if (pathname === "/search") return null;
 
   return (
-    <form action="/search" role="search" className="relative hidden md:block">
+    <form action="/search" role="search" className="relative hidden lg:block">
       <label htmlFor="header-search" className="sr-only">
         Search movies and shows
       </label>
@@ -24,7 +24,7 @@ export function HeaderSearch() {
         type="search"
         autoComplete="off"
         placeholder="Search movies, shows…"
-        className="h-10 w-56 rounded-default border border-border bg-canvas-subtle/80 pl-10 pr-4 text-body-md text-foreground placeholder:text-muted/80 transition-[width,border-color,box-shadow] duration-200 focus:w-72 focus:border-highlight focus:shadow-focus focus-visible:outline-none xl:w-72 xl:focus:w-80"
+        className="h-11 w-40 rounded-default border border-border bg-surface pl-10 pr-3 text-body-sm text-foreground placeholder:text-muted transition-colors focus:border-highlight focus:shadow-focus focus-visible:outline-none 2xl:w-56"
       />
     </form>
   );

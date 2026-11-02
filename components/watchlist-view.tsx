@@ -5,7 +5,7 @@ import { Bookmark, X } from "lucide-react";
 import { buttonClass } from "@/components/button";
 import { EmptyState } from "@/components/empty-state";
 import { MovieList, MovieListItem } from "@/components/movie-list-item";
-import { ListSkeleton } from "@/components/skeletons";
+import { GridSkeleton } from "@/components/skeletons";
 import { MUTATION_MESSAGES } from "@/components/watchlist-button";
 import { mediaTypeLabel, watchlistRefKey } from "@/lib/utils";
 import { useWatchlist } from "@/lib/watchlist";
@@ -53,7 +53,7 @@ export function WatchlistView({ mediaType }: { mediaType: MediaType }) {
   }
 
   // Storage and the session are only readable in the browser; avoid flashing a false empty state.
-  if (items === null) return <ListSkeleton />;
+  if (items === null) return <GridSkeleton />;
 
   const visible = items.filter((item) => tabOf(item) === mediaType);
   const copy = COPY[mediaType];

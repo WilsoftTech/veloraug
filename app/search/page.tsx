@@ -3,15 +3,15 @@ import { Suspense } from "react";
 import Link from "next/link";
 import { Mic, SearchX, TriangleAlert, TrendingUp } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
-import { MovieList, MovieListItem } from "@/components/movie-list-item";
+import { MovieGrid } from "@/components/movie-grid";
 import { RecentSearches } from "@/components/recent-searches";
 import { RetryButton } from "@/components/retry-button";
 import { SearchInput } from "@/components/search-input";
 import { SearchRecorder } from "@/components/search-recorder";
-import { ListSkeleton } from "@/components/skeletons";
+import { GridSkeleton } from "@/components/skeletons";
 import { TabLinks } from "@/components/tab-links";
 import { searchCatalogue, trendingSearches } from "@/lib/catalogue";
-import { SEARCH_SCOPE_LABELS, firstParam, normalizeSearchQuery, parseSearchScope, searchHref, titleHref } from "@/lib/utils";
+import { SEARCH_SCOPE_LABELS, firstParam, normalizeSearchQuery, parseSearchScope, searchHref } from "@/lib/utils";
 import type { CatalogueSearchResult } from "@/types/catalogue";
 import type { SearchScope } from "@/types/media";
 
@@ -82,16 +82,7 @@ async function SearchResults({ query, scope }: { query: string; scope: SearchSco
       )}
       {titles.length > 0 && (
         <section aria-label="Titles">
-          <MovieList>
-            {titles.map((title) => (
-              <MovieListItem
-                key={`${title.kind}-${title.id}`}
-                item={title}
-                href={titleHref(title.kind, title.slug)}
-                typeLabel={title.kind === "movie" ? "Movie" : "Series"}
-              />
-            ))}
-          </MovieList>
+          <MovieGrid items={titles} />
         </section>
       )}
     </>
@@ -138,7 +129,7 @@ export default async function SearchPage({ searchParams }: PageProps<"/search">)
   const scope = parseSearchScope(params.type);
 
   return (
-    <div className="page-container max-w-3xl py-6 sm:py-8">
+    <div className="page-container py-6 sm:py-8">
       <h1 className="mb-4 text-headline-md md:text-headline-lg">Search</h1>
       <SearchInput query={query} scope={scope} />
 
@@ -153,8 +144,8 @@ export default async function SearchPage({ searchParams }: PageProps<"/search">)
                 href: searchHref(query, value),
               }))}
             />
-            <div className="mt-2">
-              <Suspense key={`${scope}:${query}`} fallback={<ListSkeleton />}>
+            <div className="mt-6">
+              <Suspense key={`${scope}:${query}`} fallback={<GridSkeleton />}>
                 <SearchResults query={query} scope={scope} />
               </Suspense>
             </div>
