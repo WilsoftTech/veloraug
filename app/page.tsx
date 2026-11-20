@@ -1,6 +1,7 @@
 import { Suspense } from "react";
 import Link from "next/link";
 import { Clapperboard } from "lucide-react";
+import { ContinueWatching } from "@/components/continue-watching";
 import { EmptyState } from "@/components/empty-state";
 import { Hero } from "@/components/hero";
 import { MovieSection } from "@/components/movie-section";
@@ -68,6 +69,7 @@ export default function HomePage() {
       </Suspense>
 
       <div className="page-container space-y-10 pt-6 sm:space-y-12 sm:pt-8">
+        <ContinueWatching />
         <Suspense fallback={<SectionSkeleton />}>
           <CatalogueRows />
         </Suspense>

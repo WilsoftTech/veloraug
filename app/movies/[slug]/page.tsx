@@ -39,7 +39,7 @@ export default async function MoviePage({ params }: PageProps<"/movies/[slug]">)
 
   // Playable versions come from the published catalogue (ids and VJ names only).
   const versions = await Promise.all(movie.versions.map(async (version) => ({
-    id: version.id, label: version.vj.name, profile: await getMovieMediaProfile(version.id),
+    id: version.id, label: version.title ? `${version.title} · ${version.vj.name}` : version.vj.name, profile: await getMovieMediaProfile(version.id),
   })));
 
   return (

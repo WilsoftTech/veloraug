@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { manualMovieMetadataSchema, type ManualMovieMetadata } from "@/lib/movie-metadata";
+import { parseAdminCatalogueFilters, type AdminCatalogueFilters } from "@/lib/browse";
 import { z } from "zod";
 import { detectDocument, newCandidate } from "@/lib/discovery/events";
 import { inspectCandidate, type CatalogueMatch, type InspectionPorts } from "@/lib/discovery/pipeline";
@@ -26,7 +28,10 @@ import type { KnownVj } from "@/types/ingestion";
  * Errors carry fixed database codes only.
  */
 
-export type DiscoveryRpc = (fn: string, args: Record<string, unknown>) => Promise<{ data: unknown; error: { message?: string; code?: string; details?: string | null } | null }>;
+/** The Telegram bots whose recorded media the verification worker can be asked to check. */
+export type MediaBotType = "movie" | "series";
+
+export type DiscoveryRpc =(fn: string, args: Record<string, unknown>) => Promise<{ data: unknown; error: { message?: string; code?: string; details?: string | null } | null }>;
 
 export class DiscoveryStoreError extends Error {
   constructor(readonly code: string, readonly detail: string | null = null) {
@@ -82,7 +87,7 @@ const claimSchema = z.object({
   caption: z.string().max(4096).nullable(), identity: z.string().regex(/^tg1-[a-f0-9]{64}$/).nullable(),
   // The reviewer's confirmed film and VJ (migration 20261011112745). Absent on a database without it; null until confirmed.
   confirmed_selection: z.object({ title: z.string().max(300).nullable(), year: z.number().int().nullable(), vj_text: z.string().max(100).nullable(),
-    vj_id: z.number().int().positive(), tmdb_id: z.number().int().positive(), snapshot: candidateSchema.shape.snapshot.unwrap() }).nullable().optional(),
+    vj_id: z.number().int().positive(), tmdb_id: z.number().int().positive().nullable(), manual_movie_id:z.number().int().positive().optional(), snapshot: candidateSchema.shape.snapshot.unwrap() }).nullable().optional(),
 });
 const health = z.object({
   candidates: z.number(), pending: z.number(), awaiting_review: z.number(), approved: z.number(), published: z.number(),
@@ -152,7 +157,7 @@ const toTmdb = (snapshot: ReviewCandidate["choices"][number]) => ({ tmdbId: snap
 export function databasePersistence(rpc: DiscoveryRpc, options: { channelId: number; consumer?: string; leaseSeconds?: number; inspectionLeaseSeconds?: number }): DiscoveryPersistence & { consumer: string; release(): Promise<void>; health(now: Date): Promise<DiscoveryHealth>;
   verifyOne(key: string, media: InspectionPorts["media"], now: () => Date, leaseSeconds?: number): Promise<{ outcome: string; evidence: ChannelMediaEvidence | null }>;
   verificationDue(limit: number, retrySeconds: number): Promise<string[]>;
-  verifyMediaNext(media: InspectionPorts["media"], now: () => Date, leaseSeconds?: number, retrySeconds?: number): Promise<{ outcome: string; evidence: ChannelMediaEvidence | null }> } {
+  verifyMediaNext(media: InspectionPorts["media"], now: () => Date, leaseSeconds?: number, retrySeconds?: number, botTypes?: readonly MediaBotType[]): Promise<{ outcome: string; evidence: ChannelMediaEvidence | null }> } {
   const consumer = options.consumer ?? randomUUID();
   const leaseSeconds = options.leaseSeconds ?? 120;
   const inspectionLease = options.inspectionLeaseSeconds ?? 120;
@@ -209,7 +214,7 @@ export function databasePersistence(rpc: DiscoveryRpc, options: { channelId: num
       const transient = verification ? transientMediaFailure(verification) : null;
       if (!verification || transient) return fail(transient ?? "inspection_provider_failed");
       const result: ReviewCandidate = { ...newCandidate(event, now().toISOString()), revision: claim.revision, attempts: claim.attempts, title: selected.title, year: selected.year,
-        vjText: selected.vj_text, vjId: selected.vj_id, tmdbId: selected.tmdb_id, identity: "proposed", choices: [selected.snapshot], snapshot: selected.snapshot };
+        vjText: selected.vj_text, vjId: selected.vj_id, tmdbId: selected.tmdb_id, identity: "proposed", choices: selected.snapshot.tmdb_id === null ? [] : [selected.snapshot], snapshot: selected.snapshot };
       const outcome = String(await call(rpc, "discovery_complete", { p_key: claim.key, p_lease: claim.lease, p_revision: claim.revision, p_result: completionPayload(result, verification, claim.identity) }));
       return { outcome, evidence: verification };
     },
@@ -217,9 +222,16 @@ export function databasePersistence(rpc: DiscoveryRpc, options: { channelId: num
     async verificationDue(limit: number, retrySeconds: number): Promise<string[]> {
       return z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(100).parse(await call(rpc, "discovery_verification_due", { p_limit: limit, p_retry_seconds: retrySeconds }));
     },
-    /** Media-only jobs cover all recorded movie files without claiming or modifying a review. */
-    async verifyMediaNext(media, now, leaseSeconds = 14_400, retrySeconds = 21600) {
-      const raw = await call(rpc, "media_verification_claim", { p_token: randomUUID(), p_lease_seconds: leaseSeconds, p_retry_seconds: retrySeconds });
+    /**
+     * Media-only jobs cover all recorded movie files without claiming or modifying a review. A worker
+     * whose reader can also open the Series channel names both bot types (migration 20261119194500);
+     * without them the original movie-only claim is used, unchanged.
+     */
+    async verifyMediaNext(media, now, leaseSeconds = 14_400, retrySeconds = 21600, botTypes) {
+      const series = botTypes?.includes("series") ?? false;
+      const raw = series
+        ? await call(rpc, "media_verification_claim_v2", { p_token: randomUUID(), p_lease_seconds: leaseSeconds, p_retry_seconds: retrySeconds, p_bot_types: [...new Set(botTypes)] })
+        : await call(rpc, "media_verification_claim", { p_token: randomUUID(), p_lease_seconds: leaseSeconds, p_retry_seconds: retrySeconds });
       if (raw === null) return { outcome: "idle", evidence: null };
       const claim = mediaClaimSchema.parse(raw);
       const key = claim.identity.slice(4);
@@ -258,7 +270,7 @@ export function databasePersistence(rpc: DiscoveryRpc, options: { channelId: num
           // read. The database keeps the confirmed metadata whatever is sent back.
           verification = (await ports.media(event)).verification ?? null;
           result = { ...candidate, title: selected.title, year: selected.year, vjText: selected.vj_text, vjId: selected.vj_id, tmdbId: selected.tmdb_id,
-            identity: "proposed", choices: [selected.snapshot], snapshot: selected.snapshot };
+            identity: "proposed", choices: selected.snapshot.tmdb_id === null ? [] : [selected.snapshot], snapshot: selected.snapshot };
         } else result = await inspectCandidate(candidate, scoped);
       } catch {
         // Never persist provider exception text (tokens/URLs can appear there).
@@ -338,8 +350,9 @@ const viewSchema = z.object({
   identity: z.string().nullable(), identity_state: z.enum(["unknown", "ambiguous", "proposed", "confirmed"]),
   title: z.string().nullable(), year: z.number().nullable(), vj_text: z.string().nullable(), warnings: z.array(z.string()),
   tmdb_id: z.number().nullable(), vj: z.object({ id: z.number(), slug: z.string(), name: z.string(), active: z.boolean() }).nullable(),
-  relation: z.enum(["new_movie", "new_vj", "replacement", "unknown"]), movie_id: z.number().nullable(), duplicate_of: z.string().nullable(),
+  relation: z.enum(["new_movie", "new_vj", "new_part", "replacement", "unknown"]), movie_id: z.number().nullable(), duplicate_of: z.string().nullable(),
   snapshot: z.unknown().nullable(), evidence: evidenceView.nullable(),
+  manual_movie_id: z.number().int().positive().nullable().optional(), manual_metadata: manualMovieMetadataSchema.nullable().optional(),
   rights: z.object({ reference: z.string().nullable(), cleared_by: z.string(), cleared_at: stamp, revision: z.number() }).nullable(),
   approval: z.object({ revision: z.number(), by: z.string(), at: stamp }).nullable(),
   publication: z.object({ movie_slug: z.string(), version_id: z.number(), published_at: z.string().nullable() }).nullable(),
@@ -394,7 +407,7 @@ export function toCandidate(input: unknown): ReviewCandidate {
     retryAt: view.inspection?.retry_at ? Date.parse(view.inspection.retry_at) : 0, lastInspection: view.inspection ? view.inspection.last : undefined,
     error: view.error_code, title: view.title, year: view.year, vjText: view.vj_text, vjId: view.vj?.id ?? null, tmdbId: view.tmdb_id, movieId: view.movie_id,
     identity: view.identity_state, relation: view.relation,
-    choices: view.choices ?? (snapshot ? [snapshot] : []), snapshot, warnings: view.warnings.slice(0, 50),
+    choices: view.manual_movie_id ? [] : view.choices ?? (snapshot ? [snapshot] : []), snapshot, warnings: view.warnings.slice(0, 50),
     evidence: ev ? { mediaKey: ev.identity.slice(4), container: ev.container === "mp4" && ev.media_class !== "unverified", gateway: ev.gateway_compatible,
       browser: ev.playback_ready, accessible: ev.accessible, checkedAt: ev.checked_at,
       reference: `${ev.method}: ${ev.bytes_read} bytes read (${ev.scope === "whole_file" ? "whole file read and decoded" : "bounded check, not full-file integrity"})`.slice(0, 200),
@@ -403,6 +416,7 @@ export function toCandidate(input: unknown): ReviewCandidate {
       inspection: ev.download_status === undefined ? undefined : { scope: ev.scope, download: ev.download_status, sha256: ev.assessment?.verification?.digest.value ?? null } } : null,
     rights: view.rights ? { actor: view.rights.cleared_by, at: view.rights.cleared_at, reference: view.rights.reference, revision: view.rights.revision } : null,
     approval: view.approval ? { actor: view.approval.by, at: view.approval.at, revision: view.approval.revision } : null,
+    manualMovieId: view.manual_movie_id, manualMetadata: view.manual_metadata,
     uploaderSource: null, duplicateOf: view.duplicate_of,
     publication: view.publication ? { movieSlug: view.publication.movie_slug, versionId: view.publication.version_id } : null,
     audit: (view.audit ?? []).slice(-500).map((entry) => ({ at: entry.at, actor: entry.actor ?? (entry.actor_kind === "worker" ? "discovery" : "owner"),
@@ -428,10 +442,42 @@ const adminMovieSchema = z.object({
   versions: z.array(z.object({ id: z.number(), vj: z.string(), availability_status: z.string(), rights_status: z.string() })),
 });
 export type AdminMovie = z.infer<typeof adminMovieSchema>;
+const adminMoviePageSchema = z.object({
+  items: z.array(adminMovieSchema).max(20),
+  next_cursor: z.string().regex(/^[1-9]\d{0,18}$/).refine((value) => BigInt(value) <= BigInt("9223372036854775807")).nullable(),
+});
+export interface AdminMoviePage { items: AdminMovie[]; nextCursor: string | null }
+
+
+const uploadedMovieSchema = z.object({
+  id: z.string().regex(/^[1-9][0-9]*$/), title: z.string().min(1).max(1024), fileName: z.string().max(1024).nullable(),
+  vj: z.string().max(100).nullable(), status: z.string().max(30), sizeBytes: z.number().int().nonnegative().safe().nullable(),
+  receivedAt: z.iso.datetime({ offset: true }), mediaReady: z.boolean(), integrity: z.string().max(60).nullable(), streaming: z.string().max(60).nullable(),
+});
+export type UploadedMovie = z.infer<typeof uploadedMovieSchema>;
+
+const movieMetadataRecord = z.object({ id: z.number().int().positive(), slug: z.string(), updated_at: z.iso.datetime({offset:true}), metadata: manualMovieMetadataSchema.extend({release_date:z.iso.date().nullable()}) });
 
 export function createReviewClient(rpc: DiscoveryRpc) {
   const views = z.array(z.unknown()).max(200);
   return {
+    async movieMetadata(id: number) {
+      const result = await call(rpc, "catalogue_admin_movie_metadata", {p_id:id});
+      return result === null ? null : movieMetadataRecord.parse(result);
+    },
+    async manualMovies() {
+      try { return z.array(z.object({id:z.number().int().positive(),title:z.string(),year:z.number().int().nullable()})).max(200).parse(await call(rpc,"catalogue_admin_manual_movies",{})); }
+      catch (error) { if (error instanceof DiscoveryStoreError && error.code === "command_unavailable") return null; throw error; }
+    },
+    async saveMovieMetadata(id: number, updatedAt: string, metadata: ManualMovieMetadata) {
+      return movieMetadataRecord.parse(await call(rpc,"catalogue_admin_save_metadata",{p_id:id,p_updated_at:updatedAt,p_metadata:manualMovieMetadataSchema.parse(metadata)}));
+    },
+    async saveManualReview(key: string, revision: number, vjId: number, metadata: ManualMovieMetadata | null, existingMovieId: number | null) {
+      return toCandidate(await call(rpc,"discovery_review_manual_metadata",{p_key:key,p_revision:revision,p_vj_id:vjId,p_metadata:metadata === null ? null : manualMovieMetadataSchema.parse(metadata),p_existing_movie_id:existingMovieId}));
+    },
+    async listUploads(query = ""): Promise<UploadedMovie[]> {
+      return z.array(uploadedMovieSchema).max(200).parse(await call(rpc, "discovery_upload_list", { p_query: query.slice(0, 300) || null, p_limit: 200 }));
+    },
     async list(filter: { status?: string | null; query?: string | null; limit?: number } = {}): Promise<ReviewCandidate[]> {
       return views.parse(await call(rpc, "discovery_review_list", { p_status: filter.status || null, p_query: filter.query?.slice(0, 300) || null, p_limit: filter.limit ?? 100 })).map(toCandidate);
     },
@@ -477,6 +523,19 @@ export function createReviewClient(rpc: DiscoveryRpc) {
     async movies(limit = 100): Promise<AdminMovie[] | null> {
       try {
         return z.array(adminMovieSchema).max(200).parse(await call(rpc, "catalogue_admin_movies", { p_limit: limit }));
+      } catch (failure) {
+        if (failure instanceof DiscoveryStoreError && failure.code === "command_unavailable") return null;
+        throw failure;
+      }
+    },
+    /** Full-catalogue search, with filtering before the keyset page limit. Null only on an older schema. */
+    async moviePage(filters: AdminCatalogueFilters): Promise<AdminMoviePage | null> {
+      const parsed = parseAdminCatalogueFilters({ q: filters.q, status: filters.status, cursor: filters.cursor ?? undefined });
+      try {
+        const page = adminMoviePageSchema.parse(await call(rpc, "catalogue_admin_movie_page", {
+          p_query: parsed.q || null, p_status: parsed.status || null, p_before_id: parsed.cursor, p_limit: 20,
+        }));
+        return { items: page.items, nextCursor: page.next_cursor };
       } catch (failure) {
         if (failure instanceof DiscoveryStoreError && failure.code === "command_unavailable") return null;
         throw failure;

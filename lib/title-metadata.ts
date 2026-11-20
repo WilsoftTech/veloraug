@@ -1,10 +1,11 @@
 import type { Metadata } from "next";
+import { isPosterPath } from "@/lib/artwork";
 import { summarize, titleHref } from "@/lib/utils";
 import type { MovieDetail, SeriesDetail } from "@/types/catalogue";
 
 /** Absolute CDN URL for a catalogue record's stored TMDB artwork path (Open Graph needs a full URL). */
 function artworkUrl(path: string | null, width: 500 | 780) {
-  return path ? `https://image.tmdb.org/t/p/w${width}${path}` : undefined;
+  return path ? isPosterPath(path) ? path : `https://image.tmdb.org/t/p/w${width}${path}` : undefined;
 }
 
 /** Detail-page metadata, derived only from the published catalogue record. */

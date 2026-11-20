@@ -217,7 +217,7 @@ export async function digestPackets(ffmpeg: MediaTool, path: string, selection: 
 
 /** Decode the entire primary video/audio, without producing a rendition. */
 export async function validatePlayback(ffmpeg: MediaTool,path: string,run: Runner=runProcess): Promise<void> {
-  const result=await run(ffmpeg.path,["-hide_banner","-v","error","-nostdin","-protocol_whitelist","file,pipe","-err_detect","explode","-xerror","-threads","2","-i",path,"-map","0:v:0","-map","0:a:0","-f","null","-"],{timeoutMs:60*60*1000,maxStdoutBytes:64*1024});
+  const result=await run(ffmpeg.path,["-hide_banner","-v","error","-nostdin","-protocol_whitelist","file,pipe","-err_detect","explode","-xerror","-threads","2","-i",path,"-map","0:v:0","-map","0:a:0","-fps_mode:v","passthrough","-enc_time_base:v","demux","-f","null","-"],{timeoutMs:60*60*1000,maxStdoutBytes:64*1024});
   if(result.timedOut)throw new Error("upload_decode_timeout");
   if(result.code!==0 || result.stderrTail.trim())throw new Error("upload_media_corrupt");
 }
@@ -275,13 +275,14 @@ export interface DecodeResult { outcome: "decoded" | "decode_failed" | "decode_t
  * lib/ingestion/original-verification.ts). `window` seeks first and decodes
  * only that long: a test that the file can be entered at that point. A message
  * on stderr is a failure even when FFmpeg exits 0, which is how it reports a
- * file that ends early.
+ * file that ends early. Preserve input frame timing: the null output's default
+ * frame-rate time base can round distinct VFR timestamps into duplicate DTS.
  */
 export async function decodeStreams(ffmpeg: MediaTool, path: string, streams: { video: number; audio: readonly number[] }, window: { start: number; seconds: number } | null = null, run: Runner = runProcess, timeoutMs = 2 * 60 * 60 * 1000): Promise<DecodeResult> {
   let seconds = 0, frames = 0;
   const result = await run(ffmpeg.path, ["-hide_banner", "-v", "error", "-nostdin", "-protocol_whitelist", "file,pipe", "-err_detect", "explode", "-xerror", "-threads", "2",
     ...(window ? ["-ss", window.start.toFixed(3)] : []), "-i", path, "-map", `0:${streams.video}`, ...streams.audio.flatMap((index) => ["-map", `0:${index}`]),
-    ...(window ? ["-t", window.seconds.toFixed(3)] : []), "-progress", "pipe:1", "-nostats", "-f", "null", "-"],
+    ...(window ? ["-t", window.seconds.toFixed(3)] : []), "-fps_mode:v", "passthrough", "-enc_time_base:v", "demux", "-progress", "pipe:1", "-nostats", "-f", "null", "-"],
   { timeoutMs, maxStdoutBytes: 0, onLine: (line) => {
     const [key, value] = line.split("=");
     if (key === "frame" && /^\d+$/.test(value ?? "")) frames = Number(value);

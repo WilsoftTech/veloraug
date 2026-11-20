@@ -47,6 +47,12 @@ export interface MtcuteReaderConfig {
   forbiddenBotIds: string[];
   /** The Movies channel in Bot API form (-100…). */
   moviesChannelId: string;
+  /**
+   * The Series channel in Bot API form, when episodes are served. It is held to the same
+   * least-privilege check as Movies, but readiness depends on Movies only: while the Series
+   * channel is unavailable, episode reads fail and movie reads continue.
+   */
+  seriesChannelId?: string;
   /** How long a resolved document (and its file reference) is reused, per movie version. */
   documentCacheTtlMs?: number;
   /** Interval of the periodic channel-access re-check. */
@@ -97,11 +103,12 @@ export function createMtcuteReader(config: MtcuteReaderConfig): MediaReader & { 
   let connection: string = "offline";
   let client: TelegramClient | null = null;
   let channel: tl.RawInputChannel | null = null;
+  let seriesChannel: tl.RawInputChannel | null = null;
   let recheck: ReturnType<typeof setInterval> | null = null;
-  // One slot per movie version (bounded by the catalogue), valid only for the
+  // One slot per channel and version (bounded by the catalogue), valid only for the
   // exact locator identity it was checked against. In-flight resolutions are
   // shared per identity, so a replaced file is never read under the new locator.
-  const documents = new Map<number, CachedDocument>();
+  const documents = new Map<string, CachedDocument>();
   const resolving = new Map<string, Promise<CachedDocument>>();
 
   const setState = (next: ReaderState) => {
@@ -117,24 +124,54 @@ export function createMtcuteReader(config: MtcuteReaderConfig): MediaReader & { 
     await rename(temporary, config.sessionFile);
   }
 
-  async function assertChannelAccess(active: TelegramClient) {
-    const channelId = mtprotoChannelId(config.moviesChannelId);
+  /** Resolves one channel and proves the reader is a member with the least possible admin rights. */
+  async function channelAccess(active: TelegramClient, botApiChatId: string): Promise<tl.RawInputChannel | "channel_unavailable" | "rights_too_broad"> {
+    const channelId = mtprotoChannelId(botApiChatId);
     // Bots use access hash 0 when none is stored, and receive the full channel (https://core.telegram.org/api/peers).
     const resolved = await active.call({ _: "channels.getChannels", id: [{ _: "inputChannel", channelId, accessHash: Long.ZERO }] });
-    const movies = resolved.chats.find((chat) => chat._ === "channel" && chat.id === channelId);
-    if (!movies || movies._ !== "channel" || movies.min || movies.left || !movies.broadcast || !movies.accessHash) {
-      setState("channel_unavailable");
-      throw new GatewayError("document_resolution_failed");
-    }
-    const input: tl.RawInputChannel = { _: "inputChannel", channelId, accessHash: movies.accessHash };
+    const found = resolved.chats.find((chat) => chat._ === "channel" && chat.id === channelId);
+    if (!found || found._ !== "channel" || found.min || found.left || !found.broadcast || !found.accessHash) return "channel_unavailable";
+    const input: tl.RawInputChannel = { _: "inputChannel", channelId, accessHash: found.accessHash };
     const participant = await active.call({ _: "channels.getParticipant", channel: input, participant: { _: "inputPeerSelf" } });
     const self = participant.participant;
     const rights = self._ === "channelParticipantAdmin" ? grantedRights(self.adminRights) : null;
     if (!rights || rights.some((right) => !RIGHTS_ALLOWED.has(right))) {
-      setState("rights_too_broad");
+      // Name the excess rights (fixed Telegram flag names, no identifiers) so the operator knows what to switch off.
+      for (const right of rights?.filter((name) => !RIGHTS_ALLOWED.has(name)) ?? ["not_admin"]) logger.warn({ event: "reader_channel_right", code: right });
+      return "rights_too_broad";
+    }
+    return input;
+  }
+
+  async function assertChannelAccess(active: TelegramClient) {
+    const movies = await channelAccess(active, config.moviesChannelId);
+    if (typeof movies === "string") {
+      setState(movies);
       throw new GatewayError("document_resolution_failed");
     }
-    channel = input;
+    channel = movies;
+    if (!config.seriesChannelId) return;
+    // The Series channel never affects readiness: on any failure episodes stop, movies continue.
+    let series: Awaited<ReturnType<typeof channelAccess>> | "telegram_unavailable";
+    try {
+      series = await channelAccess(active, config.seriesChannelId);
+    } catch (error) {
+      // Telegram's error name (e.g. CHANNEL_INVALID, CHANNEL_PRIVATE) is a fixed label without identifiers.
+      if (RpcError.is(error) && error.code < 500 && error.code >= 0) {
+        seriesChannel = null;
+        logger.warn({ event: "reader_series_channel", state: "refused", code: error.text });
+        return;
+      }
+      series = "telegram_unavailable";
+    }
+    if (typeof series === "string") {
+      // A transport error keeps the last verdict; a definite refusal withdraws Series access.
+      if (series !== "telegram_unavailable") seriesChannel = null;
+      logger.warn({ event: "reader_series_channel", state: series });
+      return;
+    }
+    if (seriesChannel === null) logger.info({ event: "reader_series_channel", state: "ready" });
+    seriesChannel = series;
   }
 
   async function start() {
@@ -222,10 +259,10 @@ export function createMtcuteReader(config: MtcuteReaderConfig): MediaReader & { 
   }
 
   /** Fetches the document behind the locator and checks it is exactly the catalogued file. */
-  async function resolveDocument(locator: MediaLocator, signal: AbortSignal): Promise<CachedDocument> {
+  async function resolveDocument(locator: MediaLocator, source: tl.RawInputChannel, signal: AbortSignal): Promise<CachedDocument> {
     const active = client;
-    if (!active || !channel) throw new GatewayError("mtproto_disconnected");
-    const reply = await active.call({ _: "channels.getMessages", channel, id: [{ _: "inputMessageID", id: locator.messageId }] }, { abortSignal: signal });
+    if (!active) throw new GatewayError("mtproto_disconnected");
+    const reply = await active.call({ _: "channels.getMessages", channel: source, id: [{ _: "inputMessageID", id: locator.messageId }] }, { abortSignal: signal });
     if (reply._ === "messages.messagesNotModified") throw new GatewayError("document_resolution_failed");
     const message = reply.messages.find((m) => m._ === "message" && m.id === locator.messageId);
     const media = message && message._ === "message" ? message.media : undefined;
@@ -248,19 +285,27 @@ export function createMtcuteReader(config: MtcuteReaderConfig): MediaReader & { 
     };
   }
 
-  async function documentFor(locator: MediaLocator, signal: AbortSignal, refresh: boolean): Promise<{ doc: CachedDocument; rpcs: number }> {
+  async function documentFor(locator: MediaLocator, source: tl.RawInputChannel, signal: AbortSignal, refresh: boolean): Promise<{ doc: CachedDocument; rpcs: number }> {
     const identity = locatorIdentity(locator);
-    const cached = documents.get(locator.movieVersionId);
+    const slot = `${locator.chatId}:${locator.movieVersionId}`;
+    const cached = documents.get(slot);
     if (!refresh && cached && cached.identity === identity && Date.now() - cached.fetchedAt < cacheTtl) return { doc: cached, rpcs: 0 };
     let pending = resolving.get(identity);
     if (!pending) {
       // Concurrent readers share one resolution; it is not tied to any single request's signal.
-      pending = resolveDocument(locator, new AbortController().signal).finally(() => resolving.delete(identity));
+      pending = resolveDocument(locator, source, new AbortController().signal).finally(() => resolving.delete(identity));
       resolving.set(identity, pending);
     }
     const doc = await abortable(pending, signal);
-    documents.set(locator.movieVersionId, doc);
+    documents.set(slot, doc);
     return { doc, rpcs: 1 };
+  }
+
+  /** The channel a locator's document must be in: Movies, or the configured Series channel. */
+  function sourceFor(locator: MediaLocator): tl.RawInputChannel | null {
+    if (locator.chatId === config.moviesChannelId) return channel;
+    if (config.seriesChannelId && locator.chatId === config.seriesChannelId) return seriesChannel;
+    return null;
   }
 
   function classify(error: unknown, signal: AbortSignal): GatewayError {
@@ -277,7 +322,8 @@ export function createMtcuteReader(config: MtcuteReaderConfig): MediaReader & { 
   async function readPart(locator: MediaLocator, offset: number, limit: number, signal: AbortSignal) {
     const active = client;
     if (!active || !readiness().ready) throw new GatewayError("mtproto_disconnected");
-    if (locator.chatId !== config.moviesChannelId) throw new GatewayError("document_resolution_failed");
+    const source = sourceFor(locator);
+    if (!source) throw new GatewayError("document_resolution_failed");
     let rpcCount = 0;
     let refreshed = false;
     let forceRefresh = false;
@@ -285,7 +331,7 @@ export function createMtcuteReader(config: MtcuteReaderConfig): MediaReader & { 
     try {
       // At most three attempts: the first, one after a fresh file reference, one after a DC redirect.
       for (let attempt = 0; attempt < 3; attempt++) {
-        const { doc, rpcs } = await documentFor(locator, signal, forceRefresh);
+        const { doc, rpcs } = await documentFor(locator, source, signal, forceRefresh);
         forceRefresh = false;
         rpcCount += rpcs + 1;
         try {

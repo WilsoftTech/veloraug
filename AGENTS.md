@@ -1098,7 +1098,7 @@ failures through the existing fenced verification commands. Preserve existing
 identity prerequisites, leases, source bindings, and validation rules; do not
 guess or automatically confirm film or VJ identity.
 
-This authorization does not permit rights clearance, publication approval,
+This verification-only authorization does not permit rights clearance, publication approval,
 media uploads or transfers to Telegram, publication, hosted migrations,
 deployment, push, listener rebuild or restart, or restarting the contained
 batches. Use the existing explicit verification path; keep the pause marker and
@@ -1113,3 +1113,161 @@ permits the media-only queue for recorded movie files, including unconfirmed
 and already published files. Keep media verification required. It grants no
 rights clearance, final approval, publication, upload, listener restart, other
 hosted migration, or reactivation of contained operator batches.
+
+On 2026-11-04, the owner separately authorized the compatible local web changes
+and applying only `20261104201951_multipart_movie_versions.sql` to hosted after
+backup and validation. The owner clarified that the web target is the local app
+only. That migration was applied after an encrypted backup, a private restore
+rehearsal against the actual hosted schema, and disposable database tests. This
+exception grants no rights clearance, title approval or publication, Telegram
+upload or transfer, remote web deployment, listener restart, other hosted
+migration, or reactivation of contained operator batches. Keep the pause marker
+and quarantined guards in place.
+On 2026-11-05, after the automatic approval review required the exact migration
+name, the owner explicitly authorized applying only
+`20261104205725_lettered_movie_parts.sql` to hosted after backup and validation.
+This extends part recognition to letter aliases for existing files and future
+uploads. The web target remains the local app only. This exception grants no
+rights clearance, title approval or publication, Telegram upload or transfer,
+remote deployment, listener restart, other hosted migration, or reactivation of
+contained batches. Preserve the standing-approval pause and quarantined guards.
+
+## Owner-authorized Bloodlines workflow (2026-11-10)
+
+The owner confirmed distribution/streaming rights for **Wrong Turn 5: Bloodlines
+(2012), VJ Ice P**, explicitly authorized its upload, and instructed that this
+rule allow the prepared one-title workflow. This exception overrides the media
+transfer, rights-recording, approval and publication restrictions above **only
+for the following verified original**:
+
+* Source post: Velora_Series post 9 (exact link in the ignored `.velora-ingest` owner record) (preserve unchanged).
+* Film: TMDB `125509`; VJ `1` (VJ Ice P).
+* Source fingerprint: `sf1-078b7fda598f6f5fecfbfe5084b489a43724cf39aa4d83070aa4ddbbd2f55fa6`.
+* Full-file SHA-256: `03e805a988b62fcad077060ae763bfe796bfb249027d3c9fd58356f1c61778b7`.
+* File size: `1,519,441,250` bytes.
+
+The existing guarded one-file movie workflow may upload this original to the
+configured Movies channel and record its ingestion, metadata evaluation,
+owner-confirmed title-specific rights decision, fenced media evidence, and
+revision-bound approval/publication after every normal gate passes. No further
+permission is required for these named steps within this exact scope.
+
+Keep `.velora-ingest/standing-approval.pause` in place. Its presence continues to
+contain the standing publisher and batches; it does **not** prohibit this
+explicitly authorized one-file workflow. Do not remove or weaken quarantined
+entry-point guards, identity checks, source bindings, leases, duplicate or
+replacement checks, full-file verification, rights checks, or revision validation.
+
+This exception permits no other title, batch, standing approval, automatic rights
+clearance, hosted migration, deployment, push, or discovery-listener restart.
+
+
+On 2026-11-11, the owner explicitly authorized applying only
+`20261111193305_discovery_uploader_visibility.sql` after backup and validation.
+It was applied after an encrypted snapshot-consistent backup and a successful
+restore rehearsal against the actual hosted schema. This exception adds only
+reviewer-guarded, read-only visibility of uploader-owned movies on the local
+Discovery page. It grants no rights clearance, approval, publication, media
+transfer, listener restart, remote deployment, other hosted migration, or
+reactivation of contained batches. Preserve the standing-approval pause and
+all existing identity, verification and publication gates.
+
+
+## Owner-authorized named pending titles (2026-11-11)
+
+The owner explicitly confirmed distribution/streaming rights and authorized
+individual guarded rights-recording, final approval and publication for exactly
+these existing Movies-channel media files after their normal gates pass:
+
+* 28 Years Later: The Bone Temple - media 148, TMDB 1272837, VJ Ice P, SHA-256 `372e1dc6abc71f28f9f29300b4555425dbecd1e1832904e90b7ea4a258b27088`.
+* A Nightmare on Elm Street Part 2: Freddy's Revenge - media 160, TMDB 10014, VJ Jingo, SHA-256 `4614ee267fe115bc7017eed9e305e69f7cafd5c244c7cdf882177d72bf3e96f0`.
+* Knightfall - media 149, TMDB 1377900, VJ Ice P, SHA-256 `ec168b58abfcaf021f7cc228e5c88a92e6c0e11f6ba336fe8269d81f2d874cf7`.
+* Redbad - media 157, TMDB 485296, VJ Ice P, SHA-256 `971544a4bd93eef46fddde0b26ecb85296e56c39dbb48ac2eefe4fb540efb5ff`.
+* Runner - media 150, TMDB 1377237, VJ Ice P, SHA-256 `0671951cf8bb8afd335343b22032aa9bc970f035db0dfda61271e44c2fa7e238`.
+* The Forever Purge - media 153, TMDB 602223, VJ Ice P, SHA-256 `93f44d3ab17dc8d8fdabadc9dc1a11bfbb4136a74aa61519da7bbf5bc511b5fb`.
+* The Gentleman - media 152, TMDB 1426968, VJ Ice P, SHA-256 `f33d7235987d4dcf78669769d80ab91dc78813dfdb0b8bf9a00e81a951e75ca1`.
+* The Purge - media 154, TMDB 158015, VJ Ice P, SHA-256 `3f44d184378e225d5e8ff951750182ebe3b066cab97f0c9fa53909acf63f59f1`.
+* The Purge: Anarchy - media 155, TMDB 238636, VJ Ice P, SHA-256 `4ddde4a36b8bf8d1d625251279ad746580fbc98e055077a257cf8cd6d2298ce7`.
+* The Purge: Election Year - media 156, TMDB 316727, VJ Ice P, SHA-256 `1e0a4a7b4d65dee16911de9ae97f082ea5bb3bac3603399dec61e29d42944e9e`.
+
+The exact source keys and review revisions are recorded in
+`.velora-ingest/pending-uploads-20261111/owner-title-authorizations.json`.
+This is a finite title-specific authorization, not standing approval or a
+reactivation of any contained batch. Keep the pause marker and all quarantined
+entry-point guards. Preserve source bindings, identities, leases, duplicate and
+replacement checks, full-file verification and revision validation. Stop a title
+if any gate fails or its bound source changes. This exception permits no other
+title, replacement, upload/transfer, hosted migration, remote deployment, push or
+discovery-listener restart.
+
+
+On 2026-11-12 EAT, in response to the explicit question about the next ten
+verified source files, the owner stated "ALL RIGHTS ARE APPROVED". This records
+rights confirmation only for media 2, 129, 133, 127, 118, 102, 113, 112, 159 and
+109, bound to the exact digests in
+`.velora-ingest/pending-uploads-20261111/owner-additional-rights-confirmation.json`.
+Their correct film/year identities remain unconfirmed; do not infer identity
+from this rights decision or automatically confirm a TMDB match. Use the
+recorded rights decision for these same files after identity review and normal
+gates pass. This grants no standing/future-title rights, contained-batch
+reactivation, media upload/transfer, migration, deployment or listener restart.
+Preserve the pause marker and all existing source, lease and review gates.
+
+
+## Owner-authorized Series-channel Wrong Turn films (2026-11-18)
+
+After a scan of the Velora_Series channel, the owner confirmed the film
+identities below, confirmed distribution/streaming rights, and authorized upload
+and publication ("all are confirmed and authorised. approved, start
+implementation"). As with Bloodlines, this exception overrides the media
+transfer, rights-recording, approval and publication restrictions above **only
+for these exact source originals**, all credited to VJ Ice P (VJ `1`):
+
+* Post 5 - Wrong Turn (2003), TMDB 9902, file `WRONG TURN 01. VJ ICE P.mp4`, 1,407,969,245 bytes, file unique id `AgAEJgACSjaRUw`.
+* Post 6 - Wrong Turn 2: Dead End (2007), TMDB 13186, file `WRONG TURN 02. DEAD END. VJ ICE P.mp4`, 2,025,385,303 bytes, file unique id `AgADASYAAko2kVM`.
+* Post 7 - Wrong Turn 3: Left for Dead (2009), TMDB 23823, file `WRONG TURN 03. LEFT FOR DEAD. VJ ICE P .mp4`, 1,410,674,714 bytes, file unique id `AgADAyYAAko2kVM`.
+* Post 8 - Wrong Turn 4: Bloody Beginnings (2011), TMDB 71672, file `WRONG TURN 4.BLOODY BEGINNINGS_VJ ICE P.mp4`, 1,530,443,096 bytes, file unique id `AgADBCYAAko2kVM`.
+* Post 10 - Wrong Turn 6: Last Resort (2014), TMDB 259072, file `WRONG TURN 6-LAST RESORT.VJ ICE P.mp4`, 1,448,178,567 bytes, file unique id `AgADByYAAko2kVM`.
+* Post 11 - Wrong Turn (2021), TMDB 630586, file `WRONG TURN 7.2021. VJ ICE P.mp4`, 1,752,610,727 bytes, file unique id `AgADCSYAAko2kVM`.
+
+Source posts are the Velora_Series posts (exact links in the ignored owner records) and stay unchanged. Each
+file's full SHA-256 and source fingerprint are bound at local verification and
+recorded in `.velora-ingest/series-wrong-turn-20261118/`; the owner record is
+`owner-authorization.json` there. The existing guarded one-file movie workflow
+may, per file: download it through the local series bot, fully verify it, upload
+that verified original once to the configured Movies channel, record ingestion
+and metadata evaluation, and approve/publish it with the owner's title-specific
+rights confirmation after every normal gate (including current hosted
+whole-file evidence with the same SHA-256) passes. Stop a file if any gate fails
+or its bound source changes.
+
+The owner also authorized local download and full-file verification only of
+Money Heist S01E01-S01E13 (posts 12-24, TMDB TV 71446). Episodes must not be
+labelled as movies; their upload and publication wait for series support.
+
+Keep `.velora-ingest/standing-approval.pause` and the quarantined guards. This
+permits no other title, batch, standing approval, hosted migration, deployment,
+push or discovery-listener restart.
+
+
+## Owner-authorized Money Heist Season 1 series support (2026-11-19)
+
+The owner asked for series support for Money Heist, chose to use the existing
+Velora_Series posts in place (no re-upload), confirmed distribution/streaming
+rights for **Money Heist Season 1, episodes 1-13 (TMDB TV 71446), VJ Ice P**,
+and authorized their publication once series support is built and every gate
+passes. The files are Velora_Series posts 12-24 (exact links in the ignored owner record) (post
+N is episode N-11), each bound to the size, file unique id and full SHA-256
+verified locally on 2026-11-19 and recorded in
+`.velora-ingest/series-money-heist-20261118/owner-authorization.json`.
+
+This permits local series-support code, local migrations and disposable-database
+tests; registering the Series channel and recording these 13 posts as series
+media; whole-file verification of them by the dedicated reader once the owner
+adds it to Velora_Series with all rights off; and owner-path rights recording,
+approval and publication of exactly these 13 episode versions. It does **not**
+authorize any hosted migration: each needs the owner's approval of its exact
+file name, after backup and validation. No Telegram upload or transfer, other
+title or episode, remote deployment, push, listener restart or contained-batch
+reactivation. Keep `.velora-ingest/standing-approval.pause` and the quarantined
+guards; stop an episode if any gate fails or its bound source changes.

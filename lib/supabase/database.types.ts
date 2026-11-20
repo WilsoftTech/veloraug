@@ -58,6 +58,23 @@ export type Database = {
         Update: never;
         Relationships: [];
       };
+      viewing_progress: {
+        // 20261117203000 (local only until separately authorized for hosted): own rows
+        // under RLS. user_id is selectable only for ON CONFLICT; completed and
+        // updated_at are computed by the database, never written by clients. Clients
+        // write through record_movie_progress; no delete grant.
+        Row: {
+          user_id: string;
+          movie_version_id: number;
+          position_seconds: number;
+          duration_seconds: number | null;
+          completed: boolean;
+          updated_at: string;
+        };
+        Insert: never;
+        Update: never;
+        Relationships: [];
+      };
       search_history: {
         Row: {
           query: string;
@@ -232,6 +249,11 @@ export type Database = {
       movie_media_profile: {
         Args: { p_version_id: number };
         Returns: unknown;
+      };
+      /** Returns whether the version now counts as watched (at most 5% left). */
+      record_movie_progress: {
+        Args: { p_movie_version_id: number; p_position_seconds: number; p_duration_seconds: number | null };
+        Returns: boolean;
       };
       record_search: {
         Args: { p_query: string; p_result_count: number; p_scope: string };

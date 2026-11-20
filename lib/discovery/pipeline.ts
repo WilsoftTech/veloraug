@@ -20,7 +20,7 @@ export interface InspectionPorts {
 }
 export function blockers(candidate: ReviewCandidate): string[] {
   const blocked: string[] = [];
-  if (candidate.identity !== "confirmed" || !candidate.snapshot || !candidate.tmdbId) blocked.push("identity_unconfirmed");
+  if (candidate.identity !== "confirmed" || !candidate.snapshot || (!candidate.tmdbId && !candidate.manualMovieId)) blocked.push("identity_unconfirmed");
   if (!candidate.vjId) blocked.push("vj_unresolved");
   if (!candidate.event.media.size || !candidate.event.media.uniqueId) blocked.push("media_identity_incomplete");
   const proof = candidate.evidence;
@@ -72,9 +72,9 @@ export async function inspectNext(store: InboxStore, ports: InspectionPorts, now
   return true;
 }
 
-/** The title without articles or a trailing part number: "In The Cold Light" gives "In Cold Light", "Gaslight 1" gives "Gaslight". */
+/** Lookup fallback only: offer the base film's artwork for numbered files without confirming their identity. */
 const looseTitle = (title: string): string =>
-  title.split(" ").filter((word, index, all) => !/^(?:the|a|an)$/i.test(word) && !(index > 0 && index === all.length - 1 && /^\d{1,2}$/.test(word))).join(" ") || title;
+  title.replace(/\s+(?:(?:part|pt)\s*)?(?:\d{1,2}|[a-z])$/i, "").split(" ").filter((word, index, all) => !/^(?:the|a|an)$/i.test(word) && !(index > 0 && index === all.length - 1 && /^\d{1,2}$/.test(word))).join(" ") || title;
 
 /** One inspection of one candidate (pure apart from the ports). Shared by the JSON and database adapters. */
 export async function inspectCandidate(candidate: ReviewCandidate, ports: InspectionPorts): Promise<ReviewCandidate> {

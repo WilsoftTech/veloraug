@@ -127,6 +127,11 @@ describe("local staging with synthetic bytes only", () => {
     expect(await stageEntry(saved, { ...options, serverRoot: "/elsewhere" }, journal, io)).toEqual({ result: "refused", code: "staging_configuration_changed" });
   });
 
+  it("stages the two supported movie containers by name and refuses any other extension", () => {
+    expect(stagingPaths({ ...entry, fileName: "Synthetic.VJ.Test.mkv" }, options.root).path).toBe(join(options.root, entry.fingerprint, "Synthetic.VJ.Test.mkv"));
+    for (const fileName of ["Synthetic.VJ.Test.avi", "Synthetic.VJ.Test.mkv.exe", "Synthetic.VJ.Test"]) expect(() => stagingPaths({ ...entry, fileName }, options.root)).toThrow("staging_name_unsafe");
+  });
+
   it("requires acknowledgement before cleanup and deletes only the owned copy", async () => {
     await stageEntry(entry, options, journal, io);
     const saved = (await journal.get(entry.fingerprint))!;

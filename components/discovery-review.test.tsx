@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ReviewQueue, ReviewDetail } from "./discovery-review";
+import { ReviewQueue, ReviewDetail, UploadedMovies } from "./discovery-review";
 import { initialInbox, receive } from "@/lib/discovery/events";
 import { fixtureSchema } from "@/lib/discovery/fixtures";
 import type { ReviewCandidate } from "@/lib/discovery/model";
@@ -157,6 +157,14 @@ describe("review UI server markup", () => {
     for (const text of ["role=\"alert\"", "No verification evidence", "No clearance; publication blocked", "Production publication is disabled", "Audit history", "revision", "Existing VJ", "md:grid-cols-3"]) expect(html).toContain(text);
     expect(html).not.toContain("file_id"); expect(html).not.toContain("synthetic-unused");
   });
+  it("offers approval then publication for a separately verified part sharing film artwork", () => {
+    const part: ReviewCandidate = { ...candidate, title: "Tehran — Part 2", status: "awaiting_review", relation: "new_part", gates: [], identity: "confirmed", tmdbId: 9800001, vjId: fixture.vjs[0].id, snapshot: { ...fixture.movies[0], poster_path: "/shared.jpg" } };
+    const capabilities = { review: true, rights: true, publish: true };
+    const detail = (item: ReviewCandidate) => renderToStaticMarkup(<ReviewDetail candidate={item} vjs={fixture.vjs} action={async () => {}} mode="database" capabilities={capabilities} />);
+    expect(detail(part)).toContain('value="approve"');
+    expect(detail(part)).not.toContain('value="publish"');
+    expect(detail({ ...part, status: "approved", approval: { actor: "reviewer", at, revision: part.revision } })).toContain('value="publish"');
+  });
   it("database mode offers approval and publication only to an account that holds the capability", () => {
     const all = { review: true, rights: true, publish: true }, reviewOnly = { review: true, rights: false, publish: false };
     const view = { ...candidate, status: "approved" as const, revision: 3, approval: { actor: "a", at: "2026-10-10T09:00:00.000Z", revision: 3 }, gates: [] as string[], evidence: { mediaKey: "d".repeat(64), container: true, gateway: true, browser: true, accessible: true, checkedAt: "2026-10-10T09:00:00.000Z", reference: "bounded_mtproto_v1: 3072 bytes read (bounded check, not full-file integrity)", mediaClass: "canonical", video: "h264", audio: "aac", reasons: [], bytesRead: 3072 } };
@@ -255,5 +263,22 @@ describe("review UI server markup", () => {
     const css = process.env.VELORA_E38_UI_PREVIEW_CSS ? `<link rel="stylesheet" href="${process.env.VELORA_E38_UI_PREVIEW_CSS}">` : "";
     for (const [name, body] of Object.entries(parts)) writeFileSync(`${directory}/${name}.preview.html`, `<!doctype html><html lang="en" data-theme="dark"><meta name="viewport" content="width=device-width, initial-scale=1">${css}<body><main class="page-container py-6 sm:py-8">${body}</main></body></html>`);
     expect(parts.detail).toContain("Example Movie");
+  });
+});
+
+
+describe("uploaded movies on Discovery", () => {
+  const movie = { id: "162", title: "Wrong Turn 5 Bloodlines", fileName: "Bloodlines.mp4", vj: "VJ Ice P", status: "matched", sizeBytes: 1519441250, receivedAt: "2026-11-11T19:22:56Z", mediaReady: false, integrity: null, streaming: null };
+  it("shows the real upload stage without inventing a channel review or verification pass", () => {
+    const html = renderToStaticMarkup(<UploadedMovies movies={[movie]} />);
+    expect(html).toContain("Wrong Turn 5 Bloodlines"); expect(html).toContain("Matched; awaiting review");
+    expect(html).toContain("Awaiting verification"); expect(html).not.toContain("/admin/discovery/162");
+    expect(html).not.toContain("<button"); expect(html).not.toContain("file_id");
+    expect(renderToStaticMarkup(<UploadedMovies movies={[{ ...movie, mediaReady: true, integrity: "verified", streaming: "verified" }]} />)).toContain("Verified");
+  });
+  it("distinguishes an empty list from a failed load", () => {
+    expect(renderToStaticMarkup(<UploadedMovies movies={[]} />)).toContain("No pending uploaded movies");
+    const error = renderToStaticMarkup(<UploadedMovies movies={[]} error="Uploaded movies could not be loaded." />);
+    expect(error).toContain('role="alert"'); expect(error).not.toContain("No pending uploaded movies");
   });
 });

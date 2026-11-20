@@ -11,6 +11,15 @@ const base = Object.values(inbox.candidates)[0];
 const at = (status: ReviewCandidate["status"], error: string | null = null): ReviewCandidate => ({ ...base, status, error });
 
 describe("admin guidance", () => {
+  it("explains a replacement blocker rather than saying every check passes", () => {
+    const guide = guidance({ ...at("awaiting_review"), gates: ["existing_version_replacement_requires_separate_workflow"] });
+    expect(guide.label).toBe("Existing file needs review");
+    expect(guide.next).toContain("Separate numbered parts can share");
+    expect(guide.next).not.toContain("Every check passes");
+  });
+  it("does not call an otherwise blocked candidate ready to approve", () => {
+    expect(guidance({ ...at("awaiting_review"), gates: ["title_archived"] })).toMatchObject({ label: "Publication blocked" });
+  });
   it("gives every review state a group, a label and a next step", () => {
     for (const status of reviewStates) {
       const guide = guidance(at(status));

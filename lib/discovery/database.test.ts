@@ -208,10 +208,16 @@ describe("reviewer client mapping", () => {
       video_codec: "h264", audio_codec: "aac", accessible: true, gateway_compatible: true, playback_ready: true, bytes_read: 3072, checked_at: "2026-10-10T09:01:00+00:00" },
     rights: null, approval: null, publication: null, blockers, ...extra });
 
+  it("maps manually entered metadata without treating it as a TMDB choice",()=>{
+    const metadata={title:"Manual Film",original_title:null,overview:null,release_date:"2024-05-01",runtime_minutes:null,poster_path:"/posters/11111111-1111-4111-8111-111111111111.webp",backdrop_path:null,genres:["Drama"]};
+    const candidate=toCandidate(view("needs_review",[],{tmdb_id:null,manual_movie_id:12,manual_metadata:metadata,snapshot:{...metadata,tmdb_id:null,genres:[],vote_average:null,vote_count:null}}));
+    expect(candidate).toMatchObject({manualMovieId:12,tmdbId:null,identity:"confirmed",choices:[],snapshot:{tmdb_id:null},status:"awaiting_review"});
+  });
   it("maps database states and gates onto the review model", () => {
     expect(toCandidate(view("needs_review", ["rights_clearance_required"])).status).toBe("awaiting_rights");
     expect(toCandidate(view("needs_review", ["media_verification_required", "rights_clearance_required"])).status).toBe("awaiting_media");
     expect(toCandidate(view("needs_review", [])).status).toBe("awaiting_review");
+    expect(toCandidate(view("needs_review", [], { relation: "new_part", title: "Example Movie — Part 2" }))).toMatchObject({ relation: "new_part", title: "Example Movie — Part 2", status: "awaiting_review" });
     expect(toCandidate(view("matched", [], { approval: { revision: 3, by: "00000000-0000-4000-8000-0000000000a1", at: "2026-10-10T09:06:00+00:00" } })).status).toBe("approved");
     const published = toCandidate(view("published", ["candidate_closed"], { publication: { movie_slug: "example-movie-2024", version_id: 4, published_at: null } }));
     expect(published).toMatchObject({ status: "published", publication: { movieSlug: "example-movie-2024", versionId: 4 }, gates: ["candidate_closed"] });
@@ -306,5 +312,40 @@ describe("Bot API update provider (not started; fakes only)", () => {
     const controller = new AbortController();
     const provider = botApiUpdateProvider(async () => { controller.abort(); return { status: "transient", code: "get_updates_timeout" }; });
     expect(await provider.batch(1, 100, controller.signal)).toEqual([]);
+  });
+});
+
+
+describe("full admin catalogue page adapter", () => {
+  const filters = { q: "  older film  ", status: "archived" as const, cursor: "9007199254740993" };
+  it("sends filters and a bounded cursor page through the reviewer transport", async () => {
+    const rpc = vi.fn(async () => ok({ items: [], next_cursor: "42" }));
+    expect(await createReviewClient(rpc).moviePage(filters)).toEqual({ items: [], nextCursor: "42" });
+    expect(rpc).toHaveBeenCalledWith("catalogue_admin_movie_page", { p_query: "older film", p_status: "archived", p_before_id: "9007199254740993", p_limit: 20 });
+  });
+  it("falls back only for a missing command, never for a refused or malformed response", async () => {
+    expect(await createReviewClient(async () => ({ data: null, error: { code: "PGRST202" } })).moviePage(filters)).toBeNull();
+    await expect(createReviewClient(async () => ({ data: null, error: { code: "42501" } })).moviePage(filters)).rejects.toMatchObject({ code: "review_not_authorized" });
+    await expect(createReviewClient(async () => { throw new Error("offline"); }).moviePage(filters)).rejects.toMatchObject({ code: "store_unavailable" });
+    for (const data of [{ items: [], next_cursor: "0" }, { items: [], next_cursor: "9223372036854775808" }, { items: Array(21).fill({}), next_cursor: null }, null]) {
+      await expect(createReviewClient(async () => ok(data)).moviePage(filters)).rejects.toThrow();
+    }
+  });
+});
+
+
+describe("uploaded movie visibility", () => {
+  const movie = { id: "162", title: "Wrong Turn 5 Bloodlines", fileName: "Bloodlines.mp4", vj: "VJ Ice P", status: "matched", sizeBytes: 1519441250, receivedAt: "2026-11-11T19:22:56+00:00", mediaReady: false, integrity: null, streaming: null };
+  it("uses the reviewer RPC with bounded search and validates its response", async () => {
+    const rpc = vi.fn(async () => ok([movie]));
+    expect(await createReviewClient(rpc).listUploads("Bloodlines")).toEqual([movie]);
+    expect(rpc).toHaveBeenCalledWith("discovery_upload_list", { p_query: "Bloodlines", p_limit: 200 });
+    await createReviewClient(rpc).listUploads("x".repeat(301));
+    expect(rpc).toHaveBeenLastCalledWith("discovery_upload_list", { p_query: "x".repeat(300), p_limit: 200 });
+  });
+  it("fails closed for missing commands, refused access and malformed evidence", async () => {
+    await expect(createReviewClient(async () => ({ data: null, error: { code: "PGRST202" } })).listUploads()).rejects.toMatchObject({ code: "command_unavailable" });
+    await expect(createReviewClient(async () => ({ data: null, error: { code: "42501" } })).listUploads()).rejects.toMatchObject({ code: "review_not_authorized" });
+    await expect(createReviewClient(async () => ok([{ ...movie, mediaReady: "true" }])).listUploads()).rejects.toThrow();
   });
 });

@@ -60,6 +60,19 @@ export async function loadReviewCandidates(query = ""): Promise<{ mode: ReviewMo
     return { mode: "database", candidates: [], error: code === "review_not_authorized" ? "This account has no review permission." : "The review queue is unavailable. Try again shortly." };
   }
 }
+/** Uploader visibility fails independently of the channel review queue during rollout. */
+export async function loadUploadedMovies(query = "") {
+  try {
+    return { uploads: await (await databaseReviewClient()).listUploads(query), error: undefined };
+  } catch (failure) {
+    const code = failure instanceof DiscoveryStoreError ? failure.code : "store_error";
+    console.warn(JSON.stringify({ event: "uploaded_movie_queue_unavailable", code }));
+    return { uploads: [], error: code === "command_unavailable"
+      ? "Uploaded movies will appear here after the review update is enabled."
+      : "Uploaded movies could not be loaded. Try again shortly." };
+  }
+}
+
 /** The reviewer's own-session client (no service-role key, no elevated identity). */
 export async function databaseReviewClient() {
   if (reviewMode() !== "database") throw new Error("database_review_disabled");

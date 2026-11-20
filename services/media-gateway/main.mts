@@ -40,6 +40,7 @@ const reader = createMtcuteReader({
   expectedUsername: config.telegram.readerUsername,
   forbiddenBotIds: config.telegram.ingestionBotIds,
   moviesChannelId: config.telegram.moviesChannelId,
+  seriesChannelId: config.telegram.seriesChannelId,
   logger,
 });
 

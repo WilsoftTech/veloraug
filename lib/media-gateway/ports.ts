@@ -10,7 +10,11 @@
  * It only ever comes from the catalogue resolver.
  */
 export interface MediaLocator {
-  /** The internal movie-version id this location was resolved for (the reader's cache slot). */
+  /**
+   * The internal version id this location was resolved for: a movie version, or an episode
+   * version for an episode locator. The two id spaces overlap; their media live in different
+   * channels, so the reader keys its cache by channel and id together.
+   */
   movieVersionId: number;
   /** Telegram channel id in Bot API form (-100…), as stored in the catalogue. */
   chatId: string;
@@ -43,6 +47,12 @@ export interface CatalogueMediaResolver {
   resolveMovieVersion(movieVersionId: number, signal: AbortSignal): Promise<MediaLocator | null>;
   /** Optional until its additive migration is installed. Never fall back to the stream resolver. */
   resolveDownload?(movieVersionId: number, subject: string, signal: AbortSignal): Promise<MediaLocator | null>;
+  /**
+   * The media of one episode version only if it is publicly playable (published series, ready
+   * version, cleared rights, active VJ, media in the registered Series channel), otherwise null.
+   * Optional until migration 20261119194500 is installed; absent, episode requests are not ready.
+   */
+  resolveEpisodeVersion?(episodeVersionId: number, signal: AbortSignal): Promise<MediaLocator | null>;
 }
 
 export interface ReaderReadiness {

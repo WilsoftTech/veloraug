@@ -53,6 +53,8 @@ export interface StreamTokenDeps {
   /** The verified session's user, or null when signed out. */
   currentUser(): Promise<CurrentUser | null>;
   decide(user: CurrentUser | null, movieVersionId: number): Promise<StreamDecision>;
+  /** Episode streaming (`{ episodeVersionId }`). Omitted: episode requests are invalid. Never used for downloads. */
+  decideEpisode?(user: CurrentUser | null, episodeVersionId: number): Promise<StreamDecision>;
   /** Throws StreamCapabilityConfigError when the issuer is not configured. */
   loadConfig(): StreamCapabilityConfig;
   now?: () => number;
@@ -103,13 +105,18 @@ export function createStreamTokenHandler(deps: StreamTokenDeps, operation: "stre
     }
     const parsed = streamTokenRequestSchema.safeParse(payload);
     if (!parsed.success) return fail("invalid_request");
+    const episodeVersionId = "episodeVersionId" in parsed.data ? parsed.data.episodeVersionId : null;
+    // Episodes are streamed only, and only where the episode decision is wired in.
+    if (episodeVersionId !== null && (operation !== "stream" || !deps.decideEpisode)) return fail("invalid_request");
 
     const user = await deps.currentUser();
     if (user && !limiter.hit(user.id, now())) return fail("rate_limited", { "Retry-After": String(Math.ceil(STREAM_TOKEN_WINDOW_MS / 1000)) });
 
     let decision: StreamDecision;
     try {
-      decision = await deps.decide(user, parsed.data.movieVersionId);
+      decision = episodeVersionId !== null
+        ? await deps.decideEpisode!(user, episodeVersionId)
+        : await deps.decide(user, (parsed.data as { movieVersionId: number }).movieVersionId);
     } catch {
       // The catalogue read already logged its code; nothing here names the version.
       return fail("temporarily_unavailable");

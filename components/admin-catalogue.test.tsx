@@ -25,7 +25,37 @@ describe("admin catalogue markup", () => {
   it("is a read-only list for an account without the publish permission", () => {
     const html = renderToStaticMarkup(<AdminCatalogue movies={movies} vjs={vjs} canManage={false} movieAction={noop} addVjAction={noop} error="Not allowed." />);
     for (const text of ["Example Movie 1", "Withdrawn", "needs the publish permission", 'role="alert"']) expect(html).toContain(text);
-    for (const text of ["<form", "Withdraw from site", "Add a VJ", "Edit title and description"]) expect(html).not.toContain(text);
+    for (const text of ["Withdraw from site", "Add a VJ", "Edit title and description"]) expect(html).not.toContain(text);
+  });
+  it("searches titles, years and VJs together with publication status", () => {
+    const render = (query: { q?: string; status?: string }) => renderToStaticMarkup(<AdminCatalogue movies={movies} vjs={vjs} canManage={false} movieAction={noop} addVjAction={noop} query={query} />);
+    const filtered = render({ q: " vj TEST ", status: "archived" });
+    expect(filtered).toContain("Example Movie 3");
+    for (const id of [1, 2, 4]) expect(filtered).not.toContain(`Example Movie ${id}`);
+    expect(render({ q: "2024", status: "draft" })).toContain("Example Movie 4");
+    expect(render({ q: "Movie 2" })).toContain("Example Movie 2");
+    const empty = render({ q: "missing" });
+    expect(empty).toContain("No matching movies");
+    expect(empty).toContain("Reset filters");
+    expect(empty).toContain("VJ Test");
+  });
+  it("paginates loaded matches, retains filters and bounds malformed or stale pages", () => {
+    const many = Array.from({ length: 45 }, (_, index) => movie(index + 1));
+    const render = (page: string | string[]) => renderToStaticMarkup(<AdminCatalogue movies={many} vjs={[]} canManage={false} movieAction={noop} addVjAction={noop} query={{ q: "Example", status: "published", page }} />);
+    const second = render("2");
+    expect(second).toContain("Showing 21 to 40 of 45");
+    expect(second).toContain('href="/admin/catalogue?q=Example&amp;status=published&amp;page=3"');
+    expect(second).toContain('href="/admin/catalogue?q=Example&amp;status=published"');
+    expect(second).not.toContain('href="/movies/example-movie-1"');
+    expect(render("999")).toContain("Showing 41 to 45 of 45");
+    for (const page of ["-1", "1.5", "Infinity", ["2", "3"]]) expect(render(page)).toContain("Showing 1 to 20 of 45");
+  });
+  it("ignores unknown and repeated filters and keeps the read-only view free of mutations", () => {
+    const html = renderToStaticMarkup(<AdminCatalogue movies={movies} vjs={vjs} canManage={false} movieAction={noop} addVjAction={noop} query={{ q: ["one", "two"], status: "__proto__" }} />);
+    expect(html).toContain("Showing 1 to 4 of 4");
+    expect(html).toContain('method="get"');
+    expect(html).not.toContain('method="POST"');
+    expect(html).not.toContain('name="command"');
   });
   it("shows empty states", () => {
     const html = renderToStaticMarkup(<AdminCatalogue movies={[]} vjs={[]} canManage movieAction={noop} addVjAction={noop} />);
@@ -38,5 +68,25 @@ describe("admin catalogue markup", () => {
     const body = renderToStaticMarkup(<AdminCatalogue movies={movies} vjs={vjs} canManage movieAction={noop} addVjAction={noop} notice="Movie withdrawn. It is no longer on the site and cannot be played." />);
     writeFileSync(`${directory}/catalogue.preview.html`, `<!doctype html><html lang="en" data-theme="dark"><meta name="viewport" content="width=device-width, initial-scale=1">${css}<body><main class="page-container py-6 sm:py-8">${body}</main></body></html>`);
     expect(body).toContain("Catalogue");
+  });
+});
+
+
+describe("server-paged admin catalogue", () => {
+  it("renders the returned page without filtering or slicing it again", () => {
+    const html = renderToStaticMarkup(<AdminCatalogue movies={[]} cataloguePage={{ items: [movie(201)], nextCursor: "201" }} query={{ q: "VJ Match", status: "published", cursor: "221", page: "999" }} vjs={[]} canManage={false} movieAction={noop} addVjAction={noop} />);
+    expect(html).toContain("Example Movie 201");
+    expect(html).toContain("Search movies");
+    expect(html).toContain("1 movie on this page. More matches on the next page.");
+    expect(html).toContain('href="/admin/catalogue?q=VJ+Match&amp;status=published&amp;cursor=201"');
+    expect(html).toContain('href="/admin/catalogue?q=VJ+Match&amp;status=published"');
+    expect(html).not.toContain("loaded movies");
+  });
+  it("offers recovery for a stale or exhausted cursor, with no next page", () => {
+    const html = renderToStaticMarkup(<AdminCatalogue movies={[]} cataloguePage={{ items: [], nextCursor: null }} query={{ q: "missing", cursor: "1" }} vjs={[]} canManage={false} movieAction={noop} addVjAction={noop} />);
+    expect(html).toContain("No matching movies");
+    expect(html).toContain("First page");
+    expect(html).toContain("Reset filters");
+    expect(html).not.toContain(">Next<");
   });
 });

@@ -31,7 +31,7 @@ describe("offline review server authorization", () => {
   it("every admin page and server action calls the authorization guard", () => {
     // Found, not listed: a new admin page cannot be added without the guard.
     const guarded = (readdirSync("app/admin", { recursive: true }) as string[]).map((path) => path.replaceAll("\\", "/")).filter((path) => /(?:^|\/)(?:page|layout|actions)\.tsx?$/.test(path));
-    expect(guarded.sort()).toEqual(["catalogue/actions.ts", "catalogue/page.tsx", "discovery/[id]/page.tsx", "discovery/actions.ts", "discovery/page.tsx", "layout.tsx", "page.tsx", "uploads/[id]/page.tsx", "uploads/actions.ts", "uploads/new/page.tsx", "uploads/page.tsx"]);
+    expect(guarded.sort()).toEqual(["catalogue/[id]/edit/page.tsx", "catalogue/actions.ts", "catalogue/page.tsx", "discovery/[id]/page.tsx", "discovery/actions.ts", "discovery/page.tsx", "layout.tsx", "page.tsx", "uploads/[id]/page.tsx", "uploads/actions.ts", "uploads/new/page.tsx", "uploads/page.tsx"]);
     for (const path of guarded) {
       const text = readFileSync(`app/admin/${path}`, "utf8");
       expect(text, path).toContain(path.startsWith("uploads/") && path !== "uploads/new/page.tsx" ? "await uploadClient()" : "await requireReviewAdmin()");

@@ -332,6 +332,21 @@ export async function findTitles(kind: CatalogueKind, by: "id" | "tmdb_id", ids:
 }
 
 /**
+ * The published movie each public version belongs to (Continue Watching). Versions
+ * that are unknown, withdrawn or of an unpublished movie are absent from the map.
+ */
+export async function findMovieVersionTitles(versionIds: number[]): Promise<Map<number, TitleSummary>> {
+  if (versionIds.length === 0) return new Map();
+  const { data, error } = await catalogueClient().from("movie_versions").select("id, movie_id").in("id", versionIds);
+  if (error) fail("movie versions by id", error);
+  const movies = new Map((await findTitles("movie", "id", [...new Set(data.map((row) => row.movie_id))])).map((movie) => [movie.id, movie]));
+  return new Map(data.flatMap((row) => {
+    const movie = movies.get(row.movie_id);
+    return movie ? [[row.id, movie] as const] : [];
+  }));
+}
+
+/**
  * Whether one movie version is publicly playable now (E2 stream eligibility).
  * The public read policy decides it: the row is visible only for a published
  * movie, a ready and rights-cleared version, and an active VJ. A ready version
@@ -342,6 +357,13 @@ export async function findTitles(kind: CatalogueKind, by: "id" | "tmdb_id", ids:
 export async function isMovieVersionPlayable(versionId: number): Promise<boolean> {
   const { data, error } = await catalogueClient().from("movie_versions").select("id").eq("id", versionId).maybeSingle();
   if (error) fail("movie version eligibility", error);
+  return data !== null;
+}
+
+/** Episode counterpart: the public read policy admits only ready, cleared versions of published series with an active VJ. */
+export async function isEpisodeVersionPlayable(versionId: number): Promise<boolean> {
+  const { data, error } = await catalogueClient().from("episode_versions").select("id").eq("id", versionId).maybeSingle();
+  if (error) fail("episode version eligibility", error);
   return data !== null;
 }
 
@@ -396,7 +418,7 @@ export async function getMovie(slug: string): Promise<MovieDetail | null> {
     runtimeMinutes: data.runtime_minutes,
     genres: toGenres(data.movie_genres),
     vjs: distinctVjs(data.movie_versions),
-    versions: data.movie_versions.map(toVersion).sort((a, b) => a.vj.name.localeCompare(b.vj.name)),
+    versions: data.movie_versions.map(toVersion).sort((a, b) => a.vj.name.localeCompare(b.vj.name) || (a.title ?? "").localeCompare(b.title ?? "", undefined, { numeric: true })),
   };
 }
 

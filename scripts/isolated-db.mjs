@@ -34,7 +34,8 @@ export const ISOLATED = {
 };
 
 const root = join(import.meta.dirname, "..");
-let useContainerSql = false;
+const hasHostPsql = spawnSync("psql", ["--version"], { encoding: "utf8" }).status === 0;
+let useContainerSql = !hasHostPsql;
 
 /** HS256 JWT signed with the isolated PostgREST's synthetic secret (tests only). */
 export function isolatedJwt(claims) {
@@ -45,14 +46,20 @@ export function isolatedJwt(claims) {
 const docker = (...args) => execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 const quiet = (...args) => spawnSync("docker", args, { encoding: "utf8" });
 
-export function psql(sql, { user = "postgres", file = null } = {}) {
+/** `quiet` (-q) drops command tags such as BEGIN or SET, leaving only query results. */
+export function psql(sql, { user = "postgres", file = null, quiet = false } = {}) {
+  const flags = quiet ? ["-At", "-q"] : ["-At"];
   if (useContainerSql) {
+    // Loopback is `trust` inside the image, so dblink (006) would refuse a non-superuser's
+    // password-less connection. Other roles use the network address (scram), exactly as
+    // host psql does; only the bootstrap superuser, which has no password, uses loopback.
+    const host = user === "supabase_admin" ? "127.0.0.1" : ISOLATED.db;
     const result = spawnSync("docker", ["exec", "-i", "-e", `PGPASSWORD=${ISOLATED.password}`, ISOLATED.db,
-      "psql", "-X", "-h", "127.0.0.1", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-At"], {
+      "psql", "-X", "-h", host, "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", ...flags], {
       input: file ? readFileSync(file, "utf8") : sql, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
     return { code: result.status, out: result.stdout ?? "", err: result.stderr ?? "" };
   }
-  const args = ["-X", "-h", "127.0.0.1", "-p", String(ISOLATED.dbPort), "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-At"];
+  const args = ["-X", "-h", "127.0.0.1", "-p", String(ISOLATED.dbPort), "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", ...flags];
   if (file) args.push("-f", file);
   const result = spawnSync("psql", args, { input: file ? undefined : sql, encoding: "utf8", env: { ...process.env, PGPASSWORD: ISOLATED.password, PGCONNECT_TIMEOUT: "5" }, maxBuffer: 64 * 1024 * 1024 });
   return { code: result.status, out: result.stdout ?? "", err: result.stderr ?? "" };
@@ -71,13 +78,13 @@ export function down() {
   quiet("rm", "-f", ISOLATED.rest);
   quiet("rm", "-f", ISOLATED.db);
   quiet("network", "rm", ISOLATED.network);
-  useContainerSql = false;
+  useContainerSql = !hasHostPsql;
 }
 
 /** @param {{rest?: boolean, seed?: boolean, stopBefore?: string|null, internalNetwork?: boolean, excludeMigrations?: string[]}} [options] */
 export function up({ rest = true, seed = false, stopBefore = null, internalNetwork = false, excludeMigrations = [] } = {}) {
   down();
-  useContainerSql = internalNetwork;
+  useContainerSql = internalNetwork || !hasHostPsql;
   docker("network", "create", ...(internalNetwork ? ["--internal"] : []), ISOLATED.network);
   docker("run", "-d", "--name", ISOLATED.db, "--network", ISOLATED.network, "-p", `127.0.0.1:${ISOLATED.dbPort}:5432`,
     "-e", `POSTGRES_PASSWORD=${ISOLATED.password}`, "--tmpfs", "/var/lib/postgresql/data:rw", ISOLATED.image);

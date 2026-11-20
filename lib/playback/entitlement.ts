@@ -1,6 +1,6 @@
 import "server-only";
 import type { CurrentUser } from "@/lib/auth";
-import { isMovieVersionPlayable } from "@/lib/catalogue";
+import { isEpisodeVersionPlayable, isMovieVersionPlayable } from "@/lib/catalogue";
 
 /**
  * The one server-side decision on whether a caller may stream a movie version
@@ -15,7 +15,11 @@ import { isMovieVersionPlayable } from "@/lib/catalogue";
 
 export type StreamDenial = "invalid_version" | "authentication_required" | "not_entitled" | "unavailable";
 
-export type StreamDecision = { allowed: true; movieVersionId: number; subject: string } | { allowed: false; reason: StreamDenial };
+/**
+ * An allowed decision names one version. `target: "episode"` marks an episode version, whose id is
+ * then in `movieVersionId` (the gateway's version field); absent, it is a movie version.
+ */
+export type StreamDecision = { allowed: true; movieVersionId: number; subject: string; target?: "episode" } | { allowed: false; reason: StreamDenial };
 
 export interface EntitlementDeps {
   hasStreamingEntitlement(user: CurrentUser): Promise<boolean>;
@@ -45,4 +49,25 @@ export async function canStreamMovieVersion(user: CurrentUser | null, movieVersi
   if (!(await deps.hasStreamingEntitlement(user))) return { allowed: false, reason: "not_entitled" };
   if (!(await deps.isMovieVersionPlayable(movieVersionId))) return { allowed: false, reason: "unavailable" };
   return { allowed: true, movieVersionId, subject: user.id };
+}
+
+export interface EpisodeEntitlementDeps {
+  hasStreamingEntitlement(user: CurrentUser): Promise<boolean>;
+  isEpisodeVersionPlayable(episodeVersionId: number): Promise<boolean>;
+}
+
+const defaultEpisodeDeps: EpisodeEntitlementDeps = { hasStreamingEntitlement, isEpisodeVersionPlayable };
+
+/**
+ * The same decision for an episode version, in the same order and with the same answers: the access
+ * policy is one rule for movies and series. Throws only when the catalogue cannot be read.
+ */
+export async function canStreamEpisodeVersion(user: CurrentUser | null, episodeVersionId: unknown, deps: EpisodeEntitlementDeps = defaultEpisodeDeps): Promise<StreamDecision> {
+  if (typeof episodeVersionId !== "number" || !Number.isSafeInteger(episodeVersionId) || episodeVersionId <= 0) {
+    return { allowed: false, reason: "invalid_version" };
+  }
+  if (!user) return { allowed: false, reason: "authentication_required" };
+  if (!(await deps.hasStreamingEntitlement(user))) return { allowed: false, reason: "not_entitled" };
+  if (!(await deps.isEpisodeVersionPlayable(episodeVersionId))) return { allowed: false, reason: "unavailable" };
+  return { allowed: true, movieVersionId: episodeVersionId, subject: user.id, target: "episode" };
 }

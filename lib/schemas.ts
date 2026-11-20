@@ -69,9 +69,21 @@ export const searchHistoryKeySchema = z.strictObject({ query: searchQuery, scope
  * else. Strict, so Telegram identifiers, sizes, types, a user id or an earlier
  * token are refused rather than ignored. Identity comes from the session.
  */
-export const streamTokenRequestSchema = z.strictObject({
+const versionId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+/** Exactly one of a movie version or an episode version (episodes: streaming only). */
+export const streamTokenRequestSchema = z.union([
+  z.strictObject({ movieVersionId: versionId }),
+  z.strictObject({ episodeVersionId: versionId }),
+]);
+
+/** Bounds match the viewing_progress CHECKs (20261117203000). Whole seconds; a day at most. */
+const playbackSeconds = z.number().int().min(0).max(86_400);
+export const progressRequestSchema = z.strictObject({
   movieVersionId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  positionSeconds: playbackSeconds,
+  durationSeconds: playbackSeconds.min(1).nullable(),
 });
+export type ProgressRequest = z.infer<typeof progressRequestSchema>;
 
 export type FieldErrors = Record<string, string[] | undefined>;
 

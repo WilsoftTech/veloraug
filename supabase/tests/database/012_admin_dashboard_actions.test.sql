@@ -82,7 +82,7 @@ select is((select array_agg(p.proname::text order by p.proname) from pg_proc p
 select is((select count(*)::int from pg_proc p where p.pronamespace = 'public'::regnamespace and (p.proname like 'catalogue_admin_%' or p.proname in
              ('discovery_review_capabilities', 'discovery_review_approve', 'discovery_review_publish'))
              and has_function_privilege('authenticated', p.oid, 'EXECUTE') and p.prosecdef
-             and p.proconfig @> array['search_path=""']), 7, 'all seven are SECURITY DEFINER with an empty search_path, for authenticated');
+             and p.proconfig @> array['search_path=""' ]), 11, 'all eleven are SECURITY DEFINER with an empty search_path, for authenticated');
 select matches(tests.as_role('anon', null, $$ select public.discovery_review_capabilities()::text $$), '^permission denied', 'anon cannot ask for capabilities');
 select ok((select not has_table_privilege(r, 'private.catalogue_admin_audit', 'SELECT') and not has_table_privilege(r, 'private.catalogue_admin_audit', 'INSERT')
            from unnest(array['anon', 'authenticated', 'service_role']) r order by 1 limit 1), 'no API role can read or write the audit table');

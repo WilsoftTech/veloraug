@@ -77,7 +77,7 @@ export function approvedPublicationScript(candidate: ReviewCandidate): string {
   if (candidate.status !== "approved" && candidate.status !== "publishing") throw new Error("approval_required");
   if (!candidate.approval || candidate.approval.revision !== candidate.revision) throw new Error("stale_approval");
   const missing = blockers(candidate);
-  if (missing.length || !candidate.snapshot || !candidate.tmdbId) throw new Error(missing.join(",") || "metadata_missing");
+  if (missing.length || !candidate.snapshot || !candidate.tmdbId || candidate.snapshot.tmdb_id === null) throw new Error(missing.join(",") || "metadata_missing");
   const source = candidate.uploaderSource;
   if (!source || source.mediaKey !== mediaKey(candidate.event) || source.evaluatedTmdbId !== candidate.tmdbId || source.evaluatedVjId !== candidate.vjId) throw new Error("channel_publication_extension_required");
   return "-- SYNTHETIC OFFLINE REVIEW ONLY. Do not run against hosted resources.\n" + publicationScript({ fingerprint: source.fingerprint as SourceFingerprint, tmdbId: candidate.tmdbId, snapshot: candidate.snapshot, rightsCleared: true });

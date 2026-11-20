@@ -40,6 +40,11 @@ describe("MoviePlayer before Play", () => {
   it("renders nothing without a playable version", () => {
     expect(render([])).toBe('');
   });
+  it("offers separate part labels and version ids for one film and VJ", () => {
+    const html = render([{ id: 11, label: "Tehran — Part 1 · VJ Ice P" }, { id: 12, label: "Tehran — Part 2 · VJ Ice P" }]);
+    expect(html).toContain('<option value="11" selected="">Tehran — Part 1 · VJ Ice P</option>');
+    expect(html).toContain('<option value="12">Tehran — Part 2 · VJ Ice P</option>');
+  });
 
   it("shows no Download control or download text while the server's switch is off, signed in or not", () => {
     const fetchSpy = vi.fn();

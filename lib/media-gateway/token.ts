@@ -8,7 +8,9 @@
  *
  * The claims name an internal Velora version and an operation, never a Telegram
  * identifier. A token authorizes exactly one operation (`stream` or `download`)
- * on exactly one movie version, for a short, capped lifetime. The gateway still
+ * on exactly one movie version (`mv`) or one episode version (`ev`), for a
+ * short, capped lifetime. A token carries exactly one of the two, so a movie
+ * capability never opens an episode with the same number, nor the reverse. The gateway still
  * rechecks publication on every request, so an unpublished title stops being
  * served even while an old token is unexpired.
  */
@@ -18,11 +20,16 @@ export const MEDIA_TOKEN_AUDIENCE = "velora-media-gateway";
 export const MEDIA_OPERATIONS = ["stream", "download"] as const;
 export type MediaOperation = (typeof MEDIA_OPERATIONS)[number];
 
+/** What a capability is for: a movie version or an episode version (separate id spaces). */
+export type MediaTarget = "movie" | "episode";
+
 export interface MediaTokenClaims {
   aud: typeof MEDIA_TOKEN_AUDIENCE;
   op: MediaOperation;
-  /** Internal public.movie_versions id. */
-  mv: number;
+  /** Internal public.movie_versions id (movie capabilities only). */
+  mv?: number;
+  /** Internal public.episode_versions id (episode capabilities only). */
+  ev?: number;
   /** Opaque authorization subject (a user or session id); only used for per-subject limits. */
   sub: string;
   /** Issued at, seconds since the epoch. */
@@ -42,6 +49,7 @@ const MAX_TOKEN_LENGTH = 1024;
 const SEGMENT = /^[A-Za-z0-9_-]+$/;
 const SUBJECT = /^[A-Za-z0-9._:-]{1,128}$/;
 const CLAIM_KEYS = ["aud", "exp", "iat", "jti", "mv", "op", "sub"];
+const EPISODE_CLAIM_KEYS = ["aud", "ev", "exp", "iat", "jti", "op", "sub"];
 /** Clock skew tolerated for `iat` issued slightly in the future. */
 const MAX_CLOCK_SKEW_SECONDS = 30;
 export const MIN_SECRET_BYTES = 32;
@@ -65,17 +73,19 @@ function assertSecret(secret: Uint8Array) {
 
 export function signMediaToken(
   secret: Uint8Array,
-  input: { op: MediaOperation; movieVersionId: number; subject: string; ttlSeconds: number; nowSeconds: number },
+  input: { op: MediaOperation; movieVersionId: number; subject: string; ttlSeconds: number; nowSeconds: number; target?: MediaTarget },
 ): string {
   assertSecret(secret);
   if (!MEDIA_OPERATIONS.includes(input.op)) throw new Error("invalid operation");
   if (!Number.isSafeInteger(input.movieVersionId) || input.movieVersionId <= 0) throw new Error("invalid movie version");
+  // Episodes are stream-only: there is no episode download route.
+  if (input.target === "episode" && input.op !== "stream") throw new Error("invalid operation");
   if (!SUBJECT.test(input.subject)) throw new Error("invalid subject");
   if (!Number.isSafeInteger(input.ttlSeconds) || input.ttlSeconds <= 0) throw new Error("invalid ttl");
   const claims: MediaTokenClaims = {
     aud: MEDIA_TOKEN_AUDIENCE,
     op: input.op,
-    mv: input.movieVersionId,
+    ...(input.target === "episode" ? { ev: input.movieVersionId } : { mv: input.movieVersionId }),
     sub: input.subject,
     iat: input.nowSeconds,
     exp: input.nowSeconds + input.ttlSeconds,
@@ -94,11 +104,14 @@ function parseClaims(json: string): MediaTokenClaims | null {
   }
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const claims = value as Record<string, unknown>;
-  if (Object.keys(claims).sort().join() !== CLAIM_KEYS.join()) return null;
-  const { aud, op, mv, sub, iat, exp, jti } = claims;
+  const keys = Object.keys(claims).sort().join();
+  if (keys !== CLAIM_KEYS.join() && keys !== EPISODE_CLAIM_KEYS.join()) return null;
+  const { aud, op, sub, iat, exp, jti } = claims;
+  const version = claims.mv ?? claims.ev;
   if (aud !== MEDIA_TOKEN_AUDIENCE) return null;
   if (typeof op !== "string" || !(MEDIA_OPERATIONS as readonly string[]).includes(op)) return null;
-  if (typeof mv !== "number" || !Number.isSafeInteger(mv) || mv <= 0) return null;
+  if (typeof version !== "number" || !Number.isSafeInteger(version) || version <= 0) return null;
+  if (claims.ev !== undefined && op !== "stream") return null;
   if (typeof sub !== "string" || !SUBJECT.test(sub)) return null;
   if (typeof iat !== "number" || !Number.isSafeInteger(iat) || typeof exp !== "number" || !Number.isSafeInteger(exp) || exp <= iat) return null;
   if (typeof jti !== "string" || !SEGMENT.test(jti) || jti.length > 64) return null;
@@ -112,7 +125,7 @@ function parseClaims(json: string): MediaTokenClaims | null {
 export function verifyMediaToken(
   secret: Uint8Array,
   token: string | undefined,
-  expected: { op: MediaOperation; movieVersionId: number; nowSeconds: number; maxLifetimeSeconds: number },
+  expected: { op: MediaOperation; movieVersionId: number; nowSeconds: number; maxLifetimeSeconds: number; target?: MediaTarget },
 ): TokenResult {
   assertSecret(secret);
   if (token === undefined || token === "") return { ok: false, code: "authorization_missing" };
@@ -132,6 +145,8 @@ export function verifyMediaToken(
   if (claims.iat > expected.nowSeconds + MAX_CLOCK_SKEW_SECONDS) return { ok: false, code: "authorization_invalid" };
   if (claims.exp <= expected.nowSeconds) return { ok: false, code: "authorization_expired" };
   if (claims.op !== expected.op) return { ok: false, code: "wrong_operation" };
-  if (claims.mv !== expected.movieVersionId) return { ok: false, code: "wrong_version" };
+  // The version must be the expected one of the expected kind; the other kind's claim is absent.
+  const granted = expected.target === "episode" ? claims.ev : claims.mv;
+  if (granted !== expected.movieVersionId) return { ok: false, code: "wrong_version" };
   return { ok: true, claims };
 }

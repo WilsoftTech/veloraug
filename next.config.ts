@@ -15,6 +15,7 @@ const nextConfig: NextConfig = {
     "/*": ["./.velora-ingest/**/*", "./.env*", "./.claude/**/*", "./.agents/**/*", "./.codex/**/*", "./services/**/*"],
   },
   experimental: {
+    serverActions: { bodySizeLimit: "6mb" },
     // Turbopack's dev cache (.next/dev/cache) persists the process environment.
     // A local run holding a per-run secret (the E3 playback proof) turns it off so
     // the secret never reaches disk. Development only; builds are unaffected.

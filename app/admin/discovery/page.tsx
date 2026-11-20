@@ -1,5 +1,5 @@
-import { requireReviewAdmin, loadReviewCandidates, databaseReviewClient } from "@/lib/discovery/runtime";
-import { ReviewQueue } from "@/components/discovery-review";
+import { requireReviewAdmin, loadReviewCandidates, loadUploadedMovies, databaseReviewClient } from "@/lib/discovery/runtime";
+import { ReviewQueue, UploadedMovies } from "@/components/discovery-review";
 import { REVIEW_GROUPS, resultMessage, type ReviewGroup } from "@/lib/discovery/guidance";
 import { listVjs } from "@/lib/catalogue";
 import type { ReviewVj } from "@/lib/discovery/model";
@@ -26,11 +26,12 @@ export default async function DiscoveryQueue({ searchParams }: { searchParams: P
   const search = (params.q ?? "").slice(0, 300);
   const group: ReviewGroup | "" = REVIEW_GROUPS.find((item) => item.id === params.show)?.id ?? "";
   const { mode, candidates, error } = await loadReviewCandidates();
-  const panel = mode === "database" && !error ? await vjPanel() : null;
+  const [panel, uploaded] = await Promise.all([mode === "database" && !error ? vjPanel() : null, mode === "database" ? loadUploadedMovies(search) : null]);
   const message = resultMessage(params.result);
   return <>
     <h1 className="mb-6 text-headline-md">Movie review queue</h1>
     <ReviewQueue candidates={candidates} search={search} group={group} mode={mode} error={error ?? message.error} notice={message.notice} reinspectAll={reinspectAllAction}
       {...(panel ? { vjs: panel.vjs, canAddVj: panel.canAddVj, addVj: addDetectedVjAction } : {})} />
+    {uploaded && <UploadedMovies movies={uploaded.uploads} error={uploaded.error} />}
   </>;
 }

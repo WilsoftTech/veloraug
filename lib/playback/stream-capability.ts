@@ -84,7 +84,7 @@ export function downloadsEnabled(env: Env = process.env): boolean {
   return env.MEDIA_GATEWAY_DOWNLOADS_ENABLED === "true";
 }
 
-export function issueStreamCapability(config: StreamCapabilityConfig, grant: { movieVersionId: number; subject: string }, nowMs: number): StreamCapability {
+export function issueStreamCapability(config: StreamCapabilityConfig, grant: { movieVersionId: number; subject: string; target?: "episode" }, nowMs: number): StreamCapability {
   return issueCapability(config, grant, nowMs, "stream");
 }
 
@@ -94,16 +94,20 @@ export function issueDownloadCapability(config: StreamCapabilityConfig, grant: {
   return { downloadUrl: capability.streamUrl, expiresAt: capability.expiresAt };
 }
 
-function issueCapability(config: StreamCapabilityConfig, grant: { movieVersionId: number; subject: string }, nowMs: number, op: "stream" | "download"): StreamCapability {
+function issueCapability(config: StreamCapabilityConfig, grant: { movieVersionId: number; subject: string; target?: "episode" }, nowMs: number, op: "stream" | "download"): StreamCapability {
   const nowSeconds = Math.floor(nowMs / 1000);
+  const episode = grant.target === "episode";
+  // Episodes are stream-only; signMediaToken refuses an episode download as well.
+  if (episode && op !== "stream") throw new Error("episode downloads are not offered");
   const token = signMediaToken(config.secret, {
     op,
     movieVersionId: grant.movieVersionId,
     subject: grant.subject,
     ttlSeconds: STREAM_TOKEN_TTL_SECONDS,
     nowSeconds,
+    ...(episode ? { target: "episode" as const } : {}),
   });
-  const url = new URL(`/v1/movie-versions/${grant.movieVersionId}/${op}`, config.gatewayOrigin);
+  const url = new URL(`/v1/${episode ? "episode" : "movie"}-versions/${grant.movieVersionId}/${op}`, config.gatewayOrigin);
   url.searchParams.set("token", token);
   return { streamUrl: url.toString(), expiresAt: new Date((nowSeconds + STREAM_TOKEN_TTL_SECONDS) * 1000).toISOString() };
 }

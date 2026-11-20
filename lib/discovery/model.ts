@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { manualMovieSnapshotSchema, manualMovieMetadataSchema } from "@/lib/movie-metadata";
 import { movieSnapshotSchema } from "@/lib/tmdb/ingestion-search";
 export type { KnownVj as ReviewVj } from "@/types/ingestion";
 
@@ -50,8 +51,9 @@ export const candidateSchema = z.strictObject({
   title: z.string().max(300).nullable(), year: z.number().int().nullable(), vjText: z.string().max(100).nullable(),
   vjId: z.number().int().positive().nullable(), tmdbId: z.number().int().positive().nullable(), movieId: z.number().int().positive().nullable(),
   identity: z.enum(["unknown", "ambiguous", "proposed", "confirmed"]),
-  relation: z.enum(["new_movie", "new_vj", "replacement", "unknown"]),
-  choices: z.array(movieSnapshotSchema).max(20), snapshot: movieSnapshotSchema.nullable(),
+  relation: z.enum(["new_movie", "new_vj", "new_part", "replacement", "unknown"]),
+  choices: z.array(movieSnapshotSchema).max(20), snapshot: z.union([movieSnapshotSchema, manualMovieSnapshotSchema]).nullable(),
+  manualMovieId: z.number().int().positive().nullable().optional(), manualMetadata: manualMovieMetadataSchema.nullable().optional(),
   warnings: z.array(z.string().max(100)).max(50), evidence: evidenceSchema.nullable(),
   // The reference is optional on a database with migration 20261018090000: the clearance itself is the decision.
   rights: z.strictObject({ actor: z.string().max(128), at: instant, reference: z.string().min(1).max(200).nullable(), revision: z.number().int().positive() }).nullable(),

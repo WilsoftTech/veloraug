@@ -36,9 +36,7 @@ const missing = (error: unknown) => ["NotFound","NoSuchKey","NoSuchUpload"].incl
 export function createR2Storage(env: Readonly<Record<string,string|undefined>> = process.env): R2Storage {
   const config = z.object({ R2_ACCOUNT_ID: z.string().regex(/^[a-f0-9]{32}$/),R2_ACCESS_KEY_ID: z.string().min(16),R2_SECRET_ACCESS_KEY: z.string().min(16),R2_BUCKET_NAME: z.literal("velora-uploads-staging"),R2_ENDPOINT: z.string().url() }).safeParse(env);
   if (!config.success) throw new Error("r2_configuration_invalid");
-  const endpoint = new URL(config.data.R2_ENDPOINT);
-  if (endpoint.protocol!=="https:" || ![`${config.data.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,`${config.data.R2_ACCOUNT_ID}.eu.r2.cloudflarestorage.com`,`${config.data.R2_ACCOUNT_ID}.fedramp.r2.cloudflarestorage.com`].includes(endpoint.hostname) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || endpoint.pathname!=="/") throw new Error("r2_configuration_invalid");
-  const client = new S3Client({ region: "auto",endpoint: endpoint.origin,credentials: { accessKeyId: config.data.R2_ACCESS_KEY_ID,secretAccessKey: config.data.R2_SECRET_ACCESS_KEY },maxAttempts: 3,requestHandler:{connectionTimeout:5000,requestTimeout:15000,throwOnRequestTimeout:true,socketTimeout:30000},requestChecksumCalculation: "WHEN_REQUIRED",responseChecksumValidation: "WHEN_REQUIRED" });
+  const client = createR2Client(env);
   const target = (raw: R2Reference) => { const ref=r2ReferenceSchema.parse(raw); return { Bucket: ref.bucket,Key: ref.key }; };
   const multipart = (ref: R2Reference) => { if (!ref.upload_id) throw new Error("r2_multipart_missing"); return { ...target(ref),UploadId: ref.upload_id }; };
   async function safe<T>(operation: () => Promise<T>): Promise<T> { try { return await operation(); } catch (error) { if (missing(error)) throw new Error("r2_object_missing"); throw new Error("r2_storage_unavailable"); } }
@@ -54,4 +52,13 @@ export function createR2Storage(env: Readonly<Record<string,string|undefined>> =
     async abandoned() { return safe(async () => { const reply=await client.send(new ListMultipartUploadsCommand({ Bucket: config.data.R2_BUCKET_NAME,Prefix: "admin-uploads/",MaxUploads: 1000 })); if (reply.IsTruncated) throw new Error("r2_orphan_scan_truncated"); return (reply.Uploads ?? []).flatMap((upload) => upload.Key && upload.UploadId && upload.Initiated ? [{ key: upload.Key,uploadId: upload.UploadId,initiated: upload.Initiated }] : []); }); },
     async inventory() { return safe(async () => { const reply=await client.send(new ListObjectsV2Command({Bucket:config.data.R2_BUCKET_NAME,Prefix:"admin-uploads/",MaxKeys:1000}));if(reply.IsTruncated)throw new Error("r2_orphan_scan_truncated");return (reply.Contents??[]).map(item=>z.object({key:z.string().min(1),size:z.number().int().nonnegative()}).parse({key:item.Key,size:item.Size})); }); },
   };
+}
+
+/** Shared private R2 connection for staging and poster objects; no client-side credentials. */
+export function createR2Client(env: Readonly<Record<string,string|undefined>> = process.env): S3Client {
+  const config = z.object({ R2_ACCOUNT_ID: z.string().regex(/^[a-f0-9]{32}$/),R2_ACCESS_KEY_ID: z.string().min(16),R2_SECRET_ACCESS_KEY: z.string().min(16),R2_ENDPOINT: z.string().url() }).safeParse(env);
+  if (!config.success) throw new Error("r2_configuration_invalid");
+  const endpoint = new URL(config.data.R2_ENDPOINT);
+  if (endpoint.protocol!=="https:" || ![`${config.data.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,`${config.data.R2_ACCOUNT_ID}.eu.r2.cloudflarestorage.com`,`${config.data.R2_ACCOUNT_ID}.fedramp.r2.cloudflarestorage.com`].includes(endpoint.hostname) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || endpoint.pathname!=="/") throw new Error("r2_configuration_invalid");
+  return new S3Client({ region: "auto",endpoint: endpoint.origin,credentials: { accessKeyId: config.data.R2_ACCESS_KEY_ID,secretAccessKey: config.data.R2_SECRET_ACCESS_KEY },maxAttempts: 3,requestHandler:{connectionTimeout:5000,requestTimeout:15000,throwOnRequestTimeout:true,socketTimeout:30000},requestChecksumCalculation: "WHEN_REQUIRED",responseChecksumValidation: "WHEN_REQUIRED" });
 }

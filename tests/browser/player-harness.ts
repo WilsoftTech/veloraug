@@ -2,6 +2,8 @@ import { createServer as createViteServer } from "vite";
 import type { AddressInfo } from "node:net";
 import { resolve } from "node:path";
 import { createStreamTokenHandler } from "@/lib/playback/stream-token";
+import { isCompletedPosition, type VersionProgress } from "@/lib/playback/progress";
+import { ProgressStoreError, createProgressHandlers } from "@/lib/playback/progress-route";
 import { GatewayError } from "@/lib/media-gateway/errors";
 import { FIXTURES, startHarness, type HarnessOptions } from "./harness";
 
@@ -15,8 +17,33 @@ export async function startPlayerHarness(gatewayOptions: Pick<HarnessOptions, "f
     /** Cut the next transfer once, when it reaches this byte offset: a connection lost mid-body. */
     cutAtOffset: null as number | null,
     /** Runs at the moment of the cut, before the browser can react to it. */
-    onCut: null as (() => void) | null };
+    onCut: null as (() => void) | null,
+    /** Off: the progress store behaves as if its migration were not applied (hosted today). */
+    progressDeployed: true };
   const requests: { operation: string; versionId: number }[] = [];
+  /** The signed-in viewer's saved progress by version, and every progress request the page made. */
+  const progress = new Map<number, VersionProgress>();
+  const progressRequests: { method: string; body: unknown }[] = [];
+  // The real route handlers over an in-memory store that applies the database's clamp and completion rule.
+  const progressHandlers = createProgressHandlers({
+    accountsConfigured: () => true,
+    session: async () => state.signedIn ? { userId: "00000000-0000-4000-8000-000000000061", store: {
+      async record(entry) {
+        if (!state.progressDeployed) throw new ProgressStoreError("not_deployed");
+        const durationSeconds = entry.durationSeconds ?? progress.get(entry.movieVersionId)?.durationSeconds ?? null;
+        const positionSeconds = durationSeconds === null ? entry.positionSeconds : Math.min(entry.positionSeconds, durationSeconds);
+        const completed = isCompletedPosition(positionSeconds, durationSeconds);
+        progress.set(entry.movieVersionId, { movieVersionId: entry.movieVersionId, positionSeconds, durationSeconds, completed, updatedAt: new Date().toISOString() });
+        return completed;
+      },
+      async read(ids) {
+        if (!state.progressDeployed) throw new ProgressStoreError("not_deployed");
+        return ids.flatMap((id) => progress.get(id) ?? []);
+      },
+      async recent() { return []; },
+    } } : null,
+    describeVersions: async () => new Map(),
+  });
   let gatewayOrigin = "";
   const handler = (operation: "stream" | "download") => createStreamTokenHandler({
     accountsConfigured: () => true,
@@ -56,6 +83,15 @@ export async function startPlayerHarness(gatewayOptions: Pick<HarnessOptions, "f
       configureServer(server) {
         server.middlewares.use(async (req, res, next) => {
           const path = new URL(req.url ?? "/", "http://fixture.invalid");
+          if (path.pathname === "/api/playback/progress") {
+            let text = ""; for await (const chunk of req) text += String(chunk);
+            progressRequests.push({ method: req.method ?? "", body: text ? JSON.parse(text) : path.searchParams.get("versions") });
+            const request = new Request(`${origin}${path.pathname}${path.search}`, req.method === "POST"
+              ? { method: "POST", headers: { "content-type": "application/json", "sec-fetch-site": "same-origin" }, body: text }
+              : { headers: { "sec-fetch-site": "same-origin" } });
+            const result = await (req.method === "POST" ? progressHandlers.POST : progressHandlers.GET)(request);
+            res.writeHead(result.status, Object.fromEntries(result.headers)); res.end(await result.text()); return;
+          }
           if (/^\/api\/media\/(stream|download)-token$/.test(path.pathname)) {
             let text = ""; for await (const chunk of req) text += String(chunk);
             const post = path.pathname.includes("download") ? download : stream;
@@ -100,7 +136,7 @@ export async function startPlayerHarness(gatewayOptions: Pick<HarnessOptions, "f
     },
   });
   gatewayOrigin = gateway.origin;
-  return { origin, gateway, state, requests, async close() {
+  return { origin, gateway, state, requests, progress, progressRequests, async close() {
     if (vite.httpServer && "closeAllConnections" in vite.httpServer) vite.httpServer.closeAllConnections();
     await vite.close(); await gateway.close();
   } };

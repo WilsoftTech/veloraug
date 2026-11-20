@@ -184,6 +184,11 @@ export function guidance(candidate: ReviewCandidate): ReviewGuidance {
       ? "Record the rights decision that allows this movie to be streamed. A contract or licence reference and a document are optional; publication needs a verified rights decision."
       : "Record the contract or licence reference that allows this movie to be streamed. A document is optional; publication needs a verified rights decision." };
   }
+  if (status === "awaiting_review" && candidate.gates?.includes("existing_version_replacement_requires_separate_workflow")) return {
+    group: "action", label: "Existing file needs review",
+    next: "This film and VJ already have a file for this part. A different file for the same part needs replacement review. Separate numbered parts can share the film's poster; each part needs its own media check and publication approval.",
+  };
+  if (status === "awaiting_review" && candidate.gates?.length) return { group: "action", label: "Publication blocked", next: `Resolve the remaining publication gates: ${candidate.gates.map((gate) => gate.replaceAll("_", " ")).join(", ")}.` };
   if (status === "awaiting_review") return { group: "action", label: "Ready to approve", next: "Every check passes. Approve it; publishing is the step after." };
   if (status === "approved") return { group: "action", label: "Approved", next: "Approved at this revision. Publish it to put it on the site." };
   if (status === "publishing") return { group: "progress", label: "Publishing", next: "Publication is running. Refresh to see the result." };

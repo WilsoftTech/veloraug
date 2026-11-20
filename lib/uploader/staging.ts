@@ -29,7 +29,7 @@ const samePath = (a: string, b: string) => process.platform === "win32" ? a.toLo
 /** Deterministic owned paths, never caller-supplied filenames for deletion. */
 export function stagingPaths(entry: JournalEntry, root: string) {
   if (!isFingerprint(entry.fingerprint) || !isAbsolute(root) || resolve(root) === dirname(resolve(root)) || root.split(/[\\/]/).some((s) => s === "." || s === "..")) throw new Error("staging_path_unsafe");
-  if (basename(entry.fileName) !== entry.fileName || !/\.mp4$/i.test(entry.fileName) || /[\\/:\p{Cc}]/u.test(entry.fileName)) throw new Error("staging_name_unsafe");
+  if (basename(entry.fileName) !== entry.fileName || !/\.(mp4|mkv)$/i.test(entry.fileName) || /[\\/:\p{Cc}]/u.test(entry.fileName)) throw new Error("staging_name_unsafe");
   const canonicalRoot = resolve(root);
   // Staging is outside the origin directory; a bad root can never own the origin.
   if (inside(dirname(resolve(entry.absolutePath)), canonicalRoot) || inside(canonicalRoot, resolve(entry.absolutePath))) throw new Error("staging_overlaps_origin");

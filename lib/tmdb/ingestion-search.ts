@@ -1,7 +1,7 @@
 import "server-only";
 import { tmdbFetch } from "@/lib/tmdb/client";
 import * as z from "zod";
-import type { TmdbMovieDetails, TmdbResult, TmdbSearchResponse } from "@/lib/tmdb/types";
+import type { TmdbMovieDetails, TmdbResult, TmdbSearchResponse, TmdbSeasonDetails, TmdbTvDetails } from "@/lib/tmdb/types";
 import type { MatchQuery, TmdbCandidate, TmdbSearch } from "@/types/ingestion";
 
 /**
@@ -90,4 +90,104 @@ export async function fetchMovieSnapshot(tmdbId: number): Promise<MovieSnapshot 
   const details = await tmdbFetch<TmdbMovieDetails>(`/movie/${tmdbId}`);
   if (details === null || details.id !== tmdbId) return null;
   return toMovieSnapshot(details);
+}
+
+/**
+ * Episode publication snapshots: the three objects private.catalogue_publish_episode
+ * takes (series, season, episode), validated here and again by the database.
+ */
+const optionalText = (max: number) => z.string().trim().min(1).max(max).nullable();
+export const seriesSnapshotSchema = z.strictObject({
+  tmdb_id: z.number().int().positive(),
+  title: z.string().trim().min(1).max(300),
+  original_title: optionalText(300),
+  overview: optionalText(10000),
+  first_air_date: z.iso.date().nullable(),
+  poster_path: artworkPath,
+  backdrop_path: artworkPath,
+  vote_average: z.number().min(0).max(10).nullable(),
+  vote_count: z.number().int().nonnegative().nullable(),
+  genres: z.array(z.strictObject({ tmdb_id: z.number().int().positive(), name: z.string().trim().min(1).max(100) })).max(20),
+});
+export const seasonSnapshotSchema = z.strictObject({
+  season_number: z.number().int().min(0).max(9999),
+  title: optionalText(300),
+  overview: optionalText(10000),
+  air_date: z.iso.date().nullable(),
+  poster_path: artworkPath,
+});
+export const episodeSnapshotSchema = z.strictObject({
+  tmdb_id: z.number().int().positive(),
+  episode_number: z.number().int().positive().max(99999),
+  title: optionalText(300),
+  overview: optionalText(10000),
+  air_date: z.iso.date().nullable(),
+  runtime_minutes: z.number().int().positive().max(9999).nullable(),
+  still_path: artworkPath,
+});
+export type SeriesSnapshot = z.infer<typeof seriesSnapshotSchema>;
+export type SeasonSnapshot = z.infer<typeof seasonSnapshotSchema>;
+export type EpisodeSnapshot = z.infer<typeof episodeSnapshotSchema>;
+
+/** Pure mapping of TMDB TV details; null when they do not form a valid snapshot. */
+export function toSeriesSnapshot(details: TmdbTvDetails): SeriesSnapshot | null {
+  const title = blankToNull(details.name);
+  const original = blankToNull(details.original_name);
+  const parsed = seriesSnapshotSchema.safeParse({
+    tmdb_id: details.id,
+    title,
+    original_title: original && original !== title ? original : null,
+    overview: blankToNull(details.overview),
+    first_air_date: blankToNull(details.first_air_date),
+    poster_path: details.poster_path ?? null,
+    backdrop_path: details.backdrop_path ?? null,
+    vote_average: details.vote_average ?? null,
+    vote_count: details.vote_count ?? null,
+    genres: (details.genres ?? []).map((genre) => ({ tmdb_id: genre.id, name: genre.name })),
+  });
+  return parsed.success ? parsed.data : null;
+}
+
+/** Pure mapping of one TMDB season into its season snapshot and episode snapshots, keyed by episode number. */
+export function toSeasonSnapshots(details: TmdbSeasonDetails): { season: SeasonSnapshot; episodes: Map<number, EpisodeSnapshot> } | null {
+  const season = seasonSnapshotSchema.safeParse({
+    season_number: details.season_number,
+    title: blankToNull(details.name),
+    overview: blankToNull(details.overview),
+    air_date: blankToNull(details.air_date),
+    poster_path: details.poster_path ?? null,
+  });
+  if (!season.success) return null;
+  const episodes = new Map<number, EpisodeSnapshot>();
+  for (const episode of details.episodes ?? []) {
+    if (episode.season_number !== undefined && episode.season_number !== details.season_number) return null;
+    const parsed = episodeSnapshotSchema.safeParse({
+      tmdb_id: episode.id,
+      episode_number: episode.episode_number,
+      title: blankToNull(episode.name),
+      overview: blankToNull(episode.overview),
+      air_date: blankToNull(episode.air_date),
+      runtime_minutes: episode.runtime && episode.runtime > 0 ? episode.runtime : null,
+      still_path: episode.still_path ?? null,
+    });
+    // A malformed or repeated episode makes the season unusable rather than silently partial.
+    if (!parsed.success || episodes.has(parsed.data.episode_number)) return null;
+    episodes.set(parsed.data.episode_number, parsed.data);
+  }
+  return { season: season.data, episodes };
+}
+
+/** Details of one approved TMDB series. Null when TMDB has no such series or the payload is unusable. */
+export async function fetchSeriesSnapshot(tmdbId: number): Promise<SeriesSnapshot | null> {
+  const details = await tmdbFetch<TmdbTvDetails>(`/tv/${tmdbId}`);
+  if (details === null || details.id !== tmdbId) return null;
+  return toSeriesSnapshot(details);
+}
+
+/** One season of an approved TMDB series, with its episodes. */
+export async function fetchSeasonSnapshots(tmdbId: number, seasonNumber: number) {
+  if (!Number.isSafeInteger(tmdbId) || tmdbId <= 0 || !Number.isSafeInteger(seasonNumber) || seasonNumber < 0) return null;
+  const details = await tmdbFetch<TmdbSeasonDetails>(`/tv/${tmdbId}/season/${seasonNumber}`);
+  if (details === null || details.season_number !== seasonNumber) return null;
+  return toSeasonSnapshots(details);
 }

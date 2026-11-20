@@ -12,6 +12,8 @@ export interface GatewayLogFields {
   /** Internal Velora movie-version id (not a Telegram identifier). */
   movieVersionId?: number;
   route?: "stream" | "download" | "healthz" | "readyz" | "other";
+  /** Present for episode requests only; movieVersionId then holds the episode-version id. */
+  target?: "episode";
   requestedBytes?: number;
   servedBytes?: number;
   status?: number;
@@ -29,7 +31,7 @@ export interface GatewayLogFields {
 }
 
 const NUMBER_FIELDS = ["movieVersionId", "requestedBytes", "servedBytes", "status", "latencyMs", "firstByteMs", "rpcCount", "readsIssued", "readsPlanned", "activeStreams"] as const;
-const STRING_FIELDS = ["event", "requestId", "route", "code", "outcome", "state"] as const;
+const STRING_FIELDS = ["event", "requestId", "route", "target", "code", "outcome", "state"] as const;
 /** Only short, identifier-like strings are logged; anything else is dropped. */
 const SAFE_STRING = /^[A-Za-z0-9_.:-]{1,64}$/;
 

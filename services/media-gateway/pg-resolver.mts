@@ -20,7 +20,7 @@
 import postgres from "postgres";
 import { GatewayError } from "@/lib/media-gateway/errors";
 import type { CatalogueMediaResolver, MediaLocator } from "@/lib/media-gateway/ports";
-import { GATEWAY_DATABASE_ROLE, RESOLVE_MOVIE_VERSION_SQL, RESOLVE_DOWNLOAD_SQL, locatorFromRow, type ResolverRow } from "@/lib/media-gateway/resolver-sql";
+import { GATEWAY_DATABASE_ROLE, RESOLVE_EPISODE_VERSION_SQL, RESOLVE_MOVIE_VERSION_SQL, RESOLVE_DOWNLOAD_SQL, locatorFromRow, type ResolverRow } from "@/lib/media-gateway/resolver-sql";
 
 export type CatalogueState = "reachable" | "unreachable" | "wrong_identity";
 
@@ -111,6 +111,19 @@ export function createPgResolver(databaseUrl: string, options: { statementTimeou
       } catch (error) {
         if (error instanceof GatewayError) throw error;
         // Driver errors can carry connection details; only the classification leaves this module.
+        throw new GatewayError("catalogue_unavailable");
+      }
+    },
+    async resolveEpisodeVersion(episodeVersionId: number, signal: AbortSignal): Promise<MediaLocator | null> {
+      // Same contract as resolveMovieVersion, over the episode resolver.
+      if (!Number.isSafeInteger(episodeVersionId) || episodeVersionId <= 0) return null;
+      if (signal.aborted) throw new GatewayError("catalogue_unavailable");
+      try {
+        const rows = await readOnly<ResolverRow>(RESOLVE_EPISODE_VERSION_SQL.replace("$1", String(episodeVersionId)), signal);
+        if (rows.length > 1) throw new GatewayError("internal_error");
+        return locatorFromRow(episodeVersionId, rows[0]);
+      } catch (error) {
+        if (error instanceof GatewayError) throw error;
         throw new GatewayError("catalogue_unavailable");
       }
     },

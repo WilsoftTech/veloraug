@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { cache } from "react";
 import { notFound } from "next/navigation";
+import { MoviePlayer } from "@/components/movie-player";
 import { SectionHeader } from "@/components/section-header";
 import { TitleHero } from "@/components/title-hero";
 import { VjList } from "@/components/vj-list";
@@ -27,7 +28,7 @@ function seasonLabel(season: Season) {
   return season.title ?? (season.seasonNumber === 0 ? "Specials" : `Season ${season.seasonNumber}`);
 }
 
-function SeasonSection({ season }: { season: Season }) {
+function SeasonSection({ season, signInHref }: { season: Season; signInHref: string }) {
   const headingId = `season-${season.id}`;
   return (
     <section aria-labelledby={headingId}>
@@ -44,6 +45,17 @@ function SeasonSection({ season }: { season: Season }) {
             <div className="mt-2">
               <VjList vjs={episode.versions.map((version) => version.vj)} />
             </div>
+            {episode.versions.length > 0 && (
+              // Each episode plays on its own; versions come from the published catalogue (ids and VJ names only).
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <MoviePlayer
+                  target="episode"
+                  versions={episode.versions.map((version) => ({ id: version.id, label: version.title ? `${version.title} · ${version.vj.name}` : version.vj.name }))}
+                  signInHref={signInHref}
+                  downloads={false}
+                />
+              </div>
+            )}
           </li>
         ))}
       </ol>
@@ -72,7 +84,7 @@ export default async function SeriesDetailPage({ params }: PageProps<"/series/[s
       <TitleHero title={series} facts={facts} actions={<WatchlistButton item={titleWatchlistItem(series)} variant="primary" />} />
       <div className="page-container mt-14 max-w-4xl space-y-12">
         {series.seasons.map((season) => (
-          <SeasonSection key={season.id} season={season} />
+          <SeasonSection key={season.id} season={season} signInHref={`/sign-in?next=${encodeURIComponent(`/series/${series.slug}`)}`} />
         ))}
       </div>
     </article>

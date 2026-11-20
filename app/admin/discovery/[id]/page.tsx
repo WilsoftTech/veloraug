@@ -1,5 +1,8 @@
 import { notFound } from "next/navigation";
 import { requireReviewAdmin, offlineReviewRuntime, reviewMode, databaseReviewClient } from "@/lib/discovery/runtime";
+import { MovieMetadataForm } from "@/components/movie-metadata-form";
+import { saveMovieMetadata } from "@/app/admin/catalogue/actions";
+import { postersConfigured } from "@/lib/artwork-storage";
 import { ReviewDetail } from "@/components/discovery-review";
 import { addDetectedVjAction, reviewAction } from "../actions";
 import { resultMessage } from "@/lib/discovery/guidance";
@@ -16,7 +19,10 @@ export default async function DiscoveryDetail({ params, searchParams }: { params
     // The capabilities only decide which controls are offered; the database checks each action again.
     const [detail, capabilities] = await Promise.all([client.get(id), client.capabilities()]);
     if (!detail) notFound();
-    return <ReviewDetail candidate={detail.candidate} vjs={detail.vjs} action={reviewAction} {...message} mode="database" capabilities={capabilities} downloads={downloadsEnabled()} addVj={addDetectedVjAction} />;
+    const manualMovies = capabilities?.review ? await client.manualMovies() : null;
+    return <><ReviewDetail candidate={detail.candidate} vjs={detail.vjs} action={reviewAction} {...message} mode="database" capabilities={capabilities} downloads={downloadsEnabled()} addVj={addDetectedVjAction} />
+      {manualMovies && !detail.candidate.publication && !["rejected","duplicate","blocked"].includes(detail.candidate.status) && <div className="mt-6"><MovieMetadataForm target="review" id={id} revision={detail.candidate.revision} initial={detail.candidate.manualMetadata ?? {title:detail.candidate.title ?? ""}} vjs={detail.vjs} vjId={detail.candidate.vjId} existingMovies={manualMovies} action={saveMovieMetadata} postersEnabled={postersConfigured()}/></div>}
+    </>;
   }
   const { store, fixture } = await offlineReviewRuntime();
   const candidate = (await store.read()).candidates[id];

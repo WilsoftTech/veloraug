@@ -39,6 +39,8 @@ const PASSED = [
   "TELEGRAM_MOVIES_BOT_ID",
   "TELEGRAM_SERIES_BOT_ID",
   "TELEGRAM_MOVIES_CHANNEL_ID",
+  // Optional: set, episodes are also served from the Series channel.
+  "TELEGRAM_SERIES_CHANNEL_ID",
   // Optional limits (lib/media-gateway/limits.ts).
   "MEDIA_GATEWAY_MAX_ACTIVE_STREAMS",
   "MEDIA_GATEWAY_MAX_STREAMS_PER_SUBJECT",

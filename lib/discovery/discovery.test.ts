@@ -154,6 +154,32 @@ describe("parsing, matching, VJs and readiness", () => {
     const item = await candidate();
     expect(item).toMatchObject({ identity: "ambiguous", tmdbId: null, status: "awaiting_identity" }); expect(item.choices.map((choice) => choice.tmdb_id)).toEqual([900001]);
   });
+  it.each(["Part1", "Part 2", "PT2", "A", "B", "PartA", "Part B", "PTB", "01", "1", "2"])("offers the base movie's poster for %s while keeping each file unverified", async (part) => {
+    const baseSnapshot = await ports.snapshot(900001);
+    ports.snapshot = async () => ({ ...baseSnapshot!, poster_path: "/shared-poster.jpg" });
+    const search = vi.fn(async (query: { title: string }) => query.title === "Example Movie" ? [{ tmdbId: 900001, title: "Example Movie", originalTitle: null, year: 2024, mediaType: "movie" as const }] : []);
+    ports.search = search;
+    await detect([post(1, 10, "doc", `Example.Movie.${part}.2024.VJ.Test.mp4`)]);
+    await inspectNext(store, ports, now);
+    const item = await candidate();
+    expect(search.mock.calls.map(([query]) => query.title)).toEqual([`Example Movie ${part}`, "Example Movie"]);
+    expect(item.choices).toEqual([expect.objectContaining({ tmdb_id: 900001, poster_path: "/shared-poster.jpg" })]);
+    expect(item).toMatchObject({ tmdbId: null, snapshot: null, status: "awaiting_identity", evidence: null, approval: null });
+    expect(blockers(item)).toContain("media_verification_required");
+    const selected = await decideReview(store, actor, item.id, item.revision, { kind: "correct", fields: { title: item.title!, year: 2024, tmdbId: 900001, vjId: 9001 } }, await ports.vjs(), instant);
+    expect(selected.snapshot?.poster_path).toBe("/shared-poster.jpg");
+    expect(selected.title).toBe(`Example Movie ${part}`);
+    expect(selected.evidence).toBeNull();
+  });
+  it("keeps an exact part-specific movie and its own poster ahead of the fallback", async () => {
+    const baseSnapshot = await ports.snapshot(900001);
+    ports.snapshot = async () => ({ ...baseSnapshot!, title: "Example Movie Part 2", poster_path: "/part-2.jpg" });
+    ports.search = vi.fn(async () => [{ tmdbId: 900001, title: "Example Movie Part 2", originalTitle: null, year: 2024, mediaType: "movie" as const }]);
+    await detect([post(1, 10, "doc", "Example.Movie.Part.2.2024.VJ.Test.mp4")]);
+    await inspectNext(store, ports, now);
+    expect(ports.search).toHaveBeenCalledTimes(1);
+    expect(await candidate()).toMatchObject({ identity: "proposed", snapshot: { title: "Example Movie Part 2", poster_path: "/part-2.jpg" } });
+  });
   it("a caption tmdb tag is offered and proposed, never confirmed", async () => {
     ports.search = async () => [];
     await detect([post(1, 10, "doc", "Wrong.Name.2024.VJ.Test.mp4", "tmdb:movie:900001")]); await inspectNext(store, ports, now);

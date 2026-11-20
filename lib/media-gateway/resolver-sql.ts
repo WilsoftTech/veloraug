@@ -19,6 +19,16 @@ select r.chat_id::text as chat_id, r.message_id, r.file_unique_id, r.file_size_b
   from media_gateway.resolve_movie_version($1::bigint) as r
 `;
 
+/**
+ * The episode counterpart (migration 20261119194500_series_episode_playback.sql): the same five
+ * fields and publication rule for a published series' ready, cleared episode version whose media
+ * is in the registered Series channel. $1 is the internal public.episode_versions id.
+ */
+export const RESOLVE_EPISODE_VERSION_SQL = `
+select r.chat_id::text as chat_id, r.message_id, r.file_unique_id, r.file_size_bytes, r.mime_type
+  from media_gateway.resolve_episode_version($1::bigint) as r
+`;
+
 /** The only database identity the gateway accepts (created by the E1.2A migration). */
 export const GATEWAY_DATABASE_ROLE = "velora_media_gateway";
 /** Separate additive RPC: legacy stream fields/signature remain unchanged. $2 is a verified token UUID. */

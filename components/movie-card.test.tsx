@@ -32,3 +32,15 @@ describe("MovieCard VJ badge", () => {
     expect(html).not.toContain("rounded-full");
   });
 });
+
+describe("MovieCard watched progress (Continue Watching)", () => {
+  it("draws the watched share over the poster and says it to screen readers", () => {
+    const html = renderToStaticMarkup(<MovieCard item={movie([vj(1, "VJ Ice P")])} progress={0.426} />);
+    expect(html).toContain('style="width:43%"');
+    expect(html).toContain('<span class="sr-only">43% watched</span>');
+  });
+
+  it("draws nothing when no progress is given", () => {
+    expect(render(movie([]))).not.toContain("watched");
+  });
+});

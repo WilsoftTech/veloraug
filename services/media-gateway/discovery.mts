@@ -33,6 +33,10 @@ const configSchema = z.object({
   TELEGRAM_MOVIES_BOT_ID: z.string().regex(/^\d{5,15}$/),
   TELEGRAM_MOVIES_BOT_USERNAME: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{3,31}$/),
   TELEGRAM_MOVIES_CHANNEL_ID: z.string().regex(/^-100\d{5,13}$/),
+  // Optional (--verify-uploads only): set, the reader also opens the Series channel and the
+  // media-only queue includes Series-channel documents (migration 20261119194500).
+  TELEGRAM_SERIES_CHANNEL_ID: z.string().regex(/^-100\d{5,13}$/).optional(),
+  TELEGRAM_SERIES_BOT_ID: z.string().regex(/^\d{5,15}$/).optional(),
   ...readerConfigSchema.partial().shape,
   VELORA_DISCOVERY_INSPECTION: z.enum(["disabled", "metadata", "bounded"]).default("disabled"),
   VELORA_DISCOVERY_HEALTH_PORT: z.coerce.number().int().min(1024).max(65535).default(8790),
@@ -71,7 +75,11 @@ async function openVerifier(cfg: z.infer<typeof configSchema>) {
   const database = createDiscoveryPg(cfg.VELORA_DISCOVERY_DATABASE_URL);
   const target = databasePersistence(database.rpc, { channelId: Number(cfg.TELEGRAM_MOVIES_CHANNEL_ID) });
   const reader = createMtcuteReader({ apiId: readerCfg.data.TELEGRAM_MEDIA_API_ID, apiHash: readerCfg.data.TELEGRAM_MEDIA_API_HASH, sessionFile: readerCfg.data.VELORA_DISCOVERY_SESSION_FILE, allowBotLogin: false,
-    expectedBotId: readerCfg.data.TELEGRAM_MEDIA_BOT_ID, expectedUsername: readerCfg.data.TELEGRAM_MEDIA_BOT_USERNAME, forbiddenBotIds: [cfg.TELEGRAM_MOVIES_BOT_ID], moviesChannelId: cfg.TELEGRAM_MOVIES_CHANNEL_ID, logger: createLogger() });
+    expectedBotId: readerCfg.data.TELEGRAM_MEDIA_BOT_ID, expectedUsername: readerCfg.data.TELEGRAM_MEDIA_BOT_USERNAME,
+    forbiddenBotIds: [cfg.TELEGRAM_MOVIES_BOT_ID, ...(cfg.TELEGRAM_SERIES_BOT_ID ? [cfg.TELEGRAM_SERIES_BOT_ID] : [])],
+    moviesChannelId: cfg.TELEGRAM_MOVIES_CHANNEL_ID, seriesChannelId: cfg.TELEGRAM_SERIES_CHANNEL_ID, logger: createLogger() });
+  // Series documents are claimed only by a worker configured to read the Series channel.
+  const botTypes = cfg.TELEGRAM_SERIES_CHANNEL_ID ? (["movie", "series"] as const) : (["movie"] as const);
   const close = async () => {
     abort.abort();
     await reader.stop(); await database.close();
@@ -92,7 +100,7 @@ async function openVerifier(cfg: z.infer<typeof configSchema>) {
     });
   const signalFor = (stop: AbortSignal) => AbortSignal.any([stop, abort.signal, AbortSignal.timeout(VERIFICATION_LEASE_SECONDS * 1000)]);
   const verify = (key: string, stop: AbortSignal = abort.signal) => target.verifyOne(key, mediaFor(signalFor(stop)), () => new Date(), VERIFICATION_LEASE_SECONDS);
-  const next = (stop: AbortSignal) => target.verifyMediaNext(mediaFor(signalFor(stop)), () => new Date(), VERIFICATION_LEASE_SECONDS, cfg.VELORA_DISCOVERY_VERIFY_RETRY_SECONDS);
+  const next = (stop: AbortSignal) => target.verifyMediaNext(mediaFor(signalFor(stop)), () => new Date(), VERIFICATION_LEASE_SECONDS, cfg.VELORA_DISCOVERY_VERIFY_RETRY_SECONDS, botTypes);
   return { target, verify, next, signal: abort.signal, close };
 }
 

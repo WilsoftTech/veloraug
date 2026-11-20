@@ -34,6 +34,10 @@ describe("normalize", () => {
 });
 
 describe("parseFilename: movies", () => {
+  it.each(["01", "1"])("keeps WRONG TURN %s as a movie part candidate with its VJ credit", (part) => {
+    expect(facts(`WRONG TURN ${part}. VJ ICE.mp4`)).toEqual({ inferredKind: "movie", title: `WRONG TURN ${part}`, vjText: "ICE", year: null, season: null, episode: null });
+  });
+
   it("reads title + VJ", () => {
     expect(facts("John Wick VJ Junior.mp4")).toEqual({ inferredKind: "movie", title: "John Wick", vjText: "Junior", year: null, season: null, episode: null });
     expect(parse("John Wick VJ Junior.mp4").confidence).toBe("high");
@@ -118,6 +122,10 @@ describe("parseFilename: movies", () => {
 });
 
 describe("parseFilename: series", () => {
+  it("reads Movie name.S01E01 as season 1 episode 1", () => {
+    expect(facts("Movie name.S01E01.VJ ICE.mp4")).toEqual({ inferredKind: "series", title: "Movie name", vjText: "ICE", year: null, season: 1, episode: 1 });
+  });
+
   it("reads SxxExx", () => {
     expect(facts("Prison Break S01E01 VJ Junior.mp4")).toEqual({ inferredKind: "series", title: "Prison Break", vjText: "Junior", year: null, season: 1, episode: 1 });
   });

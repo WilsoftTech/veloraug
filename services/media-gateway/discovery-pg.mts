@@ -4,6 +4,7 @@ import type { DiscoveryRpc } from "@/lib/discovery/database";
 // Fixed function names, named arguments and casts. Never interpolate a caller's SQL.
 const calls: Record<string, readonly (readonly [string, string])[]> = {
   media_verification_claim: [["p_token", "uuid"], ["p_lease_seconds", "integer"], ["p_retry_seconds", "integer"]],
+  media_verification_claim_v2: [["p_token", "uuid"], ["p_lease_seconds", "integer"], ["p_retry_seconds", "integer"], ["p_bot_types", "text[]"]],
   media_verification_finish: [["p_media_id", "bigint"], ["p_token", "uuid"], ["p_identity", "text"], ["p_evidence", "jsonb"], ["p_error", "text"]],
   discovery_acquire_consumer: [["p_token", "uuid"], ["p_lease_seconds", "integer"]],
   discovery_receive: [["p_token", "uuid"], ["p_chat_id", "bigint"], ["p_deliveries", "jsonb"], ["p_reconciliation", "jsonb"]],
@@ -13,6 +14,12 @@ const calls: Record<string, readonly (readonly [string, string])[]> = {
   discovery_fail: [["p_key", "text"], ["p_lease", "uuid"], ["p_revision", "integer"], ["p_code", "text"]],
   discovery_catalogue_lookup: [["p_title", "text"]], discovery_vjs: [], discovery_health: [], discovery_release_consumer: [["p_token", "uuid"]],
 };
+/** A text[] argument as a Postgres array literal. Only short lowercase labels (bot types) are accepted; the database validates them again. */
+function textArray(value: unknown): string {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 8 || value.some((item) => typeof item !== "string" || !/^[a-z]{1,32}$/.test(item))) throw new Error("discovery_invalid_input");
+  return `{${value.join(",")}}`;
+}
+
 export function createDiscoveryPg(databaseUrl: string) {
   const url = new URL(databaseUrl);
   if (!/^velora_discovery_worker(?:\.[a-z0-9]{10,40})?$/.test(decodeURIComponent(url.username)) || !url.password || !["postgres:", "postgresql:"].includes(url.protocol)) throw new Error("discovery_wrong_database_identity");
@@ -32,7 +39,7 @@ export function createDiscoveryPg(databaseUrl: string) {
     const spec = calls[fn];
     if (!spec || Object.keys(args).length !== spec.length || spec.some(([name]) => !(name in args))) return { data: null, error: { message: "discovery_invalid_input" } };
     try {
-      const values = spec.map(([name, cast]) => args[name] === null ? null : cast === "jsonb" ? sql.json(args[name] as postgres.JSONValue) : String(args[name]));
+      const values = spec.map(([name, cast]) => args[name] === null ? null : cast === "jsonb" ? sql.json(args[name] as postgres.JSONValue) : cast === "text[]" ? textArray(args[name]) : String(args[name]));
       const parameters = spec.map(([name, cast], index) => `${name} => $${index + 1}::${cast}`).join(", ");
       // Only the consumer lease returns a row set; every other command returns one value (jsonb or text).
       const table = fn === "discovery_acquire_consumer";

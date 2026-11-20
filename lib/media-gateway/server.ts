@@ -5,6 +5,8 @@
  *   GET /readyz                                    503 unless the media reader can serve now
  *   GET /v1/movie-versions/{id}/stream?token=…     206 byte ranges of a published version
  *   GET /v1/movie-versions/{id}/download?token=…   original attachment, full or ranged
+ *   GET /v1/episode-versions/{id}/stream?token=…   206 byte ranges of a published episode version
+ *                                                  (stream only; an episode token carries `ev`, never `mv`)
  *   OPTIONS on the media routes                    CORS preflight, allow-listed origins only
  *
  * The download route answers only while the operator's download switch is on.
@@ -34,7 +36,7 @@ import type { GatewayLogFields, GatewayLogger } from "@/lib/media-gateway/log";
 import type { CatalogueMediaResolver, MediaReader } from "@/lib/media-gateway/ports";
 import { pumpRange } from "@/lib/media-gateway/pump";
 import { contentRange, parseRangeHeader, unsatisfiedContentRange } from "@/lib/media-gateway/range";
-import { verifyMediaToken, type MediaOperation } from "@/lib/media-gateway/token";
+import { verifyMediaToken, type MediaOperation, type MediaTarget } from "@/lib/media-gateway/token";
 
 export interface MediaGatewayDeps {
   limits: GatewayLimits;
@@ -62,7 +64,7 @@ export interface MediaGateway {
   readonly activeStreams: number;
 }
 
-const ROUTE = /^\/v1\/movie-versions\/([1-9]\d{0,14})\/(stream|download)$/;
+const ROUTE = /^\/v1\/(movie|episode)-versions\/([1-9]\d{0,14})\/(stream|download)$/;
 const SAFE_MIME = /^(video|audio)\/[a-z0-9][a-z0-9.+-]{0,63}$/i;
 const COMMON_HEADERS = {
   "Cache-Control": "private, no-store",
@@ -121,9 +123,9 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
     return status;
   }
 
-  async function handleMedia(request: IncomingMessage, response: ServerResponse, url: URL, versionId: number, op: MediaOperation) {
+  async function handleMedia(request: IncomingMessage, response: ServerResponse, url: URL, versionId: number, op: MediaOperation, target: MediaTarget = "movie") {
     const startedAt = now();
-    const log: GatewayLogFields = { event: "media_request", requestId: newRequestId(), movieVersionId: versionId, route: op, rpcCount: 0 };
+    const log: GatewayLogFields = { event: "media_request", requestId: newRequestId(), movieVersionId: versionId, route: op, rpcCount: 0, ...(target === "episode" ? { target } : {}) };
     const finish = (fields: Partial<GatewayLogFields>, level: "info" | "warn" | "error" = "info") => {
       logger[level]({ ...log, ...fields, latencyMs: now() - startedAt });
     };
@@ -149,13 +151,15 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
     // 2. Authorization, before any catalogue or Telegram work.
     const verified = verifyMediaToken(deps.tokenSecret, bearer ?? queryToken, {
       op,
+      target,
       movieVersionId: versionId,
       nowSeconds: Math.floor(now() / 1000),
       maxLifetimeSeconds: op === "download" ? Math.min(limits.maxTokenLifetimeSeconds, downloadLimits.maxTokenLifetimeSeconds) : limits.maxTokenLifetimeSeconds,
     });
     if (!verified.ok) return deny(verified.code);
-    // Older gateway adapters remain streaming-compatible and fail closed for downloads.
+    // Older gateway adapters remain streaming-compatible and fail closed for downloads and episodes.
     if (op === "download" && !deps.resolver.resolveDownload) return deny("not_ready");
+    if (target === "episode" && !deps.resolver.resolveEpisodeVersion) return deny("not_ready");
 
     // 3. Abuse and resource limits.
     const subject = verified.claims.sub;
@@ -186,7 +190,11 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
     let checking = false;
     // Race even adapters without cancellation against a bounded authorization deadline.
     const resolve = async () => {
-      if (op === "stream") return deps.resolver.resolveMovieVersion(versionId, controller.signal);
+      if (op === "stream") {
+        return target === "episode"
+          ? deps.resolver.resolveEpisodeVersion!(versionId, controller.signal)
+          : deps.resolver.resolveMovieVersion(versionId, controller.signal);
+      }
       const deadline = new AbortController();
       const signal = AbortSignal.any([controller.signal, deadline.signal]);
       const timer = setTimeout(() => deadline.abort(new GatewayError("catalogue_unavailable")), downloadLimits.authorizationTimeoutMs);
@@ -387,7 +395,12 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
       sendError(request, response, "not_found");
       return;
     }
-    handleMedia(request, response, url, Number(match[1]), match[2] as MediaOperation).catch((error: unknown) => {
+    // Episodes are stream-only: there is no episode download route.
+    if (match[1] === "episode" && match[3] !== "stream") {
+      sendError(request, response, "not_found");
+      return;
+    }
+    handleMedia(request, response, url, Number(match[2]), match[3] as MediaOperation, match[1] as MediaTarget).catch((error: unknown) => {
       // handleMedia handles its own failures; this only guards against a bug there.
       logger.error({ event: "media_request_bug", code: gatewayCodeOf(error) });
       if (!response.headersSent) sendError(request, response, "internal_error");

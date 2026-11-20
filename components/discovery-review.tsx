@@ -11,7 +11,7 @@ import { canReinspect, catalogueStage, detectedNewVj, guidance, inspectionExhaus
 import { candidateMedia, indicators, mediaReport, publicationRequirements, RIGHTS_TEXT, type MediaTone } from "@/lib/discovery/media-report";
 import { cn } from "@/lib/utils";
 import type { ReviewCandidate, ReviewVj } from "@/lib/discovery/model";
-import type { ReviewCapabilities } from "@/lib/discovery/database";
+import type { ReviewCapabilities, UploadedMovie } from "@/lib/discovery/database";
 
 /** fixture: the E3.8 offline inbox. database: E3.8A review against Supabase (decisions are real). */
 export type ReviewUiMode = "fixture" | "database";
@@ -64,6 +64,28 @@ function NewVjs({ candidates, vjs, action, allowed }: { candidates: ReviewCandid
     <ul className="mt-2 space-y-2">{found.map((item, index) => <li key={item.name} className="border-t border-border pt-2 first:border-t-0">
       <AddVjForm id={`new-vj-${index}`} name={item.name} hint={`Read from ${item.count} ${item.count === 1 ? "upload" : "uploads"}.`} action={action} allowed={allowed} />
     </li>)}</ul>
+  </section>;
+}
+
+/** Uploader records keep their separate, guarded publication workflow. */
+export function UploadedMovies({ movies, error }: { movies: UploadedMovie[]; error?: string }) {
+  return <section aria-labelledby="uploaded-movies-heading" className="mt-8 space-y-4">
+    <h2 id="uploaded-movies-heading" className="text-headline-sm">Uploaded movies ({movies.length})</h2>
+    <p className="text-body-md text-muted">Movies uploaded through Velora. Review continues through the upload workflow before publication. The review groups above apply to channel candidates.</p>
+    {error ? <Message error={error} /> : !movies.length ? <EmptyState title="No pending uploaded movies" description="Completed uploads awaiting review appear here. Search by title or file name." /> : <ul className="grid gap-4 md:grid-cols-2">
+      {movies.map((movie) => <li key={movie.id} className="min-w-0 rounded-lg border border-border bg-surface p-5">
+        <h3 className="break-words text-headline-sm">{movie.title}</h3>
+        <p className="mt-2 text-body-md">{movie.vj ?? "VJ unresolved"} ? {size(movie.sizeBytes)}</p>
+        <p className="mt-2 break-words text-body-sm text-muted">{movie.fileName}</p>
+        <dl className="mt-4 grid grid-cols-2 gap-2 text-body-sm">
+          <dt className="text-muted">Upload</dt><dd>Complete</dd>
+          <dt className="text-muted">Metadata</dt><dd>{movie.status === "matched" ? "Matched; awaiting review" : human(movie.status)}</dd>
+          <dt className="text-muted">Media check</dt><dd>{movie.mediaReady ? "Verified" : "Awaiting verification"}</dd>
+          <dt className="text-muted">Integrity</dt><dd>{human(movie.integrity ?? "unverified")}</dd>
+          <dt className="text-muted">Streaming</dt><dd>{human(movie.streaming ?? "unverified")}</dd>
+        </dl>
+      </li>)}
+    </ul>}
   </section>;
 }
 
@@ -261,7 +283,7 @@ export function ReviewDetail({ candidate, vjs, action, error, notice, mode = "fi
           <dt className="text-muted">Media size</dt><dd>{size(candidate.event.media.size)}</dd>
           <dt className="text-muted">Read from the post</dt><dd>{candidate.title ?? "No title"} · {candidate.year ?? "no year"} · {candidate.vjText ? `VJ ${candidate.vjText}` : "no VJ"}</dd>
           <dt className="text-muted">Catalogue match</dt><dd>{candidate.movieId ? `Movie ${candidate.movieId}` : "New or unresolved"} · {human(candidate.relation)}</dd>
-          <dt className="text-muted">TMDB identity</dt><dd>{candidate.tmdbId ?? "Unresolved"} · {human(candidate.identity)}</dd>
+          <dt className="text-muted">{candidate.manualMovieId ? "Manual identity" : "TMDB identity"}</dt><dd>{candidate.manualMovieId ? "Admin-entered movie" : candidate.tmdbId ?? "Unresolved"} · {human(candidate.identity)}</dd>
           {diagnostics && <>
             <dt className="text-muted">Last inspection</dt><dd>{last ? `${when(last.at)} · ${human(last.action)} · revision ${last.revision}` : "No inspection recorded"}</dd>
             <dt className="text-muted">Last failure</dt><dd>{failure ?? "None"}</dd>
@@ -280,7 +302,7 @@ export function ReviewDetail({ candidate, vjs, action, error, notice, mode = "fi
     </div>
     {database && <Overview candidate={candidate} />}
     {database && <Gates candidate={candidate} />}
-    {open && database && candidate.choices.length === 0 && <section className="rounded-lg border border-border bg-surface p-5" aria-labelledby="nofilm-heading">
+    {open && database && !candidate.manualMovieId && candidate.choices.length === 0 && <section className="rounded-lg border border-border bg-surface p-5" aria-labelledby="nofilm-heading">
       <h2 id="nofilm-heading" className="text-headline-sm">No film found for this title</h2>
       <p className="mt-2 text-body-md">TMDB returned nothing usable for “{candidate.title ?? "this post"}”. Fix the post in Telegram and it is read again by itself:</p>
       <ul className="mt-3 list-inside list-disc space-y-1 text-body-md">
@@ -288,7 +310,7 @@ export function ReviewDetail({ candidate, vjs, action, error, notice, mode = "fi
         <li>Or post the file again named <code className="break-all">Title Year VJ Name.mp4</code>, spelled as TMDB lists it.</li>
       </ul>
     </section>}
-    {open && database && candidate.choices.length > 0 && <form action={action} className="grid gap-4 rounded-lg border border-border bg-surface p-5 sm:grid-cols-2">
+    {open && database && !candidate.manualMovieId && candidate.choices.length > 0 && <form action={action} className="grid gap-4 rounded-lg border border-border bg-surface p-5 sm:grid-cols-2">
       {candidateId}<input type="hidden" name="command" value="correct" />
       <FilmChoices candidate={candidate} />
       {vjSelect}

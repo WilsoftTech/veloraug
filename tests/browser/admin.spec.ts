@@ -126,3 +126,106 @@ test("a historical policy 2 refusal and an inconclusive decode are not shown as 
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `inconclusive ${width}`).toBe(true);
   }
 });
+
+
+test("catalogue filters fit phones and desktops and support keyboard submission", async ({ page, host }) => {
+  for (const width of [360, 390, 768, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`${host.origin}/admin-fixture?screen=catalogue`);
+    await expect(page.getByRole("heading", { name: "Catalogue", exact: true })).toBeVisible();
+    await expect(page.getByText("Showing 1 to 20 of 45.", { exact: false })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    for (const control of await page.getByRole("form", { name: "Filter catalogue" }).locator("input, select, button").all()) {
+      expect((await control.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    }
+  }
+  await page.goto(`${host.origin}/admin-fixture?screen=catalogue&q=VJ+Test&status=archived&page=2`);
+  await expect(page.getByText("Showing 21 to 22 of 22.", { exact: false })).toBeVisible();
+  await expect(page.getByRole("link", { name: "First page" })).toHaveAttribute("href", "/admin/catalogue?q=VJ+Test&status=archived");
+  await expect(page.getByRole("link", { name: "Next", exact: true })).toHaveCount(0);
+  await page.getByLabel("Search loaded movies", { exact: true }).fill("missing title");
+  await page.getByLabel("Publication status").selectOption("draft");
+  await page.route("**/admin/catalogue?**", async (route) => {
+    const url = new URL(route.request().url());
+    url.pathname = "/admin-fixture";
+    url.searchParams.set("screen", "catalogue");
+    await route.fulfill({ response: await page.request.get(url.toString()) });
+  });
+  await page.getByRole("button", { name: "Apply filters" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/q=missing.*status=draft/);
+  expect(new URL(page.url()).searchParams.has("page")).toBe(false);
+  await expect(page.getByRole("heading", { name: "No matching movies" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Reset filters" }).first()).toBeVisible();
+});
+
+
+test("full catalogue search and cursor navigation work across phone and desktop layouts", async ({ page, host }) => {
+  for (const theme of ["light", "dark"]) for (const width of [360, 390, 768, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`${host.origin}/admin-fixture?screen=catalogue&paged&theme=${theme}&q=VJ+Test&status=archived`);
+    await expect(page.getByLabel("Search movies", { exact: true })).toHaveValue("VJ Test");
+    await expect(page.getByText("20 movies on this page. More matches on the next page.", { exact: true })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Next", exact: true })).toHaveAttribute("href", "/admin/catalogue?q=VJ+Test&status=archived&cursor=106");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    for (const control of await page.getByRole("form", { name: "Filter catalogue" }).locator("input, select, button").all()) {
+      expect((await control.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    }
+  }
+  await page.route("**/admin/catalogue?**", async (route) => {
+    const url = new URL(route.request().url());
+    url.pathname = "/admin-fixture";
+    url.searchParams.set("screen", "catalogue");
+    await route.fulfill({ response: await page.request.get(url.toString()) });
+  });
+  await page.getByRole("link", { name: "Next", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/cursor=106/);
+  await expect(page.getByRole("heading", { name: "Synthetic movie 104", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Synthetic movie 144", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "First page" })).toHaveAttribute("href", "/admin/catalogue?q=VJ+Test&status=archived");
+  await page.getByLabel("Search movies", { exact: true }).fill("Older needle");
+  await page.getByLabel("Publication status").selectOption("published");
+  await page.getByRole("button", { name: "Apply filters" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/q=Older.*status=published/);
+  expect(new URL(page.url()).searchParams.has("cursor")).toBe(false);
+  await expect(page.getByRole("heading", { name: "Older needle film", exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Next", exact: true })).toHaveCount(0);
+  await page.goto(`${host.origin}/admin-fixture?screen=catalogue&paged&cursor=1`);
+  await expect(page.getByRole("heading", { name: "No matching movies" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "First page" })).toHaveAttribute("href", "/admin/catalogue");
+});
+
+
+test("uploaded movies fit mobile and desktop without exposing unsupported review actions", async ({ page, host }) => {
+  for (const width of [360, 768, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(host.origin + "/admin-fixture?scenario=uploaded-movies");
+    const panel = page.getByRole("region", { name: "Uploaded movies (1)", exact: true });
+    await expect(panel.getByRole("heading", { name: "Wrong Turn 5 Bloodlines" })).toBeVisible();
+    await expect(panel.getByText("Matched; awaiting review", { exact: true })).toBeVisible();
+    await expect(panel.getByText("Awaiting verification", { exact: true })).toBeVisible();
+    await expect(panel.getByRole("button")).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  }
+});
+
+test("manual metadata form supports device poster selection and existing parts on mobile and desktop",async({page,host},info)=>{
+ for(const width of [360,1440]){
+ await page.setViewportSize({width,height:950});
+ await page.goto(host.origin+"/admin-fixture?scenario=manual-metadata");
+ await expect(page.getByRole("heading",{name:"Enter movie details manually"})).toBeVisible();
+ await page.getByLabel("VJ",{exact:true}).selectOption("1");
+ await page.getByLabel("Release date",{exact:true}).fill("2024-05-01");
+ await page.getByLabel("Poster from your device (optional)",{exact:true}).setInputFiles({name:"poster.webp",mimeType:"image/webp",buffer:Buffer.from("synthetic fixture upload")});
+ await expect(page.getByText("Stored as WebP in Cloudflare R2.",{exact:false})).toBeVisible();
+ expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+ await page.getByRole("button",{name:"Save and confirm manual details"}).click();
+ await expect(page.getByRole("status")).toContainText("Synthetic metadata saved: Manual Film");
+ await page.getByLabel("Use an existing manually entered movie",{exact:true}).selectOption("123");
+ await expect(page.getByLabel("Movie title",{exact:true})).toHaveCount(0);
+ await expect(page.getByRole("button",{name:"Confirm selected movie and VJ"})).toBeVisible();
+ if(info.project.name==="chromium") await page.screenshot({path:info.outputPath("manual-metadata-"+width+".png"),fullPage:true});
+ }
+});

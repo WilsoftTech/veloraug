@@ -31,6 +31,8 @@ export interface GatewayConfig {
     /** Only present when a first bot login is explicitly allowed. */
     readerBotToken?: string;
     moviesChannelId: string;
+    /** Optional: set, the reader also serves episodes from this channel. */
+    seriesChannelId?: string;
     ingestionBotIds: string[];
   };
 }
@@ -80,6 +82,9 @@ export function gatewayConfigFromEnv(env: Env): GatewayConfig {
   const readerUsername = required("TELEGRAM_MEDIA_BOT_USERNAME", /^[A-Za-z][A-Za-z0-9_]{3,31}$/);
   const readerBotToken = allowBotLogin ? required("TELEGRAM_MEDIA_BOT_TOKEN", /^\d{1,20}:[A-Za-z0-9_-]{30,}$/) : undefined;
   const moviesChannelId = required("TELEGRAM_MOVIES_CHANNEL_ID", /^-100\d{1,16}$/);
+  // Optional and never defaulted: absent, episodes are not served. Present, it must be a distinct channel.
+  const seriesChannelId = env.TELEGRAM_SERIES_CHANNEL_ID || undefined;
+  if (seriesChannelId !== undefined && (!/^-100\d{1,16}$/.test(seriesChannelId) || seriesChannelId === moviesChannelId)) bad.push("TELEGRAM_SERIES_CHANNEL_ID");
   const ingestionBotIds = ["TELEGRAM_MOVIES_BOT_ID", "TELEGRAM_SERIES_BOT_ID"].map((name) => env[name]).filter((id): id is string => !!id && /^\d{1,20}$/.test(id));
   if (ingestionBotIds.length === 0) bad.push("TELEGRAM_MOVIES_BOT_ID");
   if (readerBotId && ingestionBotIds.includes(readerBotId)) bad.push("TELEGRAM_MEDIA_BOT_ID");
@@ -117,7 +122,7 @@ export function gatewayConfigFromEnv(env: Env): GatewayConfig {
     limits,
     downloadLimits,
     downloadsEnabled,
-    telegram: { apiId, apiHash, readerBotId, readerUsername, readerBotToken, moviesChannelId, ingestionBotIds },
+    telegram: { apiId, apiHash, readerBotId, readerUsername, readerBotToken, moviesChannelId, ...(seriesChannelId ? { seriesChannelId } : {}), ingestionBotIds },
   };
 }
 

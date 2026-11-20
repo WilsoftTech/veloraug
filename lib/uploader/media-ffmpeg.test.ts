@@ -8,7 +8,7 @@ import { classifyMedia, readMp4Layout, selectPlaybackStreams, verifyRemux, type 
 import { assessOriginalMedia } from "@/lib/ingestion/original-media";
 import { decodeFailureReason, verifiedAssessment, verifyOriginal } from "@/lib/discovery/original-verification";
 import { newJournalEntry, openJournal, type JournalEntry } from "@/lib/uploader/journal";
-import { decodeStreams, digestPackets, freeBytes, probeMedia, remux, resolveMediaTools, runProcess, spoolDocument, type MediaTools } from "@/lib/uploader/media-tools";
+import { decodeStreams, digestPackets, freeBytes, probeMedia, remux, resolveMediaTools, runProcess, spoolDocument, validatePlayback, type MediaTools } from "@/lib/uploader/media-tools";
 import { normalizeEntry, type NormalizeDeps } from "@/lib/uploader/normalize";
 import { fingerprintFile, withReadRange } from "@/lib/uploader/scan";
 import type { SourceFingerprint } from "@/types/ingestion";
@@ -295,6 +295,20 @@ describe.skipIf(!tools)("real Class 2 normalization", () => {
 // Checkpoint 10: the two helpers of the Policy 3 verification contract, on the committed synthetic browser fixtures.
 describe.skipIf(!tools)("real whole-file decode and seek (verification contract)", () => {
   const fixture = (name: string) => join("tests/browser/fixtures", name);
+  it("preserves variable frame timestamps when decoding whole files and seek samples", async () => {
+    const path = join(work, "variable-frame-timing.mkv");
+    // A 24 fps default duration with a 30 fps section, as in the affected library files.
+    await ffmpeg(["-f", "lavfi", "-i", "testsrc2=size=160x120:rate=24:duration=5", "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+      "-vf", "settb=1/1000,setpts='if(lt(N,60),N/(24*TB),(60/24+(N-60)/30)/TB)'",
+      "-c:v", "libx264", "-fps_mode:v", "passthrough", "-enc_time_base:v", "filter", "-c:a", "aac", path]);
+    for (const window of [null, { start: 2.73, seconds: 1 }]) {
+      const result = await decodeStreams(tools!.ffmpeg, path, { video: 0, audio: [1] }, window);
+      expect(result.errors).toEqual([]);
+      expect(result.outcome).toBe("decoded");
+      expect(result.frames).toBe(window ? 30 : 120);
+    }
+    await expect(validatePlayback(tools!.ffmpeg, path)).resolves.toBeUndefined();
+  });
   it("decodes a whole fixture to its end, and after a seek, reporting how far it got", async () => {
     for (const [name, audio] of [["mp4-h264-aac-moov-at-end.mp4", [1]], ["mkv-h264-aac-two-audio.mkv", [1, 2]]] as const) {
       const whole = await decodeStreams(tools!.ffmpeg, fixture(name), { video: 0, audio });

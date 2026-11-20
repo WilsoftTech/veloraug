@@ -1,5 +1,8 @@
+import {MovieMetadataForm} from "@/components/movie-metadata-form";
 import { createRoot } from "react-dom/client";
-import { ReviewDetail } from "@/components/discovery-review";
+import { parseAdminCatalogueFilters } from "@/lib/browse";
+import { AdminCatalogue } from "@/components/admin-catalogue";
+import { ReviewDetail, UploadedMovies } from "@/components/discovery-review";
 import { AdminUploadForm } from "@/components/admin-upload-form";
 import { AdminUploadTransfer } from "@/components/admin-upload-transfer";
 import "@/app/globals.css";
@@ -54,13 +57,32 @@ const SCENARIOS: Record<string, ReviewCandidate> = {
 };
 
 const params = new URLSearchParams(location.search);
+if (location.pathname === "/admin/catalogue") params.set("screen", "catalogue");
 const candidate = SCENARIOS[params.get("scenario") ?? "pending"];
+// Synthetic response pages exercise the same server-renderable catalogue controls.
+// Real filtering, cursor traversal and authorization are covered by database suite 026.
+const fullCatalogue = params.has("paged") || location.pathname === "/admin/catalogue";
+const catalogueMovies = Array.from({ length: fullCatalogue ? 145 : 45 }, (_, index) => ({
+  id: index + 1, slug: `synthetic-${index + 1}`, title: fullCatalogue && index === 0 ? "Older needle film" : `Synthetic movie ${index + 1}`,
+  overview: "Synthetic description", release_year: 2024, poster_path: null,
+  publication_status: index % 2 ? "archived" as const : "published" as const,
+  is_featured: false, published_at: null,
+  versions: [{ id: index + 1, vj: "VJ Test", availability_status: "ready", rights_status: "cleared" }],
+}));
+const catalogueQuery = Object.fromEntries(params);
+const filters = parseAdminCatalogueFilters(catalogueQuery);
+const matches = catalogueMovies.filter((movie) => (!filters.status || filters.status === movie.publication_status)
+  && (!filters.q || `${movie.title} ${movie.release_year} VJ Test`.toLowerCase().includes(filters.q.toLowerCase()))
+  && (!filters.cursor || movie.id < Number(filters.cursor))).sort((a, b) => b.id - a.id);
+const cataloguePage = fullCatalogue ? { items: matches.slice(0, 20), nextCursor: matches.length > 20 ? String(matches[19].id) : null } : undefined;
+
 createRoot(document.getElementById("root")!).render(
   <main className="page-container py-6 sm:py-8">
-    {params.get("screen") === "upload" ? <AdminUploadForm maxBytes={2_000_000_000} extensions={["mp4", "mkv"]} action={async (_previous, data) => {
+    {params.get("screen") === "catalogue" ? <AdminCatalogue movies={catalogueMovies} cataloguePage={cataloguePage} vjs={[{ id: 1, name: "VJ Test", slug: "vj-test" }]} canManage={false} movieAction={async () => {}} addVjAction={async () => {}} query={catalogueQuery} /> : params.get("screen") === "upload" ? <AdminUploadForm maxBytes={2_000_000_000} extensions={["mp4", "mkv"]} action={async (_previous, data) => {
       await new Promise((resolve) => setTimeout(resolve, 200));
       return { error: `Synthetic draft received: ${data.get("fileName")} (${data.get("sizeBytes")} bytes).` };
     }} /> : params.get("screen") === "transfer" ? <AdminUploadTransfer id="synthetic-upload" fileName={params.get("name") ?? "Example.Movie.mp4"} sizeBytes={4} storage={params.has("r2") ? "r2" : "disk"} /> :
+      params.get("scenario") === "manual-metadata" ? <MovieMetadataForm target="review" id={"a".repeat(64)} revision={3} initial={{title:"Manual Film"}} vjs={[{id:1,slug:"vj-test",name:"VJ Test",isActive:true}]} existingMovies={[{id:123,title:"Existing Manual Film",year:2024}]} postersEnabled action={async (_previous,data)=>({notice:"Synthetic metadata saved: "+data.get("title")})}/> : params.get("scenario") === "uploaded-movies" ? <UploadedMovies movies={[{ id: "162", title: "Wrong Turn 5 Bloodlines", fileName: "Wrong Turn 5 Bloodlines (2012) VJ ICE P.mp4", vj: "VJ Ice P", status: "matched", sizeBytes: 1519441250, receivedAt: at, mediaReady: false, integrity: null, streaming: null }]} /> :
       <ReviewDetail candidate={candidate} vjs={[{ id: 1, slug: "vj-test", name: "VJ Test", isActive: true }]} action={async () => {}} mode="database"
         capabilities={{ review: true, rights: true, publish: params.has("publisher") }} downloads={params.has("downloads")} />}
   </main>,

@@ -10,13 +10,15 @@ interface MovieCardProps {
   sizes?: string;
   /** Load the poster immediately (first row of a grid). */
   eager?: boolean;
+  /** Watched share (0–1) for Continue Watching; drawn along the poster's bottom edge. */
+  progress?: number;
   className?: string;
 }
 
 const ROW_POSTER_SIZES = "(min-width: 1024px) 192px, (min-width: 640px) 176px, 144px";
 
 /** The one poster card, used by scroll rows and grids. Links to the title's Velora page. */
-export function MovieCard({ item, sizes = ROW_POSTER_SIZES, eager, className }: MovieCardProps) {
+export function MovieCard({ item, sizes = ROW_POSTER_SIZES, eager, progress, className }: MovieCardProps) {
   const [firstVj, ...otherVjs] = item.vjs;
   return (
     <Link href={titleHref(item.kind, item.slug)} className={cn("group relative block", className)}>
@@ -44,6 +46,14 @@ export function MovieCard({ item, sizes = ROW_POSTER_SIZES, eager, className }: 
           <span aria-hidden className="truncate">{firstVj.name}</span>
           {otherVjs.length > 0 && <span aria-hidden className="shrink-0">+{otherVjs.length}</span>}
           <span className="sr-only">Available from {item.vjs.map((vj) => vj.name).join(", ")}</span>
+        </span>
+      )}
+      {progress !== undefined && (
+        <span className="pointer-events-none absolute inset-x-0 top-0 flex aspect-[2/3] items-end overflow-hidden rounded-md">
+          <span className="h-1 w-full bg-black/70">
+            <span className="block h-full bg-highlight" style={{ width: `${Math.round(progress * 100)}%` }} />
+          </span>
+          <span className="sr-only">{Math.round(progress * 100)}% watched</span>
         </span>
       )}
       {item.kind === "series" && (

@@ -38,3 +38,27 @@ export function browseHref(kind: CatalogueKind, filters: Partial<BrowseFilters> 
 export function hasBrowseFilters({ genre, vj }: BrowseFilters) {
   return genre !== null || vj !== null;
 }
+
+
+/** Admin URLs use a descending movie-id cursor; changing filters starts a new traversal. */
+export interface AdminCatalogueFilters {
+  q: string;
+  status: "" | "draft" | "published" | "archived";
+  cursor: string | null;
+}
+
+export function parseAdminCatalogueFilters(params: Params): AdminCatalogueFilters {
+  const q = typeof params.q === "string" ? params.q.slice(0, 300).trim() : "";
+  const status = params.status === "draft" || params.status === "published" || params.status === "archived" ? params.status : "";
+  const value = params.cursor;
+  const cursor = typeof value === "string" && /^[1-9]\d{0,18}$/.test(value) && BigInt(value) <= BigInt("9223372036854775807") ? value : null;
+  return { q, status, cursor };
+}
+
+export function adminCatalogueHref(filters: AdminCatalogueFilters): string {
+  const params = new URLSearchParams();
+  if (filters.q) params.set("q", filters.q);
+  if (filters.status) params.set("status", filters.status);
+  if (filters.cursor) params.set("cursor", filters.cursor);
+  return `/admin/catalogue${params.size ? `?${params}` : ""}`;
+}

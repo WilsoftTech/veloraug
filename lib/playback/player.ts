@@ -135,6 +135,8 @@ export async function requestStreamCapability(
   fetchImpl: typeof fetch = fetch,
   signal?: AbortSignal,
   now: () => number = Date.now,
+  /** "episode": the id is an episode version, sent as `{ episodeVersionId }`. */
+  target?: "episode",
 ): Promise<CapabilityResult> {
   const controller = new AbortController();
   const abort = () => controller.abort();
@@ -147,7 +149,7 @@ export async function requestStreamCapability(
       response = await fetchImpl(ENDPOINT, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ movieVersionId }),
+        body: JSON.stringify(target === "episode" ? { episodeVersionId: movieVersionId } : { movieVersionId }),
         credentials: "same-origin",
         cache: "no-store",
         signal: controller.signal,
