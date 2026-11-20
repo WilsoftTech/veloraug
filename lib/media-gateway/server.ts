@@ -6,7 +6,8 @@
  *   GET /v1/movie-versions/{id}/stream?token=…     206 byte ranges of a published version
  *   GET /v1/movie-versions/{id}/download?token=…   original attachment, full or ranged
  *   GET /v1/episode-versions/{id}/stream?token=…   206 byte ranges of a published episode version
- *                                                  (stream only; an episode token carries `ev`, never `mv`)
+ *   GET /v1/episode-versions/{id}/download?token=… its original attachment, full or ranged
+ *                                                  (an episode token carries `ev`, never `mv`)
  *   OPTIONS on the media routes                    CORS preflight, allow-listed origins only
  *
  * The download route answers only while the operator's download switch is on.
@@ -158,7 +159,7 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
     });
     if (!verified.ok) return deny(verified.code);
     // Older gateway adapters remain streaming-compatible and fail closed for downloads and episodes.
-    if (op === "download" && !deps.resolver.resolveDownload) return deny("not_ready");
+    if (op === "download" && !(target === "episode" ? deps.resolver.resolveEpisodeDownload : deps.resolver.resolveDownload)) return deny("not_ready");
     if (target === "episode" && !deps.resolver.resolveEpisodeVersion) return deny("not_ready");
 
     // 3. Abuse and resource limits.
@@ -201,7 +202,9 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
       let onAbort: () => void = () => {};
       try {
         return await Promise.race([
-          deps.resolver.resolveDownload!(versionId, subject, signal),
+          target === "episode"
+            ? deps.resolver.resolveEpisodeDownload!(versionId, subject, signal)
+            : deps.resolver.resolveDownload!(versionId, subject, signal),
           new Promise<never>((_, reject) => {
             onAbort = () => reject(signal.reason);
             if (signal.aborted) onAbort();
@@ -392,11 +395,6 @@ export function createMediaGateway(deps: MediaGatewayDeps): MediaGateway {
     }
     const match = ROUTE.exec(url.pathname);
     if (!match) {
-      sendError(request, response, "not_found");
-      return;
-    }
-    // Episodes are stream-only: there is no episode download route.
-    if (match[1] === "episode" && match[3] !== "stream") {
       sendError(request, response, "not_found");
       return;
     }

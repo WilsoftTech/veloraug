@@ -37,6 +37,12 @@ select r.chat_id::text as chat_id, r.message_id, r.file_unique_id, r.file_size_b
   from media_gateway.resolve_movie_download($1::bigint, $2::uuid) as r
 `;
 
+/** The episode counterpart (migration 20261120055619_episode_download_resolver.sql). $1 is the episode version id. */
+export const RESOLVE_EPISODE_DOWNLOAD_SQL = `
+select r.chat_id::text as chat_id, r.message_id, r.file_unique_id, r.file_size_bytes, r.mime_type, r.file_name
+  from media_gateway.resolve_episode_download($1::bigint, $2::uuid) as r
+`;
+
 /** The resolver's exact output columns; anything more would be a boundary change. */
 export const RESOLVER_COLUMNS = ["chat_id", "message_id", "file_unique_id", "file_size_bytes", "mime_type"] as const;
 

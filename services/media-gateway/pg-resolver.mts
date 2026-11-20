@@ -20,7 +20,7 @@
 import postgres from "postgres";
 import { GatewayError } from "@/lib/media-gateway/errors";
 import type { CatalogueMediaResolver, MediaLocator } from "@/lib/media-gateway/ports";
-import { GATEWAY_DATABASE_ROLE, RESOLVE_EPISODE_VERSION_SQL, RESOLVE_MOVIE_VERSION_SQL, RESOLVE_DOWNLOAD_SQL, locatorFromRow, type ResolverRow } from "@/lib/media-gateway/resolver-sql";
+import { GATEWAY_DATABASE_ROLE, RESOLVE_EPISODE_VERSION_SQL, RESOLVE_MOVIE_VERSION_SQL, RESOLVE_DOWNLOAD_SQL, RESOLVE_EPISODE_DOWNLOAD_SQL, locatorFromRow, type ResolverRow } from "@/lib/media-gateway/resolver-sql";
 
 export type CatalogueState = "reachable" | "unreachable" | "wrong_identity";
 
@@ -85,21 +85,25 @@ export function createPgResolver(databaseUrl: string, options: { statementTimeou
     return selected[0];
   }
 
-  const resolver: PgResolver = {
-    async resolveDownload(movieVersionId, subject, signal) {
-      if (!Number.isSafeInteger(movieVersionId) || movieVersionId <= 0 || !/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(subject)) return null;
+  /** A download resolver call: movie or episode SQL, same validation and error classification. */
+  async function resolveOriginal(statement: string, versionId: number, subject: string, signal: AbortSignal) {
+    if (!Number.isSafeInteger(versionId) || versionId <= 0 || !/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(subject)) return null;
+    if (signal.aborted) throw new GatewayError("catalogue_unavailable");
+    try {
+      // The validated UUID cannot contain SQL syntax; the restricted role still owns no table grant.
+      const rows = await readOnly<ResolverRow>(statement.replace("$1", String(versionId)).replace("$2", `'${subject}'`), signal);
       if (signal.aborted) throw new GatewayError("catalogue_unavailable");
-      try {
-        // The validated UUID cannot contain SQL syntax; the restricted role still owns no table grant.
-        const rows = await readOnly<ResolverRow>(RESOLVE_DOWNLOAD_SQL.replace("$1", String(movieVersionId)).replace("$2", `'${subject}'`), signal);
-        if (signal.aborted) throw new GatewayError("catalogue_unavailable");
-        if (rows.length > 1) throw new GatewayError("internal_error");
-        return locatorFromRow(movieVersionId, rows[0]);
-      } catch (error) {
-        if (error instanceof GatewayError) throw error;
-        throw new GatewayError("catalogue_unavailable");
-      }
-    },
+      if (rows.length > 1) throw new GatewayError("internal_error");
+      return locatorFromRow(versionId, rows[0]);
+    } catch (error) {
+      if (error instanceof GatewayError) throw error;
+      throw new GatewayError("catalogue_unavailable");
+    }
+  }
+
+  const resolver: PgResolver = {
+    resolveDownload: (movieVersionId, subject, signal) => resolveOriginal(RESOLVE_DOWNLOAD_SQL, movieVersionId, subject, signal),
+    resolveEpisodeDownload: (episodeVersionId, subject, signal) => resolveOriginal(RESOLVE_EPISODE_DOWNLOAD_SQL, episodeVersionId, subject, signal),
     async resolveMovieVersion(movieVersionId: number, signal: AbortSignal): Promise<MediaLocator | null> {
       // The id is interpolated into the batch, so it must be exactly a positive safe integer.
       if (!Number.isSafeInteger(movieVersionId) || movieVersionId <= 0) return null;

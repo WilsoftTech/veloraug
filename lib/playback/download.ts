@@ -13,8 +13,12 @@ export const DOWNLOAD_MESSAGES: Record<DownloadFailure, string> = {
 export const DOWNLOAD_GUIDANCE = "Downloads use the browser's download manager. A download that has started keeps running, for up to 4 hours. A link can start or resume a download for 10 minutes; after that, use Resume/Retry Download for a fresh authorized link. Your browser may restart instead of resuming the partial file; check its download manager. This page cannot track completion.";
 type DownloadResult = { ok: true; url: string; format: "MP4" | "MKV" } | { ok: false; failure: DownloadFailure };
 
-/** Every invocation authenticates again. Only a one-byte Range readiness probe is fetched by JavaScript. */
-export async function prepareDownload(movieVersionId: number, fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = fetch, signal?: AbortSignal, timeoutMs = 15_000): Promise<DownloadResult> {
+/**
+ * Every invocation authenticates again. Only a one-byte Range readiness probe is fetched by JavaScript.
+ * `target: "episode"` downloads an episode version (its id goes in `episodeVersionId`).
+ */
+export async function prepareDownload(movieVersionId: number, fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = fetch, signal?: AbortSignal, timeoutMs = 15_000, target?: "episode"): Promise<DownloadResult> {
+  const episode = target === "episode";
   const controller = new AbortController();
   const abort = () => controller.abort();
   const timer = setTimeout(abort, timeoutMs);
@@ -23,7 +27,7 @@ export async function prepareDownload(movieVersionId: number, fetchImpl: (input:
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
       const response = await fetchImpl("/api/media/download-token", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ movieVersionId }), credentials: "same-origin", cache: "no-store", signal: controller.signal });
+        body: JSON.stringify(episode ? { episodeVersionId: movieVersionId } : { movieVersionId }), credentials: "same-origin", cache: "no-store", signal: controller.signal });
       if (response.status === 401) return { ok: false, failure: "auth_required" };
       if (response.status === 403) return { ok: false, failure: "not_entitled" };
       if (response.status === 404) return { ok: false, failure: "unavailable" };
@@ -40,7 +44,7 @@ export async function prepareDownload(movieVersionId: number, fetchImpl: (input:
       if (typeof downloadUrl !== "string" || typeof expiresAt !== "string" || !Number.isFinite(Date.parse(expiresAt))) return { ok: false, failure: "temporarily_unavailable" };
       let url: URL;
       try { url = new URL(downloadUrl); } catch { return { ok: false, failure: "temporarily_unavailable" }; }
-      if (!(url.protocol === "https:" || (url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) || url.username || url.password || url.hash || url.pathname !== `/v1/movie-versions/${movieVersionId}/download`) return { ok: false, failure: "temporarily_unavailable" };
+      if (!(url.protocol === "https:" || (url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) || url.username || url.password || url.hash || url.pathname !== `/v1/${episode ? "episode" : "movie"}-versions/${movieVersionId}/download`) return { ok: false, failure: "temporarily_unavailable" };
       const serverNow = Date.parse(response.headers.get("date") ?? "");
       if (Number.isFinite(serverNow) && Date.parse(expiresAt) <= serverNow) {
         if (!attempt) continue;

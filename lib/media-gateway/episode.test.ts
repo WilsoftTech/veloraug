@@ -16,9 +16,14 @@ const episodeLocator: MediaLocator = { ...publishedLocator, movieVersionId: EPIS
 /** A resolver that also knows episodes; it counts both lookups separately. */
 class EpisodeResolver extends FakeResolver {
   episodeCalls = 0;
+  downloadSubjects: string[] = [];
   async resolveEpisodeVersion(id: number) {
     this.episodeCalls += 1;
     return id === EPISODE ? episodeLocator : null;
+  }
+  async resolveEpisodeDownload(id: number, subject: string) {
+    this.downloadSubjects.push(subject);
+    return id === EPISODE ? { ...episodeLocator, fileName: "MONEY HEIST S01E01.mp4" } : null;
   }
 }
 
@@ -42,8 +47,12 @@ describe("media tokens: episode capabilities", () => {
     expect(verifyMediaToken(SECRET, episodeToken(2), { ...expected, target: "episode" })).toEqual({ ok: false, code: "wrong_version" });
   });
 
-  it("are stream-only", () => {
-    expect(() => episodeToken(EPISODE, "download")).toThrow("invalid operation");
+  it("authorize an episode download only as an episode download", () => {
+    const expected = { op: "download" as const, movieVersionId: EPISODE, nowSeconds: now(), maxLifetimeSeconds: 600 };
+    const token = episodeToken(EPISODE, "download");
+    expect(verifyMediaToken(SECRET, token, { ...expected, target: "episode" }).ok).toBe(true);
+    expect(verifyMediaToken(SECRET, token, { ...expected, op: "stream", target: "episode" })).toEqual({ ok: false, code: "wrong_operation" });
+    expect(verifyMediaToken(SECRET, token, expected)).toEqual({ ok: false, code: "wrong_version" });
   });
 });
 
@@ -82,11 +91,31 @@ describe("media gateway HTTP: episodes", () => {
     expect([resolver.episodeCalls, resolver.calls, h.reader.calls]).toEqual([0, 0, 0]);
   });
 
-  it("has no episode download route", async () => {
+  it("serves an episode original as an attachment through the episode download resolver", async () => {
     const resolver = new EpisodeResolver();
     const h = await start(resolver);
-    expect((await fetch(`${h.base}/v1/episode-versions/${EPISODE}/download?token=${episodeToken()}`)).status).toBe(404);
-    expect(resolver.episodeCalls).toBe(0);
+    const response = await fetch(`${h.base}/v1/episode-versions/${EPISODE}/download?token=${episodeToken(EPISODE, "download")}`, { headers: { Range: "bytes=0-1023" } });
+    expect(response.status).toBe(206);
+    expect(response.headers.get("content-disposition")).toContain("attachment");
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(expectedBytes(0, 1024));
+    expect(resolver.downloadSubjects[0]).toBe("user-1");
+    expect([resolver.episodeCalls, resolver.calls]).toEqual([0, 0]);
+  });
+
+  it("refuses a stream capability on the episode download route, and a movie download capability", async () => {
+    const resolver = new EpisodeResolver();
+    const h = await start(resolver);
+    expect((await fetch(`${h.base}/v1/episode-versions/${EPISODE}/download?token=${episodeToken()}`)).status).toBe(403);
+    const movieDownload = signMediaToken(SECRET, { op: "download", movieVersionId: EPISODE, subject: "user-1", ttlSeconds: 300, nowSeconds: now() });
+    expect((await fetch(`${h.base}/v1/episode-versions/${EPISODE}/download?token=${movieDownload}`)).status).toBe(403);
+    expect([resolver.downloadSubjects.length, h.reader.calls]).toEqual([0, 0]);
+  });
+
+  it("is not ready for episode downloads on an adapter without the episode download resolver", async () => {
+    const resolver = new FakeResolver();
+    const h = await start(resolver);
+    expect((await fetch(`${h.base}/v1/episode-versions/${EPISODE}/download?token=${episodeToken(EPISODE, "download")}`)).status).toBe(503);
+    expect([resolver.calls, h.reader.calls]).toEqual([0, 0]);
   });
 
   it("answers an unpublished episode like any unavailable version", async () => {

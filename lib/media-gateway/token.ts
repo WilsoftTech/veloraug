@@ -78,8 +78,6 @@ export function signMediaToken(
   assertSecret(secret);
   if (!MEDIA_OPERATIONS.includes(input.op)) throw new Error("invalid operation");
   if (!Number.isSafeInteger(input.movieVersionId) || input.movieVersionId <= 0) throw new Error("invalid movie version");
-  // Episodes are stream-only: there is no episode download route.
-  if (input.target === "episode" && input.op !== "stream") throw new Error("invalid operation");
   if (!SUBJECT.test(input.subject)) throw new Error("invalid subject");
   if (!Number.isSafeInteger(input.ttlSeconds) || input.ttlSeconds <= 0) throw new Error("invalid ttl");
   const claims: MediaTokenClaims = {
@@ -111,7 +109,6 @@ function parseClaims(json: string): MediaTokenClaims | null {
   if (aud !== MEDIA_TOKEN_AUDIENCE) return null;
   if (typeof op !== "string" || !(MEDIA_OPERATIONS as readonly string[]).includes(op)) return null;
   if (typeof version !== "number" || !Number.isSafeInteger(version) || version <= 0) return null;
-  if (claims.ev !== undefined && op !== "stream") return null;
   if (typeof sub !== "string" || !SUBJECT.test(sub)) return null;
   if (typeof iat !== "number" || !Number.isSafeInteger(iat) || typeof exp !== "number" || !Number.isSafeInteger(exp) || exp <= iat) return null;
   if (typeof jti !== "string" || !SEGMENT.test(jti) || jti.length > 64) return null;

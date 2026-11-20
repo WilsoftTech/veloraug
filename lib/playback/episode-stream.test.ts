@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { CurrentUser } from "@/lib/auth";
 import { verifyMediaToken } from "@/lib/media-gateway/token";
 import { canStreamEpisodeVersion, canStreamMovieVersion } from "@/lib/playback/entitlement";
+import { prepareDownload } from "@/lib/playback/download";
 import { requestStreamCapability } from "@/lib/playback/player";
 import { streamCapabilityConfigFromEnv } from "@/lib/playback/stream-capability";
 import { createStreamTokenHandler, type StreamTokenDeps } from "@/lib/playback/stream-token";
@@ -55,11 +56,26 @@ describe("episode stream capabilities", () => {
     expect((await handler(post({ episodeVersionId: EPISODE }))).status).toBe(404);
   });
 
-  it("are refused where the episode decision is not wired in, and never for downloads", async () => {
+  it("are refused where the episode decision is not wired in, for streams and downloads", async () => {
     expect((await handlerWith({ episodes: false }).handler(post({ episodeVersionId: EPISODE }))).status).toBe(400);
-    const download = handlerWith({ operation: "download" });
+    const download = handlerWith({ episodes: false, operation: "download" });
     expect((await download.handler(post({ episodeVersionId: EPISODE }))).status).toBe(400);
     expect(download.calls).toEqual({ movie: 0, episode: 0 });
+  });
+
+  it("issue an episode download capability for the episode download route only", async () => {
+    const { calls, handler } = handlerWith({ operation: "download" });
+    const response = await handler(post({ episodeVersionId: EPISODE }));
+    expect(response.status).toBe(200);
+    const { downloadUrl } = (await response.json()) as { downloadUrl: string };
+    const url = new URL(downloadUrl);
+    expect(url.pathname).toBe(`/v1/episode-versions/${EPISODE}/download`);
+    const token = url.searchParams.get("token") ?? "";
+    const expected = { op: "download" as const, movieVersionId: EPISODE, nowSeconds: NOW_MS / 1000, maxLifetimeSeconds: 600 };
+    expect(verifyMediaToken(config.secret, token, { ...expected, target: "episode" }).ok).toBe(true);
+    expect(verifyMediaToken(config.secret, token, expected)).toEqual({ ok: false, code: "wrong_version" });
+    expect(calls).toEqual({ movie: 0, episode: 1 });
+    expect((await handlerWith({ operation: "download", playable: [] }).handler(post({ episodeVersionId: EPISODE }))).status).toBe(404);
   });
 
   it("refuse a body naming both kinds or anything else", async () => {
@@ -89,5 +105,22 @@ describe("player capability request", () => {
     await requestStreamCapability(EPISODE, fetchImpl, undefined, Date.now, "episode");
     await requestStreamCapability(EPISODE, fetchImpl);
     expect(bodies).toEqual([{ episodeVersionId: EPISODE }, { movieVersionId: EPISODE }]);
+  });
+});
+
+describe("episode downloads in the browser", () => {
+  const issued = (path: string) => Response.json({ downloadUrl: `https://media.velora.example${path}?token=opaque`, expiresAt: "2026-10-11T12:10:00Z" }, { headers: { date: "Sun, 11 Oct 2026 12:00:00 GMT" } });
+  const probe = () => new Response("x", { status: 206, headers: { "content-type": "video/mp4", "content-length": "1", "content-range": "bytes 0-0/100" } });
+
+  it("asks for the episode version and accepts only the episode download route", async () => {
+    const fetcher = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async () => issued(`/v1/episode-versions/${EPISODE}/download`));
+    fetcher.mockResolvedValueOnce(issued(`/v1/episode-versions/${EPISODE}/download`)).mockResolvedValueOnce(probe());
+    expect(await prepareDownload(EPISODE, fetcher, undefined, undefined, "episode")).toMatchObject({ ok: true, format: "MP4" });
+    expect(fetcher.mock.calls[0][1]).toMatchObject({ body: JSON.stringify({ episodeVersionId: EPISODE }) });
+
+    // A movie route for the same number is never followed.
+    const movieRoute = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async () => issued(`/v1/movie-versions/${EPISODE}/download`));
+    expect(await prepareDownload(EPISODE, movieRoute, undefined, undefined, "episode")).toEqual({ ok: false, failure: "temporarily_unavailable" });
+    expect(movieRoute).toHaveBeenCalledTimes(1);
   });
 });

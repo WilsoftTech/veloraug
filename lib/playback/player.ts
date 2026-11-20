@@ -86,8 +86,12 @@ const WITHOUT_DOWNLOAD: Partial<Record<PlayerFailure, string>> = {
   slow_metadata: "Movie metadata is taking too long to load. Retry playback.",
 };
 /** What to tell the viewer. Downloading is suggested only when a Download control is on the page. */
-export const playerFailureMessage = (failure: PlayerFailure, downloadOffered: boolean): string =>
-  (downloadOffered ? undefined : WITHOUT_DOWNLOAD[failure]) ?? PLAYER_FAILURE_MESSAGES[failure];
+export const playerFailureMessage = (failure: PlayerFailure, downloadOffered: boolean, target?: "episode"): string =>
+  forTarget((downloadOffered ? undefined : WITHOUT_DOWNLOAD[failure]) ?? PLAYER_FAILURE_MESSAGES[failure], target);
+
+/** The player's messages say "this movie"; an episode player says "this episode" instead. */
+export const forTarget = (message: string, target?: "episode") =>
+  target === "episode" ? message.replace(/\b([Tt])his movie\b/g, "$1his episode") : message;
 
 export function playerReducer(state: PlayerState, event: PlayerEvent): PlayerState {
   switch (event.type) {

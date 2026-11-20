@@ -27,6 +27,7 @@ import {
   defaultVersion,
   detachMediaSource,
   diagnoseMediaFailure,
+  forTarget,
   isAutoplayRefusal,
   needsRenewal,
   playerReducer,
@@ -44,9 +45,9 @@ interface MoviePlayerProps {
   /** The server's download switch. Off, no Download control is shown. The server refuses downloads whatever this says. */
   downloads: boolean;
   /**
-   * "episode": the versions are episode versions. Streaming and renewal work the same way; progress
-   * is not saved (it covers movie versions only), downloads are never offered, and the
-   * compatibility notes appear only once the episode is playing, so a season list stays compact.
+   * "episode": the versions are episode versions. Streaming, renewal and downloads work the same way;
+   * progress is not saved (it covers movie versions only), and the compatibility notes appear only
+   * once the episode is playing, so the episode panel stays compact.
    */
   target?: "episode";
 }
@@ -76,7 +77,7 @@ export function MoviePlayer({ versions, signInHref, downloads, target }: MoviePl
   const userAgent = useSyncExternalStore(subscribeBrowser, browserAgent, serverAgent);
   const profile = versions.find((version) => version.id === versionId)?.profile ?? null;
   // Downloading is suggested only to a viewer who has the Download control below.
-  const downloadOffered = downloads && !episode && session === "signed-in";
+  const downloadOffered = downloads && session === "signed-in";
   const compatibility = useMemo(() => mediaCompatibility(profile, userAgent ? browserSignals(profile, document.createElement("video"), userAgent, navigator.maxTouchPoints) : undefined, downloadOffered), [profile, userAgent, downloadOffered]);
   const [download, setDownload] = useState<{ busy: boolean; attempted: boolean; handedOff: boolean; failure: DownloadFailure | null; format: string | null }>({ busy: false, attempted: false, handedOff: false, failure: null, format: null });
   const downloadRequest = useRef<AbortController | null>(null);
@@ -331,7 +332,7 @@ export function MoviePlayer({ versions, signInHref, downloads, target }: MoviePl
     const controller = new AbortController();
     downloadRequest.current = controller;
     setDownload((previous) => ({ ...previous, busy: true, attempted: true, failure: null, handedOff: false }));
-    const result = await prepareDownload(versionId, fetch, controller.signal);
+    const result = await prepareDownload(versionId, fetch, controller.signal, undefined, target);
     if (downloadRequest.current !== controller) return;
     downloadRequest.current = null;
     if (controller.signal.aborted) {
@@ -407,10 +408,10 @@ export function MoviePlayer({ versions, signInHref, downloads, target }: MoviePl
         {downloadOffered && <p className="mb-3 text-body-sm text-muted">{DOWNLOAD_GUIDANCE}</p>}
         {download.handedOff && <p role="status" className="mb-3 text-body-md">{download.format} download handed to your browser. Check its download manager for progress or interruptions.</p>}
         {download.failure && <div role="alert" className="mb-3 flex flex-wrap items-center gap-3 rounded-default border border-destructive/40 px-4 py-3 text-body-md">
-          <span className="text-destructive">{DOWNLOAD_MESSAGES[download.failure]}</span>
+          <span className="text-destructive">{forTarget(DOWNLOAD_MESSAGES[download.failure], target)}</span>
           {download.failure === "auth_required" && <Link href={signInHref} className={buttonClass("secondary")}>Sign in</Link>}
         </div>}
-        {audioWarning && <p role="status" className="mb-3 text-body-md">{playerFailureMessage("missing_audio", downloadOffered)}</p>}
+        {audioWarning && <p role="status" className="mb-3 text-body-md">{playerFailureMessage("missing_audio", downloadOffered, target)}</p>}
         {open && (
           <div className="flex flex-col gap-3">
             <video
@@ -456,7 +457,7 @@ export function MoviePlayer({ versions, signInHref, downloads, target }: MoviePl
         )}
         {state.status === "error" && state.failure && (
           <div role="alert" className="mt-3 flex flex-wrap items-center gap-3 rounded-default border border-destructive/40 px-4 py-3 text-body-md">
-            <span className="text-destructive">{playerFailureMessage(state.failure, downloadOffered)}</span>
+            <span className="text-destructive">{playerFailureMessage(state.failure, downloadOffered, target)}</span>
             {state.failure === "auth_required" && (
               <Link href={signInHref} className={buttonClass("secondary")}>
                 Sign in

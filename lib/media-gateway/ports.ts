@@ -53,6 +53,8 @@ export interface CatalogueMediaResolver {
    * Optional until migration 20261119194500 is installed; absent, episode requests are not ready.
    */
   resolveEpisodeVersion?(episodeVersionId: number, signal: AbortSignal): Promise<MediaLocator | null>;
+  /** Episode original-file download. Optional until migration 20261120055619 is installed; never falls back. */
+  resolveEpisodeDownload?(episodeVersionId: number, subject: string, signal: AbortSignal): Promise<MediaLocator | null>;
 }
 
 export interface ReaderReadiness {

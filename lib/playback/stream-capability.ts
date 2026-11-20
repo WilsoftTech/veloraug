@@ -89,7 +89,7 @@ export function issueStreamCapability(config: StreamCapabilityConfig, grant: { m
 }
 
 /** Same lifetime and fresh-session renewal as streaming; never exchange an old token. */
-export function issueDownloadCapability(config: StreamCapabilityConfig, grant: { movieVersionId: number; subject: string }, nowMs: number) {
+export function issueDownloadCapability(config: StreamCapabilityConfig, grant: { movieVersionId: number; subject: string; target?: "episode" }, nowMs: number) {
   const capability = issueCapability(config, grant, nowMs, "download");
   return { downloadUrl: capability.streamUrl, expiresAt: capability.expiresAt };
 }
@@ -97,8 +97,6 @@ export function issueDownloadCapability(config: StreamCapabilityConfig, grant: {
 function issueCapability(config: StreamCapabilityConfig, grant: { movieVersionId: number; subject: string; target?: "episode" }, nowMs: number, op: "stream" | "download"): StreamCapability {
   const nowSeconds = Math.floor(nowMs / 1000);
   const episode = grant.target === "episode";
-  // Episodes are stream-only; signMediaToken refuses an episode download as well.
-  if (episode && op !== "stream") throw new Error("episode downloads are not offered");
   const token = signMediaToken(config.secret, {
     op,
     movieVersionId: grant.movieVersionId,
