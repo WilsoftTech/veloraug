@@ -1271,3 +1271,13 @@ file name, after backup and validation. No Telegram upload or transfer, other
 title or episode, remote deployment, push, listener restart or contained-batch
 reactivation. Keep `.velora-ingest/standing-approval.pause` and the quarantined
 guards; stop an episode if any gate fails or its bound source changes.
+
+On 2026-11-20, the owner explicitly authorized applying only
+`20261120055619_episode_download_resolver.sql` to hosted ("apply the episode
+download migration to hosted"). It was applied after an encrypted
+snapshot-consistent backup and a successful restore rehearsal against the actual
+hosted schema. It adds only the gateway-role resolver for original episode
+downloads. Downloads remain off: this exception grants no download activation,
+movie download resolver or other hosted migration, gateway rebuild, deployment,
+push, listener restart, rights decision, publication or Telegram transfer.
+Preserve the standing-approval pause and all existing gates.
