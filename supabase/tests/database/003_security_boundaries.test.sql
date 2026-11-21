@@ -16,7 +16,7 @@ select plan(30);
 select is(
   (select count(*)::int from pg_class c join pg_namespace n on n.oid = c.relnamespace
    where n.nspname in ('public', 'private') and c.relkind = 'r'),
-  37, '37 application tables in public/private (including the private media-verification leases)');
+  40, '40 application tables in public/private (including the private media-verification leases, viewing progress and the series review queue)');
 select is(
   (select array_agg(n.nspname || '.' || c.relname) from pg_class c
    join pg_namespace n on n.oid = c.relnamespace
@@ -137,7 +137,9 @@ select is(
         'public.ingest_channel_checkpoint', 'public.ingest_record_evaluation', 'public.ingest_upload_fail', 'public.ingest_upload_record',
         'public.ingest_upload_start', 'public.ingest_upload_status',
         'public.media_verification_claim', 'public.media_verification_claim_v2', 'public.media_verification_finish',
-        'public.movie_media_profile', 'public.record_search', 'public.trending_searches'],
+        'public.movie_media_profile', 'public.record_search',
+        'public.series_review_assign', 'public.series_review_publish', 'public.series_review_queue', 'public.series_review_rights', 'public.series_review_save_series',
+        'public.trending_searches'],
   'SECURITY DEFINER functions are exactly the reviewed set');
 select is(
   (select array_agg(n.nspname || '.' || p.proname order by n.nspname, p.proname) from pg_proc p

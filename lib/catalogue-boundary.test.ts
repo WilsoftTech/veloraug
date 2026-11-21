@@ -61,7 +61,7 @@ const graph = new Map(files.map((file) => [rel(file), importsOf(file)]));
 // lib/discovery/runtime.ts, which every one of them needs for requireReviewAdmin;
 // lib/discovery/security.test.ts checks that guard on each). They are not public
 // routes. A new admin route remains covered until it is reviewed and listed here.
-const OFFLINE_ADMIN_ROUTES = new Set(["app/admin/layout.tsx", "app/admin/page.tsx", "app/admin/catalogue/page.tsx", "app/admin/catalogue/[id]/edit/page.tsx", "app/admin/discovery/page.tsx", "app/admin/discovery/[id]/page.tsx", "app/admin/uploads/page.tsx", "app/admin/uploads/new/page.tsx", "app/admin/uploads/[id]/page.tsx", "app/api/admin/uploads/[id]/transfer/route.ts"]);
+const OFFLINE_ADMIN_ROUTES = new Set(["app/admin/layout.tsx", "app/admin/page.tsx", "app/admin/catalogue/page.tsx", "app/admin/catalogue/[id]/edit/page.tsx", "app/admin/discovery/page.tsx", "app/admin/discovery/[id]/page.tsx", "app/admin/uploads/page.tsx", "app/admin/uploads/new/page.tsx", "app/admin/uploads/[id]/page.tsx", "app/admin/series/page.tsx", "app/api/admin/uploads/[id]/transfer/route.ts"]);
 const routes = [...graph.keys()].filter((file) => file.startsWith("app/") && !OFFLINE_ADMIN_ROUTES.has(file) && ROUTE_FILES.test(file));
 
 /** Every TMDB module reachable from a route, and the edge that entered it. */

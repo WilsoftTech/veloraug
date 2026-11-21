@@ -86,8 +86,8 @@ select is((select array_agg(f::text) from owner_functions w join pg_proc p on p.
   null, 'owner commands: no dynamic SQL');
 -- The admin dashboard migration (20261011081425) deliberately exposes two session-bound wrappers; nothing else, and no uploader publisher.
 select is((select array_agg(p.proname::text order by p.proname) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-           where n.nspname = 'public' and p.proname ~ 'approve|publish'), array['discovery_review_approve', 'discovery_review_publish'],
-  'the only approval or publication functions in the Data API schema are the reviewer''s session-bound channel commands');
+           where n.nspname = 'public' and p.proname ~ 'approve|publish'), array['discovery_review_approve', 'discovery_review_publish', 'series_review_publish'],
+  'the only approval or publication functions in the Data API schema are the reviewer''s session-bound channel and series commands');
 
 -- ---------------------------------------------------------------------------
 -- Evaluation (service_role)

@@ -1281,3 +1281,43 @@ downloads. Downloads remain off: this exception grants no download activation,
 movie download resolver or other hosted migration, gateway rebuild, deployment,
 push, listener restart, rights decision, publication or Telegram transfer.
 Preserve the standing-approval pause and all existing gates.
+
+## Owner-authorized Money Heist Seasons 2-5 (2026-11-20)
+
+After a rescan of Velora_Series from post 25, the owner confirmed
+distribution/streaming rights for **Money Heist Seasons 2-5 (35 episodes: S2 x9,
+S3 x8, S4 x8, S5 x10; TMDB TV 71446), VJ Ice P**, and authorized publishing them
+in place, each only after its whole-file check passes ("Rights confirmed;
+publish"). The files are Velora_Series posts 25-59, each bound to its post,
+Telegram file unique id and size in
+`.velora-ingest/series-money-heist-s2-s5-20261120/owner-authorization.json`; the
+full SHA-256 is the hosted whole-file evidence digest, recorded at publication.
+
+This permits recording these 35 posts as series media, their whole-file
+verification by the dedicated reader, and owner-path publication of exactly these
+35 episode versions through `.velora-ingest/series-seasons-workflow.mjs`. It
+grants no Telegram upload or transfer, other title or episode, hosted migration,
+remote deployment, listener restart or contained-batch reactivation. Posts 60-69
+("Heros", identity not on TMDB) go to review only; their rights are not
+confirmed. Keep `.velora-ingest/standing-approval.pause` and the quarantined
+guards; stop an episode if any gate fails or its bound source changes.
+
+On 2026-11-20, the owner also approved applying only
+`20261120191536_series_review_queue.sql` to hosted ("Approve this migration"),
+after an encrypted snapshot-consistent backup and a successful restore rehearsal
+against the actual hosted schema. It adds the series review queue: reviewers
+enter series details by hand when TMDB has no record, assign Series-channel files
+to seasons and episodes, record the rights decision and publish, each step behind
+its own reviewer capability and the existing whole-file media gate. Posts 60-69
+("Heros") are registered for this queue only; no rights decision is recorded for
+them. This grants no other hosted migration, deployment, push, listener restart
+or Telegram transfer.
+
+On 2026-11-21 the owner decided how to number Money Heist: keep the files'
+Netflix numbering (five seasons: 13, 9, 8, 8, 10) and correct the episode details,
+because TMDB 71446 follows the Spanish broadcast (15, 16, 10). Seasons 3-5 take
+TMDB S2 E1-8, S2 E9-16 and S3; Seasons 1-2 have no TMDB episode and are plain
+"Episode N". The already published rows were corrected in one owner data
+transaction (no migration), and the workflow now requires an owner numbering map
+whenever a season's episode count differs from TMDB's. S2E5 has no TMDB episode,
+so it is published through the admin series review queue.

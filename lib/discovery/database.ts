@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { manualMovieMetadataSchema, type ManualMovieMetadata } from "@/lib/movie-metadata";
+import { manualSeriesMetadataSchema, seriesChoiceSchema, seriesReviewItemSchema, seriesReviewQueueSchema, type ManualSeriesMetadata } from "@/lib/series-review";
 import { parseAdminCatalogueFilters, type AdminCatalogueFilters } from "@/lib/browse";
 import { z } from "zod";
 import { detectDocument, newCandidate } from "@/lib/discovery/events";
@@ -468,6 +469,27 @@ export function createReviewClient(rpc: DiscoveryRpc) {
     async manualMovies() {
       try { return z.array(z.object({id:z.number().int().positive(),title:z.string(),year:z.number().int().nullable()})).max(200).parse(await call(rpc,"catalogue_admin_manual_movies",{})); }
       catch (error) { if (error instanceof DiscoveryStoreError && error.code === "command_unavailable") return null; throw error; }
+    },
+    /** The series review queue (migration 20261120191536). Null: the database does not have it yet. */
+    async seriesQueue() {
+      try { return seriesReviewQueueSchema.parse(await call(rpc, "series_review_queue", {})); }
+      catch (error) { if (error instanceof DiscoveryStoreError && error.code === "command_unavailable") return null; throw error; }
+    },
+    /** Creates (id null) or edits a manually entered series. */
+    async saveSeries(id: number | null, updatedAt: string | null, metadata: ManualSeriesMetadata) {
+      return seriesChoiceSchema.parse(await call(rpc, "series_review_save_series", { p_series_id: id, p_updated_at: updatedAt, p_metadata: manualSeriesMetadataSchema.parse(metadata) }));
+    },
+    async assignEpisode(mediaId: number, revision: number, assignment: { seriesId: number; season: number; episode: number; title: string | null; overview: string | null; vjId: number } | null) {
+      return seriesReviewItemSchema.parse(await call(rpc, "series_review_assign", {
+        p_media_id: mediaId, p_revision: revision, p_series_id: assignment?.seriesId ?? null, p_season_number: assignment?.season ?? null,
+        p_episode_number: assignment?.episode ?? null, p_episode_title: assignment?.title ?? null, p_episode_overview: assignment?.overview ?? null, p_vj_id: assignment?.vjId ?? null,
+      }));
+    },
+    async episodeRights(mediaId: number, revision: number, cleared: boolean) {
+      return seriesReviewItemSchema.parse(await call(rpc, "series_review_rights", { p_media_id: mediaId, p_revision: revision, p_cleared: cleared }));
+    },
+    async publishEpisode(mediaId: number, revision: number) {
+      return seriesReviewItemSchema.extend({ series_slug: z.string() }).parse(await call(rpc, "series_review_publish", { p_media_id: mediaId, p_revision: revision }));
     },
     async saveMovieMetadata(id: number, updatedAt: string, metadata: ManualMovieMetadata) {
       return movieMetadataRecord.parse(await call(rpc,"catalogue_admin_save_metadata",{p_id:id,p_updated_at:updatedAt,p_metadata:manualMovieMetadataSchema.parse(metadata)}));

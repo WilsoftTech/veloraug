@@ -3,6 +3,7 @@ import { NavLink } from "@/components/nav-link";
 const SECTIONS = [
   { href: "/admin", label: "Overview", exact: true },
   { href: "/admin/discovery", label: "Review queue" },
+  { href: "/admin/series", label: "Series" },
   { href: "/admin/catalogue", label: "Catalogue" },
   ...(process.env.VELORA_ADMIN_UPLOADS_ENABLED === "true" ? [{ href: "/admin/uploads", label: "Uploads" }] : []),
 ];
